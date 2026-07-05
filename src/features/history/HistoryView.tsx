@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   deleteExperiment,
   EXPERIMENT_MODES,
+  exportExperiment,
+  type ExportFormat,
+  generateReport,
   getExperimentDetail,
   getExperimentSamples,
   listExperiments,
@@ -33,6 +36,7 @@ export function HistoryView() {
   const [detail, setDetail] = useState<ExperimentDetail | null>(null);
   const [samples, setSamples] = useState<SampleDto[]>([]);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [busy, setBusy] = useState(false);
   const push = useToasts((s) => s.push);
 
   useEffect(() => {
@@ -81,6 +85,18 @@ export function HistoryView() {
       toastError(e);
     } finally {
       setConfirmDel(false);
+    }
+  };
+
+  const doExport = async (fn: () => Promise<string | void>, label: string) => {
+    setBusy(true);
+    try {
+      const path = await fn();
+      push(typeof path === "string" ? `${label}已生成：${path}` : `${label}已导出`, "info");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -159,6 +175,37 @@ export function HistoryView() {
                 <Meta label="结束时间" value={fmtTime(detail.end_time)} />
                 <Meta label="采样点数" value={String(detail.sample_count)} />
                 <Meta label="备注" value={detail.description ?? "—"} />
+              </div>
+              <div
+                className="flex gap-2 mt-4 pt-3"
+                style={{ borderTop: "1px solid var(--border)" }}
+              >
+                <button
+                  disabled={busy}
+                  onClick={() => doExport(() => generateReport(detail.experiment_id), "报告")}
+                  className="px-3 py-1.5 rounded text-[12px] font-medium"
+                  style={{ background: "var(--heat)", color: "#1a0f06", opacity: busy ? 0.6 : 1 }}
+                >
+                  生成报告
+                </button>
+                {(["csv", "txt", "xlsx"] as ExportFormat[]).map((fmt) => (
+                  <button
+                    key={fmt}
+                    disabled={busy}
+                    onClick={() =>
+                      doExport(() => exportExperiment(detail.experiment_id, fmt), fmt.toUpperCase())
+                    }
+                    className="px-3 py-1.5 rounded text-[12px]"
+                    style={{
+                      background: "var(--panel-2)",
+                      border: "1px solid var(--border-bright)",
+                      color: "var(--fg)",
+                      opacity: busy ? 0.6 : 1,
+                    }}
+                  >
+                    导出 {fmt.toUpperCase()}
+                  </button>
+                ))}
               </div>
             </div>
 

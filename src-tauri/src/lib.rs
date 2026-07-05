@@ -4,11 +4,13 @@
 //! the furnace through its program stages, applies each stage's atmosphere through the
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
@@ -43,6 +45,8 @@ struct AppState {
     exp: Arc<ExpControl>,
     /// Simulated-seconds advanced per real second (mock time acceleration; 1.0 = real).
     sim_speed: f64,
+    /// Directory reports and data exports are written to.
+    exports_dir: PathBuf,
 }
 
 /// Shared control block for the single running experiment. `status` is the published
@@ -148,6 +152,16 @@ fn phase_str(p: Phase) -> &'static str {
     }
 }
 
+/// Stage kind → sample status tag (lets the report isolate the reduction stage).
+fn kind_str(k: StageKind) -> &'static str {
+    match k {
+        StageKind::Heating => "HEATING",
+        StageKind::Stabilizing => "STABILIZING",
+        StageKind::Reducing => "REDUCING",
+        StageKind::Cooling => "COOLING",
+    }
+}
+
 /// Simulated-time acceleration: `TMH_SIM_SPEED` if set, else fast for mock, real (1.0)
 /// for hardware. Mock runs at 180× so a multi-hour program plays out in a few minutes.
 fn sim_speed(mode: &str) -> f64 {
@@ -195,8 +209,8 @@ fn apply_safety_atmosphere(hub: &DeviceHub) {
     hub.set_temp_target_c(25.0);
 }
 
-/// Snapshot one sample row from live telemetry.
-fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, phase: Phase) -> SampleRow {
+/// Snapshot one sample row from live telemetry. `status` tags the stage (e.g. REDUCING).
+fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, status: &str) -> SampleRow {
     let temperature = hub.temp_rx().borrow().temps[7].unwrap_or(0.0);
     let gas = hub.mfc_rx().borrow().gas;
     let weight = hub.balance_rx().borrow().weight.unwrap_or(w0);
@@ -211,7 +225,7 @@ fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, phase: Phase) 
         co2_flow: gas[GAS_CO2].sv,
         n2_flow: gas[GAS_N2].sv,
         h2_flow: gas[GAS_H2].sv,
-        experiment_status: Some(phase_str(phase).to_string()),
+        experiment_status: Some(status.to_string()),
         system_message: None,
     }
 }
@@ -371,12 +385,16 @@ fn spawn_experiment_task(
                 }
             }
 
+            let status = engine
+                .current_stage()
+                .map(|s| kind_str(s.kind))
+                .unwrap_or_else(|| phase_str(engine.phase()));
             buffer.push(build_sample(
                 &hub,
                 &id,
                 w0,
                 engine.total_elapsed_s(),
-                engine.phase(),
+                status,
             ));
             ticks_since_flush += 1;
             if ticks_since_flush >= FLUSH_EVERY_TICKS {
@@ -1026,6 +1044,92 @@ fn analyze_gb13240(
     Ok(value)
 }
 
+// ---- Report & export --------------------------------------------------------
+
+/// The reducing-stage target temperature for a mode (for report condition checks).
+fn reducing_target(mode: Option<&str>) -> Option<f64> {
+    mode.and_then(standard_program).and_then(|p| {
+        p.stages
+            .into_iter()
+            .find(|s| s.kind == StageKind::Reducing)
+            .map(|s| s.target_temp)
+    })
+}
+
+/// Generate a self-contained HTML report to the exports dir and open it. Returns the path.
+#[tauri::command]
+fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let (exp, samples) = {
+        let s = st.storage.lock().unwrap();
+        let exp = s
+            .get_experiment(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or("实验不存在")?;
+        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
+        (exp, samples)
+    };
+    let analysis = exp
+        .analysis_results_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+    let html = tmh_core::report::render_report_html(
+        &exp,
+        &samples,
+        analysis.as_ref(),
+        reducing_target(exp.experiment_type.as_deref()),
+    );
+    let path = st.exports_dir.join(format!("report-{id}.html"));
+    std::fs::write(&path, html).map_err(|e| e.to_string())?;
+    let p = path.to_string_lossy().to_string();
+    let _ = app.opener().open_path(p.clone(), None::<&str>);
+    st.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "generate_report",
+            AuditResult::Success,
+        )
+        .detail(serde_json::json!({ "id": id, "path": p })),
+    );
+    Ok(p)
+}
+
+/// Export the sample series as csv / txt / xlsx to the exports dir and open it.
+#[tauri::command]
+fn export_experiment(app: AppHandle, id: String, format: String) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let (exp, samples) = {
+        let s = st.storage.lock().unwrap();
+        let exp = s
+            .get_experiment(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or("实验不存在")?;
+        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
+        (exp, samples)
+    };
+    let (bytes, ext) = match format.as_str() {
+        "csv" => (
+            tmh_core::report::samples_to_csv(&samples).into_bytes(),
+            "csv",
+        ),
+        "txt" => (
+            tmh_core::report::samples_to_tsv(&samples).into_bytes(),
+            "txt",
+        ),
+        "xlsx" => (tmh_core::report::samples_to_xlsx(&exp, &samples)?, "xlsx"),
+        _ => return Err("未知导出格式".into()),
+    };
+    let path = st.exports_dir.join(format!("{id}.{ext}"));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let p = path.to_string_lossy().to_string();
+    let _ = app.opener().open_path(p.clone(), None::<&str>);
+    st.audit.write(
+        &AuditEntry::new(Category::Experiment, "export", AuditResult::Success)
+            .detail(serde_json::json!({ "id": id, "format": format, "path": p })),
+    );
+    Ok(p)
+}
+
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Build and run the Tauri application.
@@ -1035,8 +1139,10 @@ pub fn run() {
     let data_root = std::env::temp_dir().join("tmh-lpf-900");
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
+    let exports_dir = data_root.join("exports");
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
+    let _ = std::fs::create_dir_all(&exports_dir);
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let hub = Arc::new(build_mock_hub());
     let audit = Arc::new(AuditLog::new(audit_dir));
@@ -1053,6 +1159,7 @@ pub fn run() {
         storage: Arc::new(Mutex::new(storage)),
         exp: Arc::new(ExpControl::new()),
         sim_speed,
+        exports_dir,
     };
 
     tauri::Builder::default()
@@ -1068,6 +1175,7 @@ pub fn run() {
                 AuditResult::Rejected,
             ));
         }))
+        .plugin(tauri_plugin_opener::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -1092,7 +1200,9 @@ pub fn run() {
             delete_experiment,
             analyze_gb13241,
             analyze_gb13242,
-            analyze_gb13240
+            analyze_gb13240,
+            generate_report,
+            export_experiment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -21,10 +21,12 @@ import {
   mockAnalyze13241,
   mockAnalyze13242,
   mockDeleteExperiment,
+  mockExportText,
   mockGetExperimentDetail,
   mockGetExperimentSamples,
   mockListExperiments,
   mockListPrograms,
+  mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
   mockShutoff,
@@ -150,6 +152,38 @@ export async function analyzeGb13240(
   return isTauri()
     ? invoke("analyze_gb13240", { id, volumes })
     : mockAnalyze13240(id, volumes);
+}
+
+export type ExportFormat = "csv" | "txt" | "xlsx";
+
+function downloadBlob(content: BlobPart, filename: string, mime: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Generate the HTML report. Tauri writes+opens a file (returns path); web opens a tab. */
+export async function generateReport(id: string): Promise<string | void> {
+  if (isTauri()) return invoke<string>("generate_report", { id });
+  const w = window.open("", "_blank");
+  if (w) {
+    w.document.write(mockReportHtml(id));
+    w.document.close();
+  } else {
+    downloadBlob(mockReportHtml(id), `report-${id}.html`, "text/html");
+  }
+}
+
+/** Export the sample series. Tauri writes+opens a file; web downloads (xlsx→csv). */
+export async function exportExperiment(id: string, format: ExportFormat): Promise<string | void> {
+  if (isTauri()) return invoke<string>("export_experiment", { id, format });
+  // Browser mock can't build a real .xlsx — fall back to CSV (Excel-openable).
+  const sep = format === "txt" ? "\t" : ",";
+  const ext = format === "txt" ? "txt" : "csv";
+  downloadBlob(mockExportText(id, sep), `${id}.${ext}`, "text/plain;charset=utf-8");
 }
 
 export function subscribeExperimentState(cb: (s: ExperimentState) => void): () => void {

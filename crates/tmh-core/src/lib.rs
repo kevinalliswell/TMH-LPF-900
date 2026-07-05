@@ -10,6 +10,7 @@ pub mod config;
 pub mod engine;
 pub mod gb;
 pub mod health;
+pub mod report;
 pub mod sampler;
 pub mod storage;
 pub mod telemetry;

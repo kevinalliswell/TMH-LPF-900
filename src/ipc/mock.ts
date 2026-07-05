@@ -450,6 +450,69 @@ export function mockDeleteExperiment(id: string): void {
   history.delete(id);
 }
 
+// ---- export / report (browser fallbacks; Tauri writes files in Rust) ----
+const CSV_COLUMNS = [
+  "时间",
+  "实验时长",
+  "温度(℃)",
+  "质量(g)",
+  "失重(g)",
+  "CO(L/min)",
+  "CO2(L/min)",
+  "N2(L/min)",
+  "H2(L/min)",
+  "状态",
+];
+
+export function mockExportText(id: string, sep: string): string {
+  const h = history.get(id);
+  if (!h) throw new Error("实验不存在");
+  const rows = h.samples.map((s) =>
+    [
+      s.timestamp,
+      s.experiment_duration ?? "",
+      s.temperature.toFixed(1),
+      s.weight.toFixed(3),
+      s.weight_loss.toFixed(3),
+      s.co_flow.toFixed(2),
+      s.co2_flow.toFixed(2),
+      s.n2_flow.toFixed(2),
+      s.h2_flow.toFixed(2),
+      s.experiment_status ?? "",
+    ].join(sep),
+  );
+  return "﻿" + [CSV_COLUMNS.join(sep), ...rows].join("\r\n") + "\r\n";
+}
+
+export function mockReportHtml(id: string): string {
+  const h = history.get(id);
+  if (!h) throw new Error("实验不存在");
+  const d = h.detail;
+  const a = (d.analysis ?? null) as Record<string, unknown> | null;
+  const meta = [
+    ["实验编号", d.experiment_id],
+    ["样品名称", d.sample_name],
+    ["实验类型", d.experiment_type ?? "—"],
+    ["操作员", d.operator ?? "—"],
+    ["样品重量", `${d.sample_weight} g`],
+    ["开始时间", d.start_time],
+    ["结束时间", d.end_time ?? "—"],
+    ["采样点数", String(h.samples.length)],
+  ]
+    .map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`)
+    .join("");
+  const analysis = a
+    ? `<pre>${JSON.stringify(a, null, 2)}</pre>`
+    : '<p style="color:#999">尚未进行结果分析。</p>';
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>检测报告 ${d.experiment_id}</title>\
+<style>body{font-family:'Microsoft YaHei',system-ui,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;color:#1a1a1a}\
+h1{font-size:20px}h2{font-size:14px;border-bottom:2px solid #d9631f;padding-bottom:4px;margin-top:24px}\
+table{border-collapse:collapse}th,td{border:1px solid #e2e2e2;padding:5px 10px;text-align:left}th{background:#f6f6f6}\
+pre{background:#f6f6f6;padding:10px;border-radius:4px;font-size:12px}</style></head><body>\
+<h1>铁矿石冶金性能检测报告</h1><div style="color:#666;font-size:12px">TMH-LPF-900 · 北京科技大学（浏览器预览）</div>\
+<h2>实验信息</h2><table>${meta}</table><h2>结果分析</h2>${analysis}</body></html>`;
+}
+
 // ---- GB analyses (mirror tmh_core::gb) ----
 function parseHmsMin(s?: string | null): number | null {
   if (!s) return null;
