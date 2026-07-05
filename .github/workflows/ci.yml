@@ -69,6 +69,11 @@ jobs:
       - name: Compile serial feature (skeleton, not hardware-tested)
         run: cargo build -p tmh-core --features serial
 
+      - name: Headless soak (replay dirty session + short mock)
+        run: |
+          cargo run -p tmh-core --example soak -- --replay fixtures/dirty-session.jsonl
+          cargo run -p tmh-core --example soak -- --minutes 5
+
       - name: Version consistency
         run: node scripts/sync-version.mjs --check
 

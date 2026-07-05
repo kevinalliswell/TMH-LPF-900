@@ -8,7 +8,9 @@ pub mod bus;
 pub mod clamp;
 pub mod config;
 pub mod health;
+pub mod sampler;
 pub mod storage;
+pub mod telemetry;
 pub mod transport;
 
 use thiserror::Error;

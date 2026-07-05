@@ -22,6 +22,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
   offline, [1,2,5,10,30]s backoff, staleness), and temperature/MFC/balance actors
   (clamp integration, set-preempts-poll priority, tare sequence). Deterministic unit
   tests against MockTransport.
+- `tmh-core` telemetry/sampler/soak (M2 slice 4): 0.2s telemetry aggregation; 1 Hz
+  sampler (balance-offline rows written with weight=0 + annotation, never dropped);
+  `examples/soak` headless fast-forward of the full pipeline (actors → aggregate →
+  sample → rusqlite) plus dirty-session replay, wired into CI. M2 core complete.
 
 ## [0.1.0] - 2026-07-05
 
