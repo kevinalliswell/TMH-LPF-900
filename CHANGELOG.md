@@ -6,6 +6,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `tmh-protocols`: byte-exact codecs for the three device protocols (Modbus-RTU
+  temperature, Azbil CPL MFC, RS232 balance), verified against all 26 golden
+  vectors, with echo-skip / frame-tail / tare-branch edge tests and proptest
+  fuzzing. Line coverage 99%. Runtime deps stay crc-only.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
