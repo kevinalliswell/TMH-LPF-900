@@ -7,6 +7,8 @@ pub mod audit;
 pub mod bus;
 pub mod clamp;
 pub mod config;
+pub mod engine;
+pub mod gb;
 pub mod health;
 pub mod sampler;
 pub mod storage;
