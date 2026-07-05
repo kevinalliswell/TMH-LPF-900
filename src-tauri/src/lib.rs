@@ -729,6 +729,157 @@ fn skip_stage(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ---- History query ----------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct ExperimentSummary {
+    experiment_id: String,
+    experiment_name: String,
+    sample_name: String,
+    sample_weight: f64,
+    start_time: String,
+    end_time: Option<String>,
+    operator: Option<String>,
+    experiment_type: Option<String>,
+    has_analysis: bool,
+}
+
+fn summary_of(r: ExperimentRow) -> ExperimentSummary {
+    ExperimentSummary {
+        has_analysis: r.analysis_results_json.is_some(),
+        experiment_id: r.experiment_id,
+        experiment_name: r.experiment_name,
+        sample_name: r.sample_name,
+        sample_weight: r.sample_weight,
+        start_time: r.start_time,
+        end_time: r.end_time,
+        operator: r.operator,
+        experiment_type: r.experiment_type,
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ExperimentDetail {
+    experiment_id: String,
+    experiment_name: String,
+    sample_name: String,
+    sample_weight: f64,
+    start_time: String,
+    end_time: Option<String>,
+    description: Option<String>,
+    operator: Option<String>,
+    experiment_type: Option<String>,
+    analysis: Option<serde_json::Value>,
+    created_at: String,
+    sample_count: i64,
+}
+
+fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
+    let analysis = r
+        .analysis_results_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    ExperimentDetail {
+        experiment_id: r.experiment_id,
+        experiment_name: r.experiment_name,
+        sample_name: r.sample_name,
+        sample_weight: r.sample_weight,
+        start_time: r.start_time,
+        end_time: r.end_time,
+        description: r.description,
+        operator: r.operator,
+        experiment_type: r.experiment_type,
+        analysis,
+        created_at: r.created_at,
+        sample_count,
+    }
+}
+
+#[derive(serde::Serialize)]
+struct SampleDto {
+    timestamp: String,
+    experiment_duration: Option<String>,
+    temperature: f64,
+    weight: f64,
+    weight_loss: f64,
+    co_flow: f64,
+    co2_flow: f64,
+    n2_flow: f64,
+    h2_flow: f64,
+    experiment_status: Option<String>,
+}
+
+fn sample_dto(r: SampleRow) -> SampleDto {
+    SampleDto {
+        timestamp: r.timestamp,
+        experiment_duration: r.experiment_duration,
+        temperature: r.temperature,
+        weight: r.weight,
+        weight_loss: r.weight_loss,
+        co_flow: r.co_flow,
+        co2_flow: r.co2_flow,
+        n2_flow: r.n2_flow,
+        h2_flow: r.h2_flow,
+        experiment_status: r.experiment_status,
+    }
+}
+
+#[tauri::command]
+fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, String> {
+    let rows = state
+        .storage
+        .lock()
+        .unwrap()
+        .list_experiments()
+        .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(summary_of).collect())
+}
+
+#[tauri::command]
+fn get_experiment_detail(state: State<AppState>, id: String) -> Result<ExperimentDetail, String> {
+    let s = state.storage.lock().unwrap();
+    let row = s
+        .get_experiment(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("实验不存在")?;
+    let count = s.count_samples(&id).map_err(|e| e.to_string())?;
+    Ok(detail_of(row, count))
+}
+
+#[tauri::command]
+fn get_experiment_samples(
+    state: State<AppState>,
+    id: String,
+    max_points: Option<usize>,
+) -> Result<Vec<SampleDto>, String> {
+    let rows = state
+        .storage
+        .lock()
+        .unwrap()
+        .get_samples(&id, max_points.unwrap_or(2000))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(sample_dto).collect())
+}
+
+#[tauri::command]
+fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
+    // Never delete the run currently in progress.
+    if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
+        return Err("无法删除正在运行的实验".into());
+    }
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .delete_experiment(&id)
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(Category::Experiment, "delete", AuditResult::Success)
+            .detail(serde_json::json!({ "id": id })),
+    );
+    Ok(())
+}
+
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Build and run the Tauri application.
@@ -787,7 +938,11 @@ pub fn run() {
             get_experiment_state,
             start_experiment,
             stop_experiment,
-            skip_stage
+            skip_stage,
+            list_experiments,
+            get_experiment_detail,
+            get_experiment_samples,
+            delete_experiment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
