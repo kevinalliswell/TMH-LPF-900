@@ -1,0 +1,25 @@
+#![forbid(unsafe_code)]
+//! Core control-plane logic for TMH-LPF-900: bus actors, safety clamp, sampler,
+//! storage, audit, experiment engine. MUST compile and run headless — no Tauri,
+//! no webview dependency ever. M0: typed-error skeleton only.
+
+use thiserror::Error;
+
+/// Top-level error type for the core crate. Variants grow each milestone.
+#[derive(Debug, Error)]
+pub enum CoreError {
+    /// A device bus is offline or unreachable.
+    #[error("device offline: {0}")]
+    DeviceOffline(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_offline_error_message_is_stable() {
+        let err = CoreError::DeviceOffline("temp".to_string());
+        assert_eq!(err.to_string(), "device offline: temp");
+    }
+}

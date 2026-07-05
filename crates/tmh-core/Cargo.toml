@@ -1,0 +1,10 @@
+[package]
+name = "tmh-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core control plane: bus actors, safety clamp, sampler, storage, audit, engine. Headless, no Tauri."
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "tmh-protocols"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure frame codecs for TMH-LPF-900 lab devices (zero I/O)."
+
+[dependencies]
+crc.workspace = true
