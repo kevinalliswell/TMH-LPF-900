@@ -47,4 +47,8 @@ pub trait Transport: Send {
     fn reset_buffers(&mut self) -> Result<(), BusError>;
     /// Close and reopen the underlying handle (reconnect / watchdog recovery).
     fn reopen(&mut self) -> Result<(), BusError>;
+
+    /// Optional out-of-band hint (e.g. a mock's temperature target so the synthetic
+    /// furnace follows an experiment program). No-op by default; real transports ignore it.
+    fn set_hint(&mut self, _key: &str, _value: f64) {}
 }

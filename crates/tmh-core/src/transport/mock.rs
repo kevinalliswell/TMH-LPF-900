@@ -230,6 +230,14 @@ impl Transport for MockTransport {
         self.disconnected = false;
         Ok(())
     }
+
+    fn set_hint(&mut self, key: &str, value: f64) {
+        if key == "temp_target_raw" {
+            if let MockState::Temp { target, .. } = &mut self.state {
+                *target = [value.clamp(0.0, u16::MAX as f64) as u16; 9];
+            }
+        }
+    }
 }
 
 fn step_toward(cur: u16, target: u16) -> u16 {

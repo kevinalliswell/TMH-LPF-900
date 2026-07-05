@@ -68,6 +68,12 @@ impl TempActor {
         self.transport.reopen().is_ok()
     }
 
+    /// Set the target temperature (°C) — only affects a mock transport, so the
+    /// synthetic furnace follows an experiment program.
+    pub fn set_target_c(&mut self, c: f64) {
+        self.transport.set_hint("temp_target_raw", c / self.scale);
+    }
+
     pub fn snapshot(&self) -> TempSnapshot {
         TempSnapshot {
             temps: self.temps,
@@ -114,6 +120,26 @@ mod tests {
             a2.poll_once(Instant::now(), Duration::from_millis(10));
         }
         assert!(!a2.snapshot().connected);
+    }
+
+    #[test]
+    fn set_target_c_makes_mock_follow_program() {
+        // Mock starts at 25.0 °C. Drive it to 500 °C via the actor seam.
+        let mut a = TempActor::new(Box::new(MockTransport::temp()), 0, 0.1, false);
+        a.set_target_c(500.0);
+        for _ in 0..100 {
+            a.poll_once(Instant::now(), Duration::from_millis(10));
+        }
+        let hot = a.snapshot().temps[7].expect("channel read");
+        assert!(hot > 495.0, "furnace should approach 500 °C, got {hot}");
+
+        // Cooling: drop the target and confirm it descends.
+        a.set_target_c(100.0);
+        for _ in 0..100 {
+            a.poll_once(Instant::now(), Duration::from_millis(10));
+        }
+        let cool = a.snapshot().temps[7].expect("channel read");
+        assert!(cool < 105.0, "furnace should cool toward 100 °C, got {cool}");
     }
 
     #[test]

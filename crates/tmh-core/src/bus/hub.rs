@@ -60,6 +60,7 @@ pub struct DeviceHub {
     balance_rx: watch::Receiver<BalanceSnapshot>,
     mfc_tx: mpsc::UnboundedSender<MfcReq>,
     bal_tx: mpsc::UnboundedSender<BalReq>,
+    temp_target_tx: mpsc::UnboundedSender<f64>,
 }
 
 impl DeviceHub {
@@ -71,6 +72,7 @@ impl DeviceHub {
         let (bal_snap_tx, balance_rx) = watch::channel(balance.snapshot());
         let (mfc_tx, mfc_cmd_rx) = mpsc::unbounded_channel::<MfcReq>();
         let (bal_tx, bal_cmd_rx) = mpsc::unbounded_channel::<BalReq>();
+        let (temp_target_tx, temp_target_rx) = mpsc::unbounded_channel::<f64>();
         let mut handles = Vec::new();
 
         // Temperature: poll all 9 registers each tick.
@@ -78,7 +80,11 @@ impl DeviceHub {
             let stop = stop.clone();
             handles.push(thread::spawn(move || {
                 let mut temp = temp;
+                let mut tt_rx = temp_target_rx;
                 while !stop.load(Ordering::Relaxed) {
+                    while let Ok(c) = tt_rx.try_recv() {
+                        temp.set_target_c(c);
+                    }
                     temp.poll_once(Instant::now(), Duration::from_millis(100));
                     let _ = temp_tx.send(temp.snapshot());
                     if !temp.snapshot().connected {
@@ -148,6 +154,7 @@ impl DeviceHub {
             balance_rx,
             mfc_tx,
             bal_tx,
+            temp_target_tx,
         }
     }
 
@@ -179,6 +186,11 @@ impl DeviceHub {
         let (reply, rx) = oneshot::channel();
         let _ = self.bal_tx.send(BalReq::Tare { reply });
         rx
+    }
+
+    /// Set the mock furnace target temperature (°C) so it follows an experiment program.
+    pub fn set_temp_target_c(&self, c: f64) {
+        let _ = self.temp_target_tx.send(c);
     }
 
     pub fn stop(&self) {
