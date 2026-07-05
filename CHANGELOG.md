@@ -36,6 +36,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
   temperature curve (ring buffer, monotonic axis), device-dot status bar. Start/stop
   experiment dialog (M3 manual atmosphere; safety atmosphere N₂=5/flammables=0 on stop),
   error-code→Chinese toast, disconnect greying. Browser mock via `isTauri()` for dev.
+- **M4 实验引擎 + 国标分析 + 报告导出**: `tmh-core::gb` national-standard formulas
+  (GB/T 13241 reducibility Rt + reduction-rate index, 13242 RDI, 13240 free-swelling),
+  golden-tested (Rt 100/85/30 → 50.0). `tmh-core::engine` phase state machine, the three
+  GB program tables, and stage-advancement rules (holds need temp+duration; cooling at
+  T≤target+5). The live engine runs as a per-run tick task in src-tauri: reads T8, ticks
+  the engine (sim-time accelerated ~180× in mock), applies each stage's atmosphere through
+  the safety clamp, drives the mock furnace/balance (reduction loses mass), buffers samples
+  to SQLite, and applies the safety atmosphere on EVERY exit — completion, operator stop,
+  and startup crash recovery (any run left open). Commands: skip_stage, list_programs,
+  list/detail/samples (decimated)/delete, analyze_gb1324{0,1,2} (persist analysis JSON),
+  generate_report / export_experiment. `tmh-core::report`: CSV/TSV (BOM, Excel-ready),
+  XLSX (rust_xlsxwriter), and a self-contained printable HTML report with metadata, GB
+  result table, reduction-stage condition checks, and an inline SVG temp/mass chart;
+  written to exports/ and opened via tauri-plugin-opener. Frontend: sidebar navigation
+  across seven pages — dashboard, 综合控制 (now with a live stage stepper + skip),
+  实验模式 (program tables), 历史查询 (list + replay chart + GB analysis forms + report/
+  export + delete), 通讯设置, 帮助, 关于. Browser mock runs the full stage engine with a
+  seeded in-memory history so `pnpm dev:web` is a faithful end-to-end demo.
 
 ## [0.1.0] - 2026-07-05
 
