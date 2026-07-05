@@ -6,5 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 description = "Core control plane: bus actors, safety clamp, sampler, storage, audit, engine. Headless, no Tauri."
 
+[features]
+# Real serial transport (serialport + libudev on Linux). Off by default so the
+# headless mock/replay build and CI stay lean; enabled for hardware bring-up.
+serial = ["dep:serialport"]
+
 [dependencies]
 thiserror.workspace = true
+tmh-protocols = { path = "../tmh-protocols" }
+serde = { workspace = true }
+serde_json.workspace = true
+serialport = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 //! Core control-plane logic for TMH-LPF-900: bus actors, safety clamp, sampler,
 //! storage, audit, experiment engine. MUST compile and run headless — no Tauri,
-//! no webview dependency ever. M0: typed-error skeleton only.
+//! no webview dependency ever.
+
+pub mod transport;
 
 use thiserror::Error;
 
