@@ -59,14 +59,23 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
-      - name: Build bundles & draft release
+      # Windows Authenticode signing is OPTIONAL and requires a real certificate
+      # (Azure Trusted Signing or an OV/EV cert + cloud HSM — docs/09 §9.2). To enable,
+      # set bundle.windows.signCommand/certificateThumbprint in tauri.conf.json and
+      # provide the cert to the runner. Without it the NSIS installer is unsigned
+      # (SmartScreen shows "unknown publisher"); everything else still works.
+      - name: Build bundles, sign updater artifacts & draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri updater minisign signing (docs/09 §9.2). Required by
+          # createUpdaterArtifacts; generates the .sig files + latest.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev.{0}', github.run_number) }}
           releaseName: TMH-LPF-900 ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}
-          releaseBody: "Unsigned build. See CHANGELOG.md. Signing/updater land in M5."
+          releaseBody: "See CHANGELOG.md. NSIS offline installer + signed updater artifacts (latest.json). Windows Authenticode signing requires a certificate — see docs/09."
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

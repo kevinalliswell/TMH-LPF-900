@@ -54,6 +54,17 @@ versioning follows [Semantic Versioning](https://semver.org/).
   实验模式 (program tables), 历史查询 (list + replay chart + GB analysis forms + report/
   export + delete), 通讯设置, 帮助, 关于. Browser mock runs the full stage engine with a
   seeded in-memory history so `pnpm dev:web` is a faithful end-to-end demo.
+- **M5 打包发布 + 软件更新**: NSIS offline installer (embedded WebView2, perMachine).
+  `tauri-plugin-updater` + `tauri-plugin-process` with a minisign-signed update channel
+  (public key baked into `tauri.conf.json`, `createUpdaterArtifacts` on). Update checking
+  is OFF by default (docs/09 §9.3), enabled via `TMH_UPDATER`; gated commands
+  get_updater_status / check_for_update / install_update audit + emit `update-status` and
+  turn an unreachable manifest endpoint into a friendly offline message. About page gains a
+  软件更新 card (version, on/off, check, download+install+restart). `TMH_DISABLE_GPU`
+  escape hatch for low-end integrated graphics. Release workflow signs updater artifacts +
+  `latest.json` (minisign private key in CI secret) and drafts NSIS + macOS bundles; tag
+  vs `package.json` version verified. Delivery doc docs/11 (release steps, secrets, update
+  endpoint hosting, Authenticode enablement, M5 acceptance checklist, field SOP).
 
 ## [0.1.0] - 2026-07-05
 
