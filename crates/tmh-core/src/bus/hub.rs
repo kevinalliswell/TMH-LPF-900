@@ -61,6 +61,7 @@ pub struct DeviceHub {
     mfc_tx: mpsc::UnboundedSender<MfcReq>,
     bal_tx: mpsc::UnboundedSender<BalReq>,
     temp_target_tx: mpsc::UnboundedSender<f64>,
+    bal_target_tx: mpsc::UnboundedSender<f64>,
 }
 
 impl DeviceHub {
@@ -73,6 +74,7 @@ impl DeviceHub {
         let (mfc_tx, mfc_cmd_rx) = mpsc::unbounded_channel::<MfcReq>();
         let (bal_tx, bal_cmd_rx) = mpsc::unbounded_channel::<BalReq>();
         let (temp_target_tx, temp_target_rx) = mpsc::unbounded_channel::<f64>();
+        let (bal_target_tx, bal_target_rx) = mpsc::unbounded_channel::<f64>();
         let mut handles = Vec::new();
 
         // Temperature: poll all 9 registers each tick.
@@ -131,7 +133,11 @@ impl DeviceHub {
             handles.push(thread::spawn(move || {
                 let mut balance = balance;
                 let mut cmd_rx = bal_cmd_rx;
+                let mut bt_rx = bal_target_rx;
                 while !stop.load(Ordering::Relaxed) {
+                    while let Ok(g) = bt_rx.try_recv() {
+                        balance.set_target_g(g);
+                    }
                     if let Ok(BalReq::Tare { reply }) = cmd_rx.try_recv() {
                         let _ = reply.send(balance.tare());
                     } else {
@@ -155,6 +161,7 @@ impl DeviceHub {
             mfc_tx,
             bal_tx,
             temp_target_tx,
+            bal_target_tx,
         }
     }
 
@@ -191,6 +198,11 @@ impl DeviceHub {
     /// Set the mock furnace target temperature (°C) so it follows an experiment program.
     pub fn set_temp_target_c(&self, c: f64) {
         let _ = self.temp_target_tx.send(c);
+    }
+
+    /// Set the mock balance drift target (g) so a reduction run loses mass. Mock-only.
+    pub fn set_balance_target_g(&self, g: f64) {
+        let _ = self.bal_target_tx.send(g);
     }
 
     pub fn stop(&self) {

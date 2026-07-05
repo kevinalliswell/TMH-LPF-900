@@ -77,6 +77,12 @@ impl BalanceActor {
         self.transport.reopen().is_ok()
     }
 
+    /// Set the balance drift target (grams) — only affects a mock transport, so a
+    /// reduction run visibly loses mass over its duration.
+    pub fn set_target_g(&mut self, g: f64) {
+        self.transport.set_hint("weight_target", g);
+    }
+
     pub fn snapshot(&self) -> BalanceSnapshot {
         BalanceSnapshot {
             weight: self.weight,
@@ -97,6 +103,22 @@ mod tests {
         a.poll_once(Instant::now(), Duration::from_millis(10));
         assert_eq!(a.snapshot().weight, Some(88.1));
         assert!(a.snapshot().connected);
+    }
+
+    #[test]
+    fn set_target_g_makes_weight_drift_down() {
+        let mut a = BalanceActor::new(Box::new(MockTransport::balance(100.0)));
+        a.poll_once(Instant::now(), Duration::from_millis(10));
+        assert_eq!(a.snapshot().weight, Some(100.0));
+        a.set_target_g(85.0); // e.g. a reduction removing ~15 g of oxygen
+        for _ in 0..60 {
+            a.poll_once(Instant::now(), Duration::from_millis(10));
+        }
+        let w = a.snapshot().weight.expect("weight");
+        assert!(
+            (85.0..86.0).contains(&w),
+            "weight should approach 85 g, got {w}"
+        );
     }
 
     #[test]

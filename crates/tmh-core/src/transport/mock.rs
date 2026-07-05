@@ -41,6 +41,7 @@ enum MockState {
     },
     Balance {
         weight: f64,
+        weight_target: f64,
         tare: TareOutcome,
         tare_reply: Option<Vec<u8>>,
     },
@@ -85,6 +86,7 @@ impl MockTransport {
             DeviceKind::Balance,
             MockState::Balance {
                 weight,
+                weight_target: weight,
                 tare: TareOutcome::A00,
                 tare_reply: None,
             },
@@ -127,10 +129,16 @@ impl MockTransport {
         }
     }
 
-    /// Set the balance weight (grams).
+    /// Set the balance weight (grams); pins the drift target so it stays put.
     pub fn set_weight(&mut self, w: f64) {
-        if let MockState::Balance { weight, .. } = &mut self.state {
+        if let MockState::Balance {
+            weight,
+            weight_target,
+            ..
+        } = &mut self.state
+        {
             *weight = w;
+            *weight_target = w;
         }
     }
 }
@@ -191,6 +199,7 @@ impl Transport for MockTransport {
             }
             MockState::Balance {
                 weight,
+                weight_target,
                 tare,
                 tare_reply,
             } => {
@@ -198,6 +207,7 @@ impl Transport for MockTransport {
                     *tare_reply = Some(tare_bytes(*tare));
                     if *tare != TareOutcome::Fail {
                         *weight = 0.0;
+                        *weight_target = 0.0;
                     }
                 }
                 Ok(Vec::new())
@@ -211,10 +221,19 @@ impl Transport for MockTransport {
         }
         match &mut self.state {
             MockState::Balance {
-                weight, tare_reply, ..
-            } => Ok(tare_reply
-                .take()
-                .unwrap_or_else(|| format!("{weight:+.3} G S\r\n").into_bytes())),
+                weight,
+                weight_target,
+                tare_reply,
+                ..
+            } => {
+                if let Some(reply) = tare_reply.take() {
+                    Ok(reply)
+                } else {
+                    // Drift toward the target so a reduction run loses mass over time.
+                    *weight += (*weight_target - *weight) / 8.0;
+                    Ok(format!("{weight:+.3} G S\r\n").into_bytes())
+                }
+            }
             _ => Err(BusError::Io("read_line only supported for balance".into())),
         }
     }
@@ -232,10 +251,18 @@ impl Transport for MockTransport {
     }
 
     fn set_hint(&mut self, key: &str, value: f64) {
-        if key == "temp_target_raw" {
-            if let MockState::Temp { target, .. } = &mut self.state {
-                *target = [value.clamp(0.0, u16::MAX as f64) as u16; 9];
+        match key {
+            "temp_target_raw" => {
+                if let MockState::Temp { target, .. } = &mut self.state {
+                    *target = [value.clamp(0.0, u16::MAX as f64) as u16; 9];
+                }
             }
+            "weight_target" => {
+                if let MockState::Balance { weight_target, .. } = &mut self.state {
+                    *weight_target = value.max(0.0);
+                }
+            }
+            _ => {}
         }
     }
 }
