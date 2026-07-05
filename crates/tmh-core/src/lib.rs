@@ -3,6 +3,8 @@
 //! storage, audit, experiment engine. MUST compile and run headless — no Tauri,
 //! no webview dependency ever.
 
+pub mod audit;
+pub mod config;
 pub mod transport;
 
 use thiserror::Error;

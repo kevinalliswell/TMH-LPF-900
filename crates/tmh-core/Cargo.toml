@@ -17,6 +17,7 @@ tmh-protocols = { path = "../tmh-protocols" }
 serde = { workspace = true }
 serde_json.workspace = true
 serialport = { workspace = true, optional = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true
