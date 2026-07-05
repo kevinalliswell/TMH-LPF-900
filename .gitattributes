@@ -1,0 +1,9 @@
+# Force LF line endings for all text files across platforms.
+# Prevents CRLF drift on Windows that breaks tooling (rustfmt, eslint) and the
+# version-sync --check, which re-serializes JSON with LF.
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.ico binary
+*.icns binary
