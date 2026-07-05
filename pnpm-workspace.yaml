@@ -1,0 +1,4 @@
+# pnpm build-script allowlist (pnpm 10+ moved this out of package.json).
+# Allow esbuild's postinstall so Vite/Vitest get their native binary.
+allowBuilds:
+  esbuild: true
