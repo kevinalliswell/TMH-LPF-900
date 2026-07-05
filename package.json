@@ -16,8 +16,10 @@
     "sync-version": "node scripts/sync-version.mjs"
   },
   "dependencies": {
+    "echarts": "^5",
     "react": "^19",
-    "react-dom": "^19"
+    "react-dom": "^19",
+    "zustand": "^5"
   },
   "devDependencies": {
     "@eslint/js": "^9",

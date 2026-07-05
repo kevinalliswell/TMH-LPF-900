@@ -1,8 +1,23 @@
 @import "tailwindcss";
 
 :root {
-  --color-bg: #0b0f14;
-  --color-fg: #e6edf3;
+  --bg: #0a0e13;
+  --panel: #10161e;
+  --panel-2: #131b25;
+  --border: #1d2733;
+  --border-bright: #2b3a4a;
+  --fg: #e6edf3;
+  --fg-dim: #8b98a5;
+  --fg-faint: #566171;
+  --heat: #ff8c42;
+  --gas: #38d6c4;
+  --ok: #3fb950;
+  --warn: #d6a419;
+  --err: #f85149;
+  --danger: #ff453a;
+  --accent: #4c9dff;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
+    Consolas, monospace;
 }
 
 html,
@@ -13,8 +28,50 @@ body,
 
 body {
   margin: 0;
-  background-color: var(--color-bg);
-  color: var(--color-fg);
+  background:
+    radial-gradient(1100px 520px at 72% -12%, #12212c 0%, transparent 62%),
+    var(--bg);
+  color: var(--fg);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
     "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.panel {
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.section-title {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  font-weight: 600;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
