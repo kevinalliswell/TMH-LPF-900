@@ -1,24 +1,35 @@
 //! Thin Tauri glue (docs/03). Owns the M2 `DeviceHub` in managed state, exposes it
 //! to the webview through typed commands + a telemetry Channel, and hardens the shell
-//! (single-instance). M3 runs the engine in manual-atmosphere mode only.
+//! (single-instance). M4 runs the real experiment engine: a per-run tick task drives
+//! the furnace through its program stages, applies each stage's atmosphere through the
+//! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
-use tmh_core::storage::{ExperimentRow, Storage};
+use tmh_core::engine::{
+    standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
+};
+use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
 
-/// Registered experiment modes (custom modes land in M4).
+/// Registered experiment modes (custom modes land in a later slice).
 const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
 /// Gas channel indices.
 const GAS_H2: usize = 0;
 const GAS_N2: usize = 1;
 const GAS_CO2: usize = 2;
 const GAS_CO: usize = 3;
+/// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
+const MOCK_REDUCTION_LOSS: f64 = 0.12;
+/// Flush buffered samples to SQLite every N ticks.
+const FLUSH_EVERY_TICKS: u32 = 5;
 
 /// Managed application state.
 struct AppState {
@@ -26,19 +37,80 @@ struct AppState {
     mode: String,
     limit_h2: f64,
     limit_co: f64,
-    audit: AuditLog,
-    storage: Mutex<Storage>,
-    experiment: Mutex<ExperimentState>,
+    audit: Arc<AuditLog>,
+    storage: Arc<Mutex<Storage>>,
+    exp: Arc<ExpControl>,
+    /// Simulated-seconds advanced per real second (mock time acceleration; 1.0 = real).
+    sim_speed: f64,
 }
 
-/// Minimal experiment state for M3 (manual atmosphere). Full state machine is M4.
-#[derive(Clone, Default, serde::Serialize)]
-struct ExperimentState {
+/// Shared control block for the single running experiment. `status` is the published
+/// snapshot the UI polls/receives; `stop`/`skip` are one-shot signals the tick task
+/// observes on its next cycle.
+struct ExpControl {
+    status: Mutex<ExperimentStatus>,
+    stop: AtomicBool,
+    skip: AtomicBool,
+}
+
+impl ExpControl {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(ExperimentStatus::idle()),
+            stop: AtomicBool::new(false),
+            skip: AtomicBool::new(false),
+        }
+    }
+    fn snapshot(&self) -> ExperimentStatus {
+        self.status.lock().unwrap().clone()
+    }
+    fn is_running(&self) -> bool {
+        self.status.lock().unwrap().running
+    }
+    fn set_status(&self, s: ExperimentStatus) {
+        *self.status.lock().unwrap() = s;
+    }
+}
+
+/// The experiment snapshot published to the UI (serde snake_case, matching the M3 TS
+/// bindings; `phase`/`stage_kind` render as SCREAMING_SNAKE_CASE via their own attrs).
+#[derive(Clone, serde::Serialize)]
+struct ExperimentStatus {
     running: bool,
     experiment_id: Option<String>,
     mode: Option<String>,
     sample_name: Option<String>,
     started_at: Option<String>,
+    phase: Phase,
+    stage_index: usize,
+    total_stages: usize,
+    stage_name: Option<String>,
+    stage_kind: Option<StageKind>,
+    target_temp: f64,
+    tolerance: f64,
+    stage_elapsed_s: f64,
+    total_elapsed_s: f64,
+}
+
+impl ExperimentStatus {
+    fn idle() -> Self {
+        Self {
+            running: false,
+            experiment_id: None,
+            mode: None,
+            sample_name: None,
+            started_at: None,
+            phase: Phase::Idle,
+            stage_index: 0,
+            total_stages: 0,
+            stage_name: None,
+            stage_kind: None,
+            target_temp: 0.0,
+            tolerance: 0.0,
+            stage_elapsed_s: 0.0,
+            total_elapsed_s: 0.0,
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -56,10 +128,38 @@ fn iso_now() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
+/// Format an elapsed second count as HH:MM:SS.
+fn fmt_hms(total_s: f64) -> String {
+    let s = total_s.max(0.0) as u64;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Phase → stable string for the `experiment_status` sample column.
+fn phase_str(p: Phase) -> &'static str {
+    match p {
+        Phase::Idle => "IDLE",
+        Phase::Configuring => "CONFIGURING",
+        Phase::Running => "RUNNING",
+        Phase::StageTransition => "STAGE_TRANSITION",
+        Phase::Completing => "COMPLETING",
+        Phase::Stopping => "STOPPING",
+        Phase::Error => "ERROR",
+    }
+}
+
+/// Simulated-time acceleration: `TMH_SIM_SPEED` if set, else fast for mock, real (1.0)
+/// for hardware. Mock runs at 180× so a multi-hour program plays out in a few minutes.
+fn sim_speed(mode: &str) -> f64 {
+    std::env::var("TMH_SIM_SPEED")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
+}
+
 fn build_mock_hub() -> DeviceHub {
-    let mut tm = MockTransport::temp();
-    tm.set_temp_target_raw(9000); // demo furnace warming toward 900 °C
-    let temp = TempActor::new(Box::new(tm), 0, 0.1, false);
+    // Idle furnace sits at ambient; a running experiment drives the target per stage.
+    let temp = TempActor::new(Box::new(MockTransport::temp()), 0, 0.1, false);
     let mfc = MfcActor::new(
         Box::new(MockTransport::mfc()),
         [1, 2, 3, 4],
@@ -69,6 +169,257 @@ fn build_mock_hub() -> DeviceHub {
     );
     let balance = BalanceActor::new(Box::new(MockTransport::balance(100.0)));
     DeviceHub::spawn(temp, mfc, balance, HubIntervals::default())
+}
+
+// ---- Engine wiring helpers --------------------------------------------------
+
+/// Apply a stage's atmosphere through the clamp and steer the mock furnace/balance.
+/// The MFC bus actor clamps H2/CO at frame-build time — this is not an enforcement point.
+fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) {
+    for (gas, &v) in stage.gas.iter().enumerate() {
+        drop(hub.request_set_flow(gas, v));
+    }
+    hub.set_temp_target_c(stage.target_temp);
+    if stage.kind == StageKind::Reducing {
+        // Mock only: reduction strips oxygen, so the sample loses mass over the stage.
+        hub.set_balance_target_g(w0 * (1.0 - MOCK_REDUCTION_LOSS));
+    }
+}
+
+/// The safety atmosphere (docs/05 §5.5): N2=5.0, H2=CO2=CO=0. Applied on EVERY exit.
+fn apply_safety_atmosphere(hub: &DeviceHub) {
+    for (gas, &v) in SAFETY_ATMOSPHERE.iter().enumerate() {
+        drop(hub.request_set_flow(gas, v));
+    }
+    hub.set_temp_target_c(25.0);
+}
+
+/// Snapshot one sample row from live telemetry.
+fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, phase: Phase) -> SampleRow {
+    let temperature = hub.temp_rx().borrow().temps[7].unwrap_or(0.0);
+    let gas = hub.mfc_rx().borrow().gas;
+    let weight = hub.balance_rx().borrow().weight.unwrap_or(w0);
+    SampleRow {
+        experiment_id: id.to_string(),
+        timestamp: iso_now(),
+        experiment_duration: Some(fmt_hms(total_s)),
+        temperature,
+        weight,
+        weight_loss: (w0 - weight).max(0.0),
+        co_flow: gas[GAS_CO].sv,
+        co2_flow: gas[GAS_CO2].sv,
+        n2_flow: gas[GAS_N2].sv,
+        h2_flow: gas[GAS_H2].sv,
+        experiment_status: Some(phase_str(phase).to_string()),
+        system_message: None,
+    }
+}
+
+/// Build the running-status snapshot from the engine's current position.
+fn status_running(
+    engine: &ExperimentEngine,
+    id: &str,
+    mode: &str,
+    sample: &str,
+    started: &str,
+) -> ExperimentStatus {
+    let stage = engine.current_stage();
+    ExperimentStatus {
+        running: true,
+        experiment_id: Some(id.to_string()),
+        mode: Some(mode.to_string()),
+        sample_name: Some(sample.to_string()),
+        started_at: Some(started.to_string()),
+        phase: engine.phase(),
+        stage_index: engine.stage_index(),
+        total_stages: engine.total_stages(),
+        stage_name: stage.map(|s| s.name.clone()),
+        stage_kind: stage.map(|s| s.kind),
+        target_temp: stage.map(|s| s.target_temp).unwrap_or(0.0),
+        tolerance: stage.map(|s| s.tolerance).unwrap_or(0.0),
+        stage_elapsed_s: engine.stage_elapsed_s(),
+        total_elapsed_s: engine.total_elapsed_s(),
+    }
+}
+
+/// Flush buffered samples in one transaction. On error the buffer is retained for retry;
+/// sampling must never take down the control loop.
+fn flush(storage: &Arc<Mutex<Storage>>, buffer: &mut Vec<SampleRow>) {
+    if buffer.is_empty() {
+        return;
+    }
+    if let Ok(mut s) = storage.lock() {
+        if s.insert_samples(buffer).is_ok() {
+            buffer.clear();
+        }
+    }
+}
+
+/// Publish + emit the current running status.
+fn publish_running(
+    app: &AppHandle,
+    exp: &ExpControl,
+    engine: &ExperimentEngine,
+    id: &str,
+    mode: &str,
+    sample: &str,
+    started: &str,
+) {
+    let status = status_running(engine, id, mode, sample, started);
+    exp.set_status(status.clone());
+    let _ = app.emit("experiment-state-changed", status);
+}
+
+/// End-of-run bookkeeping shared by completion and stop: safety atmosphere, final flush,
+/// DB close-out, audit, and publish idle. Idempotent.
+#[allow(clippy::too_many_arguments)]
+fn finalize(
+    app: &AppHandle,
+    hub: &DeviceHub,
+    storage: &Arc<Mutex<Storage>>,
+    audit: &AuditLog,
+    exp: &ExpControl,
+    buffer: &mut Vec<SampleRow>,
+    id: &str,
+    outcome: &str,
+    total_s: f64,
+) {
+    apply_safety_atmosphere(hub); // hard invariant — every exit path
+    flush(storage, buffer);
+    let end = iso_now();
+    if let Ok(s) = storage.lock() {
+        let _ = s.finish_experiment(id, &end);
+    }
+    audit.write(
+        &AuditEntry::new(Category::Experiment, outcome, AuditResult::Success)
+            .detail(serde_json::json!({ "id": id, "elapsed_s": total_s })),
+    );
+    let idle = ExperimentStatus::idle();
+    exp.set_status(idle.clone());
+    let _ = app.emit("experiment-state-changed", idle);
+}
+
+/// Spawn the per-run control loop: tick the engine once per real second (advancing
+/// `sim_speed` simulated seconds), (re)apply stage atmospheres, sample to SQLite, and
+/// finalize on completion or stop.
+#[allow(clippy::too_many_arguments)]
+fn spawn_experiment_task(
+    app: AppHandle,
+    hub: Arc<DeviceHub>,
+    storage: Arc<Mutex<Storage>>,
+    audit: Arc<AuditLog>,
+    exp: Arc<ExpControl>,
+    program: Program,
+    id: String,
+    mode: String,
+    sample: String,
+    w0: f64,
+    started: String,
+    sim_speed: f64,
+) {
+    std::thread::spawn(move || {
+        let mut engine = ExperimentEngine::start(program);
+        if let Some(s) = engine.current_stage() {
+            apply_stage_atmosphere(&hub, s, w0);
+        }
+        publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+
+        let mut buffer: Vec<SampleRow> = Vec::new();
+        let mut ticks_since_flush = 0u32;
+
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+
+            if exp.stop.load(Ordering::Relaxed) {
+                finalize(
+                    &app,
+                    &hub,
+                    &storage,
+                    &audit,
+                    &exp,
+                    &mut buffer,
+                    &id,
+                    "stopped",
+                    engine.total_elapsed_s(),
+                );
+                break;
+            }
+
+            let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(25.0);
+            let result = if exp.skip.swap(false, Ordering::Relaxed) {
+                audit.write(
+                    &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
+                        .detail(
+                            serde_json::json!({ "id": id, "from_stage": engine.stage_index() }),
+                        ),
+                );
+                engine.skip_stage()
+            } else {
+                engine.tick(t8, sim_speed)
+            };
+
+            if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
+                if let Some(s) = engine.current_stage() {
+                    apply_stage_atmosphere(&hub, s, w0);
+                    audit.write(
+                        &AuditEntry::new(Category::Experiment, "stage_enter", AuditResult::Success)
+                            .detail(serde_json::json!({
+                                "id": id, "stage": engine.stage_index(), "name": s.name
+                            })),
+                    );
+                }
+            }
+
+            buffer.push(build_sample(
+                &hub,
+                &id,
+                w0,
+                engine.total_elapsed_s(),
+                engine.phase(),
+            ));
+            ticks_since_flush += 1;
+            if ticks_since_flush >= FLUSH_EVERY_TICKS {
+                flush(&storage, &mut buffer);
+                ticks_since_flush = 0;
+            }
+
+            if result.completed {
+                finalize(
+                    &app,
+                    &hub,
+                    &storage,
+                    &audit,
+                    &exp,
+                    &mut buffer,
+                    &id,
+                    "completed",
+                    engine.total_elapsed_s(),
+                );
+                break;
+            }
+
+            publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+        }
+    });
+}
+
+/// Startup crash recovery (docs/05 §5.5): any experiment left open (no `end_time`) by a
+/// crash gets the safety atmosphere and is closed out before the UI comes up.
+fn recover_unfinished(hub: &DeviceHub, storage: &Storage, audit: &AuditLog) {
+    let unfinished = storage.unfinished_experiments().unwrap_or_default();
+    if unfinished.is_empty() {
+        return;
+    }
+    apply_safety_atmosphere(hub);
+    let now = iso_now();
+    let ids: Vec<String> = unfinished.iter().map(|e| e.experiment_id.clone()).collect();
+    for id in &ids {
+        let _ = storage.finish_experiment(id, &now);
+    }
+    audit.write(
+        &AuditEntry::new(Category::Experiment, "crash_recovery", AuditResult::Success)
+            .detail(serde_json::json!({ "recovered": ids })),
+    );
 }
 
 // ---- DTOs -------------------------------------------------------------------
@@ -248,11 +599,11 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
     });
 }
 
-// ---- Experiment (M3: manual atmosphere; full engine in M4) -------------------
+// ---- Experiment -------------------------------------------------------------
 
 #[tauri::command]
-fn get_experiment_state(state: State<AppState>) -> ExperimentState {
-    state.experiment.lock().unwrap().clone()
+fn get_experiment_state(state: State<AppState>) -> ExperimentStatus {
+    state.exp.snapshot()
 }
 
 #[tauri::command]
@@ -275,9 +626,10 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     }
 
     let st = app.state::<AppState>();
-    if st.experiment.lock().unwrap().running {
+    if st.exp.is_running() {
         return Err("实验已在运行".into());
     }
+    let program = standard_program(&params.experiment_type).ok_or("未知实验模式")?;
 
     let now = iso_now();
     let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
@@ -300,43 +652,80 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         .insert_experiment(&row)
         .map_err(|e| e.to_string())?;
 
-    let new_state = ExperimentState {
+    // Reset signals and publish the initial running status before the task spins up.
+    st.exp.stop.store(false, Ordering::Relaxed);
+    st.exp.skip.store(false, Ordering::Relaxed);
+    let first = program.stages.first();
+    let initial = ExperimentStatus {
         running: true,
         experiment_id: Some(id.clone()),
         mode: Some(params.experiment_type.clone()),
         sample_name: Some(params.sample_name.clone()),
-        started_at: Some(now),
+        started_at: Some(now.clone()),
+        phase: Phase::Running,
+        stage_index: 0,
+        total_stages: program.stages.len(),
+        stage_name: first.map(|s| s.name.clone()),
+        stage_kind: first.map(|s| s.kind),
+        target_temp: first.map(|s| s.target_temp).unwrap_or(0.0),
+        tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
+        stage_elapsed_s: 0.0,
+        total_elapsed_s: 0.0,
     };
-    *st.experiment.lock().unwrap() = new_state.clone();
+    st.exp.set_status(initial.clone());
     st.audit.write(
         &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
-            .operator(params.operator)
+            .operator(params.operator.clone())
             .detail(serde_json::json!({
                 "id": id, "mode": params.experiment_type, "project": params.project_name
             })),
     );
-    let _ = app.emit("experiment-state-changed", new_state);
+    let _ = app.emit("experiment-state-changed", initial);
+
+    spawn_experiment_task(
+        app.clone(),
+        st.hub.clone(),
+        st.storage.clone(),
+        st.audit.clone(),
+        st.exp.clone(),
+        program,
+        id.clone(),
+        params.experiment_type.clone(),
+        params.sample_name.clone(),
+        params.sample_weight,
+        now,
+        st.sim_speed,
+    );
     Ok(id)
 }
 
 #[tauri::command]
 fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
     let st = app.state::<AppState>();
-    // SAFETY ATMOSPHERE (docs/05 §5.5, hard invariant): every experiment exit path
-    // sets N2=5.0, H2=CO2=CO=0.
-    // The request is enqueued synchronously inside request_set_flow; we don't need
-    // the clamp reply here, so drop the receiver explicitly.
-    drop(st.hub.request_set_flow(GAS_N2, 5.0));
-    drop(st.hub.request_set_flow(GAS_H2, 0.0));
-    drop(st.hub.request_set_flow(GAS_CO2, 0.0));
-    drop(st.hub.request_set_flow(GAS_CO, 0.0));
-
-    *st.experiment.lock().unwrap() = ExperimentState::default();
+    // Signal the tick task to finalize (it publishes idle within ≤1s).
+    st.exp.stop.store(true, Ordering::Relaxed);
+    // HARD INVARIANT (docs/05 §5.5): apply the safety atmosphere immediately here too —
+    // belt-and-suspenders even if the tick task has already died.
+    apply_safety_atmosphere(&st.hub);
     st.audit.write(
         &AuditEntry::new(Category::Experiment, "stop", AuditResult::Success)
             .detail(serde_json::json!({ "reason": reason })),
     );
-    let _ = app.emit("experiment-state-changed", ExperimentState::default());
+    // If nothing was running, there is no task to publish idle — do it here.
+    if !st.exp.is_running() {
+        let idle = ExperimentStatus::idle();
+        st.exp.set_status(idle.clone());
+        let _ = app.emit("experiment-state-changed", idle);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn skip_stage(state: State<AppState>) -> Result<(), String> {
+    if !state.exp.is_running() {
+        return Err("没有正在运行的实验".into());
+    }
+    state.exp.skip.store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -345,20 +734,28 @@ fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
 /// Build and run the Tauri application.
 pub fn run() {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
+    let sim_speed = sim_speed(&mode);
     let data_root = std::env::temp_dir().join("tmh-lpf-900");
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
+    let hub = Arc::new(build_mock_hub());
+    let audit = Arc::new(AuditLog::new(audit_dir));
+
+    // Crash recovery before the UI comes up (safety atmosphere for any open run).
+    recover_unfinished(&hub, &storage, &audit);
+
     let state = AppState {
-        hub: Arc::new(build_mock_hub()),
+        hub,
         mode,
         limit_h2: 5.0,
         limit_co: 5.0,
-        audit: AuditLog::new(audit_dir),
-        storage: Mutex::new(storage),
-        experiment: Mutex::new(ExperimentState::default()),
+        audit,
+        storage: Arc::new(Mutex::new(storage)),
+        exp: Arc::new(ExpControl::new()),
+        sim_speed,
     };
 
     tauri::Builder::default()
@@ -389,7 +786,8 @@ pub fn run() {
             subscribe_telemetry,
             get_experiment_state,
             start_experiment,
-            stop_experiment
+            stop_experiment,
+            skip_stage
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
