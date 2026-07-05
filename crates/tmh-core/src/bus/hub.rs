@@ -1,20 +1,20 @@
 //! `DeviceHub`: spawns the three bus actors on dedicated OS threads (docs/03) and
 //! bridges them to the async orchestration layer. Snapshots flow out through
 //! `tokio::watch`; commands (set flow / on-off / shutoff / tare) flow in through
-//! request channels carrying a `oneshot` reply. Blocking serial I/O stays on the
-//! threads, never on the async runtime.
+//! `tokio::mpsc` channels carrying a `oneshot` reply. Blocking serial I/O stays on
+//! the threads, never on the async runtime. All handles are `Send + Sync` so the
+//! hub can live in Tauri's managed state.
 
 use crate::bus::{
     BalanceActor, BalanceSnapshot, MfcActor, MfcCommand, MfcSnapshot, TempActor, TempSnapshot,
 };
 use crate::clamp::ClampResult;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tmh_protocols::balance::TareResult;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Poll cadences per bus (docs/04 §4.4).
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +58,8 @@ pub struct DeviceHub {
     temp_rx: watch::Receiver<TempSnapshot>,
     mfc_rx: watch::Receiver<MfcSnapshot>,
     balance_rx: watch::Receiver<BalanceSnapshot>,
-    mfc_tx: mpsc::Sender<MfcReq>,
-    bal_tx: mpsc::Sender<BalReq>,
+    mfc_tx: mpsc::UnboundedSender<MfcReq>,
+    bal_tx: mpsc::UnboundedSender<BalReq>,
 }
 
 impl DeviceHub {
@@ -69,8 +69,8 @@ impl DeviceHub {
         let (temp_tx, temp_rx) = watch::channel(temp.snapshot());
         let (mfc_snap_tx, mfc_rx) = watch::channel(mfc.snapshot());
         let (bal_snap_tx, balance_rx) = watch::channel(balance.snapshot());
-        let (mfc_tx, mfc_cmd_rx) = mpsc::channel::<MfcReq>();
-        let (bal_tx, bal_cmd_rx) = mpsc::channel::<BalReq>();
+        let (mfc_tx, mfc_cmd_rx) = mpsc::unbounded_channel::<MfcReq>();
+        let (bal_tx, bal_cmd_rx) = mpsc::unbounded_channel::<BalReq>();
         let mut handles = Vec::new();
 
         // Temperature: poll all 9 registers each tick.
@@ -94,8 +94,9 @@ impl DeviceHub {
             let stop = stop.clone();
             handles.push(thread::spawn(move || {
                 let mut mfc = mfc;
+                let mut cmd_rx = mfc_cmd_rx;
                 while !stop.load(Ordering::Relaxed) {
-                    while let Ok(req) = mfc_cmd_rx.try_recv() {
+                    while let Ok(req) = cmd_rx.try_recv() {
                         match req {
                             MfcReq::SetFlow { gas, value, reply } => {
                                 let _ = reply.send(mfc.set_flow(gas, value));
@@ -123,8 +124,9 @@ impl DeviceHub {
             let stop = stop.clone();
             handles.push(thread::spawn(move || {
                 let mut balance = balance;
+                let mut cmd_rx = bal_cmd_rx;
                 while !stop.load(Ordering::Relaxed) {
-                    if let Ok(BalReq::Tare { reply }) = bal_cmd_rx.try_recv() {
+                    if let Ok(BalReq::Tare { reply }) = cmd_rx.try_recv() {
                         let _ = reply.send(balance.tare());
                     } else {
                         balance.poll_once(Instant::now(), Duration::from_millis(100));
@@ -222,11 +224,16 @@ mod tests {
         assert!(hub.temp_rx().borrow().connected);
         assert!(hub.balance_rx().borrow().weight.is_some());
 
-        // set_flow requests over the limit -> clamp reply
         let clamp = hub.request_set_flow(0, 8.0).blocking_recv().expect("reply");
         assert_eq!(clamp.applied, 5.0);
         assert!(clamp.clamped);
 
         hub.stop();
+    }
+
+    #[test]
+    fn hub_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DeviceHub>();
     }
 }

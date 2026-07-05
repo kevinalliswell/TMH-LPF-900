@@ -20,7 +20,7 @@ pub enum Gas {
 }
 
 /// Result of clamping a setpoint (in L/min).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct ClampResult {
     /// Value that will actually be sent.
     pub applied: f64,
