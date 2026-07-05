@@ -4,7 +4,13 @@
 use std::time::Duration;
 
 pub mod mock;
+pub mod replay;
+#[cfg(feature = "serial")]
+pub mod serial;
 pub use mock::{MockFaults, MockTransport, TareOutcome};
+pub use replay::ReplayTransport;
+#[cfg(feature = "serial")]
+pub use serial::{SerialConfig, SerialTransport};
 
 /// Which device a mock/serial transport is standing in for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

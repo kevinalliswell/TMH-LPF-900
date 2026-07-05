@@ -45,7 +45,8 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev \
-            patchelf
+            patchelf \
+            libudev-dev
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -64,6 +65,9 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: Compile serial feature (skeleton, not hardware-tested)
+        run: cargo build -p tmh-core --features serial
 
       - name: Version consistency
         run: node scripts/sync-version.mjs --check
