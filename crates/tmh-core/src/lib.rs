@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod storage;
 pub mod transport;
 
 use thiserror::Error;

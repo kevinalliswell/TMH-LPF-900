@@ -11,6 +11,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
   temperature, Azbil CPL MFC, RS232 balance), verified against all 26 golden
   vectors, with echo-skip / frame-tail / tare-branch edge tests and proptest
   fuzzing. Line coverage 99%. Runtime deps stay crc-only.
+- `tmh-core` transport layer (M2 slice 1): `Transport` trait + `MockTransport`
+  (synthetic, deterministic fault injection) + `ReplayTransport` (recorded sessions,
+  dirty-session fixture) + feature-gated `SerialTransport` skeleton.
+- `tmh-core` config/audit/storage (M2 slice 2): comm_config.json load + validate +
+  atomic write-back; JSON audit log (date-rotated, never throws into control flow);
+  rusqlite (bundled, WAL) persistence with schema migrations.
 
 ## [0.1.0] - 2026-07-05
 
