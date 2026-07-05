@@ -1,0 +1,150 @@
+{
+  "modbus_rtu_temp": [
+    {
+      "case": "build_read_all addr=0",
+      "tx_hex": "00 03 00 00 00 09 84 1d"
+    },
+    {
+      "case": "build_read_all addr=1",
+      "tx_hex": "01 03 00 00 00 09 85 cc"
+    },
+    {
+      "case": "build_read_all addr=3",
+      "tx_hex": "03 03 00 00 00 09 84 2e"
+    },
+    {
+      "case": "parse_read_all 9regs scale=0.1",
+      "rx_hex": "00 03 12 09 c4 0b bd 11 94 23 1f 23 28 23 32 00 fa 01 31 23 27 a9 7a",
+      "expect": {
+        "T1": 250.0,
+        "T2": 300.5,
+        "T3": 450.0,
+        "T4": 899.1,
+        "T5": 900.0,
+        "T6": 901.0,
+        "T7": 25.0,
+        "T8": 30.5,
+        "T9": 899.9000000000001
+      }
+    },
+    {
+      "case": "extract_read_all skips echoed request",
+      "rx_hex": "00 03 00 00 00 09 84 1d 00 03 12 09 c4 0b bd 11 94 23 1f 23 28 23 32 00 fa 01 31 23 27 a9 7a",
+      "expect_frame_hex": "00 03 12 09 c4 0b bd 11 94 23 1f 23 28 23 32 00 fa 01 31 23 27 a9 7a"
+    }
+  ],
+  "azbil_cpl_mfc": [
+    {
+      "case": "read PV H2 addr=1 reg=1206",
+      "tx_hex": "02 30 31 30 30 58 52 53 2c 31 32 30 36 57 2c 32 03 39 33 0d 0a",
+      "tx_ascii": "\u00020100XRS,1206W,2\u000393\r\n"
+    },
+    {
+      "case": "read PV N2 addr=2 reg=1206",
+      "tx_hex": "02 30 32 30 30 58 52 53 2c 31 32 30 36 57 2c 32 03 39 32 0d 0a",
+      "tx_ascii": "\u00020200XRS,1206W,2\u000392\r\n"
+    },
+    {
+      "case": "read PV CO2 addr=3 reg=1206",
+      "tx_hex": "02 30 33 30 30 58 52 53 2c 31 32 30 36 57 2c 32 03 39 31 0d 0a",
+      "tx_ascii": "\u00020300XRS,1206W,2\u000391\r\n"
+    },
+    {
+      "case": "read PV CO addr=4 reg=1206",
+      "tx_hex": "02 30 34 30 30 58 52 53 2c 31 32 30 36 57 2c 32 03 39 30 0d 0a",
+      "tx_ascii": "\u00020400XRS,1206W,2\u000390\r\n"
+    },
+    {
+      "case": "read SV H2 reg=1401",
+      "tx_hex": "02 30 31 30 30 58 52 53 2c 31 34 30 31 57 2c 32 03 39 36 0d 0a"
+    },
+    {
+      "case": "write SV H2 3.0L/min scale0.1 -> raw300",
+      "tx_hex": "02 30 31 30 30 58 57 53 2c 31 34 30 31 57 2c 33 30 30 03 33 30 0d 0a",
+      "tx_ascii": "\u00020100XWS,1401W,300\u000330\r\n"
+    },
+    {
+      "case": "parse_response",
+      "rx_hex": "02 30 31 30 30 58 32 30 2c 33 30 03 46 33 0d 0a",
+      "expect": 3.0
+    },
+    {
+      "case": "parse_response",
+      "rx_hex": "02 30 35 30 30 58 30 30 2c 35 32 03 45 42 0d 0a",
+      "expect": 5.2
+    },
+    {
+      "case": "parse_response",
+      "rx_hex": "02 4f 4b 2c 31 32 33 34 03",
+      "expect": 123.4
+    },
+    {
+      "case": "parse_response",
+      "rx_hex": "",
+      "expect": null
+    },
+    {
+      "case": "parse_response",
+      "rx_hex": "49 6e 76 61 6c 69 64 20 64 61 74 61",
+      "expect": null
+    }
+  ],
+  "balance_rs232": [
+    {
+      "case": "TARE_CMD bytes",
+      "tx_hex": "54 20 0d 0a"
+    },
+    {
+      "case": "parse_line '+123.456 G S'",
+      "expect": 123.456
+    },
+    {
+      "case": "parse_line '-0.002 G S'",
+      "expect": -0.002
+    },
+    {
+      "case": "parse_line '+123.456 G'",
+      "expect": null
+    },
+    {
+      "case": "parse_line 'garbage'",
+      "expect": null
+    },
+    {
+      "case": "parse_line '   +88.100   G S  '",
+      "expect": 88.1
+    },
+    {
+      "case": "parse_tare_response 'A00\\r\\n+0.000 G S'",
+      "expect": {
+        "success": true,
+        "a00_found": true,
+        "weight": 0.0
+      }
+    },
+    {
+      "case": "parse_tare_response '+0.001 G S'",
+      "expect": {
+        "success": true,
+        "a00_found": false,
+        "weight": 0.001
+      }
+    },
+    {
+      "case": "parse_tare_response '+5.000 G S'",
+      "expect": {
+        "success": false,
+        "a00_found": false,
+        "weight": 5.0
+      }
+    },
+    {
+      "case": "parse_tare_response 'no data'",
+      "expect": {
+        "success": false,
+        "a00_found": false,
+        "weight": null
+      }
+    }
+  ]
+}
