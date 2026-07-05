@@ -3,6 +3,7 @@
 //! `crc`. Byte-exact against docs/golden_vectors.json (M1). Bus discipline, safety
 //! clamp and scaling live in tmh-core (M2); everything here is stateless.
 
+pub mod balance;
 pub mod cpl;
 pub mod modbus;
 

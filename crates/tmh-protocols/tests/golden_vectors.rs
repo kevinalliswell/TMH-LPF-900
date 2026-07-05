@@ -1,6 +1,6 @@
 //! Byte-exact acceptance against docs/golden_vectors.json (M1: all 26 vectors).
 use serde_json::Value;
-use tmh_protocols::{cpl, modbus};
+use tmh_protocols::{balance, cpl, modbus};
 
 const GOLDEN: &str = include_str!("../../../docs/golden_vectors.json");
 
@@ -90,6 +90,64 @@ fn cpl_golden() {
         match c["expect"].as_f64() {
             Some(e) => assert!((got.unwrap() - e).abs() < 1e-9, "rx={:?}", c["rx_hex"]),
             None => assert_eq!(got, None, "rx={:?}", c["rx_hex"]),
+        }
+    }
+}
+
+#[test]
+fn balance_golden() {
+    let r = root();
+    let sect = "balance_rs232";
+
+    let expect = case(&r, sect, "TARE_CMD bytes")["tx_hex"].as_str().unwrap();
+    assert_eq!(hex(&balance::TARE_CMD), expect);
+
+    for (name, input, expected) in [
+        ("parse_line '+123.456 G S'", "+123.456 G S", Some(123.456)),
+        ("parse_line '-0.002 G S'", "-0.002 G S", Some(-0.002)),
+        ("parse_line '+123.456 G'", "+123.456 G", None),
+        ("parse_line 'garbage'", "garbage", None),
+        (
+            "parse_line '   +88.100   G S  '",
+            "   +88.100   G S  ",
+            Some(88.1),
+        ),
+    ] {
+        assert_eq!(
+            case(&r, sect, name)["expect"].as_f64(),
+            expected,
+            "json {name}"
+        );
+        match (balance::parse_line(input), expected) {
+            (Some(g), Some(e)) => assert!((g - e).abs() < 1e-9, "{name}"),
+            (g, e) => assert_eq!(g, e, "{name}"),
+        }
+    }
+
+    for (name, input) in [
+        (
+            "parse_tare_response 'A00\\r\\n+0.000 G S'",
+            "A00\r\n+0.000 G S",
+        ),
+        ("parse_tare_response '+0.001 G S'", "+0.001 G S"),
+        ("parse_tare_response '+5.000 G S'", "+5.000 G S"),
+        ("parse_tare_response 'no data'", "no data"),
+    ] {
+        let exp = &case(&r, sect, name)["expect"];
+        let got = balance::parse_tare_response(input);
+        assert_eq!(
+            got.success,
+            exp["success"].as_bool().unwrap(),
+            "{name} success"
+        );
+        assert_eq!(
+            got.a00_found,
+            exp["a00_found"].as_bool().unwrap(),
+            "{name} a00"
+        );
+        match exp["weight"].as_f64() {
+            Some(e) => assert!((got.weight.unwrap() - e).abs() < 1e-9, "{name} weight"),
+            None => assert_eq!(got.weight, None, "{name} weight"),
         }
     }
 }
