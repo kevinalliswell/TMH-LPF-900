@@ -67,3 +67,31 @@ proptest! {
         let _ = balance::parse_tare_response(&s);
     }
 }
+
+#[test]
+fn parse_read_all_rejects_bad_frames() {
+    assert_eq!(modbus::parse_read_all(&[0u8; 10], 0.1, false), None); // wrong length
+    let mut f = unhex("00 03 12 09 c4 0b bd 11 94 23 1f 23 28 23 32 00 fa 01 31 23 27 a9 7a");
+    f[22] ^= 0xFF; // corrupt CRC high byte
+    assert_eq!(modbus::parse_read_all(&f, 0.1, false), None);
+}
+
+#[test]
+fn parse_read_all_signed_negative() {
+    let mut f = unhex("00 03 12 09 c4 0b bd 11 94 23 1f 23 28 23 32 00 fa 01 31 23 27 a9 7a");
+    f[3] = 0xFF; // register 0 = 0xFFFF
+    f[4] = 0xFF;
+    let crc = tmh_protocols::crc16_modbus(&f[..21]); // re-seal CRC so the frame validates
+    f[21] = (crc & 0xFF) as u8;
+    f[22] = (crc >> 8) as u8;
+    let got = modbus::parse_read_all(&f, 0.1, true).unwrap();
+    assert!((got[0] - -0.1).abs() < 1e-9); // 0xFFFF as i16 = -1 -> -0.1
+}
+
+#[test]
+fn parse_line_rejects_malformed_decimals() {
+    assert_eq!(balance::parse_line("+. G S"), None); // no integer digit
+    assert_eq!(balance::parse_line("+5 G S"), None); // dot missing (char present)
+    assert_eq!(balance::parse_line("G S +9"), None); // dot missing (end of buffer)
+    assert_eq!(balance::parse_line("+5. G S"), None); // no fractional digit
+}
