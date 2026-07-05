@@ -8,3 +8,7 @@ description = "Pure frame codecs for TMH-LPF-900 lab devices (zero I/O)."
 
 [dependencies]
 crc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+proptest.workspace = true
