@@ -185,6 +185,131 @@ impl Storage {
             |r| r.get(0),
         )?)
     }
+
+    /// Stamp an experiment's `end_time` (idempotent — a no-op if the id is unknown).
+    pub fn finish_experiment(&self, experiment_id: &str, end_time: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE experiments SET end_time = ?2 WHERE experiment_id = ?1",
+            params![experiment_id, end_time],
+        )?;
+        Ok(())
+    }
+
+    /// Store the analysis-results JSON blob for an experiment.
+    pub fn set_analysis_results(&self, experiment_id: &str, json: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE experiments SET analysis_results_json = ?2 WHERE experiment_id = ?1",
+            params![experiment_id, json],
+        )?;
+        Ok(())
+    }
+
+    /// All experiments, newest first (history list).
+    pub fn list_experiments(&self) -> Result<Vec<ExperimentRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{EXPERIMENT_SELECT} ORDER BY start_time DESC"))?;
+        let rows = stmt
+            .query_map([], experiment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Experiments still open (no `end_time`) — used for crash recovery on startup.
+    pub fn unfinished_experiments(&self) -> Result<Vec<ExperimentRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{EXPERIMENT_SELECT} WHERE end_time IS NULL ORDER BY start_time"
+        ))?;
+        let rows = stmt
+            .query_map([], experiment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// One experiment by id.
+    pub fn get_experiment(&self, experiment_id: &str) -> Result<Option<ExperimentRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{EXPERIMENT_SELECT} WHERE experiment_id = ?1"))?;
+        let mut rows = stmt.query_map(params![experiment_id], experiment_from_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Sample rows for an experiment, decimated to at most `max_points` (evenly spaced,
+    /// oldest→newest). `max_points == 0` returns every row. A huge run must not flood
+    /// the chart, so the read thins server-side via a window-function stride.
+    pub fn get_samples(&self, experiment_id: &str, max_points: usize) -> Result<Vec<SampleRow>> {
+        let total = self.count_samples(experiment_id)? as usize;
+        let stride = if max_points == 0 || total <= max_points {
+            1
+        } else {
+            total.div_ceil(max_points)
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT experiment_id, timestamp, experiment_duration, temperature, weight, \
+             weight_loss, co_flow, co2_flow, n2_flow, h2_flow, experiment_status, system_message \
+             FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) - 1 AS rn FROM experiment_data \
+             WHERE experiment_id = ?1) WHERE rn % ?2 = 0 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map(params![experiment_id, stride as i64], sample_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete an experiment and all its samples (FK order: samples first).
+    pub fn delete_experiment(&self, experiment_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM experiment_data WHERE experiment_id = ?1",
+            params![experiment_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM experiments WHERE experiment_id = ?1",
+            params![experiment_id],
+        )?;
+        Ok(())
+    }
+}
+
+/// Column list shared by every `experiments` SELECT (keeps `experiment_from_row` in sync).
+const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_name, \
+     sample_weight, start_time, end_time, description, operator, experiment_type, \
+     analysis_results_json, created_at FROM experiments";
+
+fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
+    Ok(ExperimentRow {
+        experiment_id: r.get(0)?,
+        experiment_name: r.get(1)?,
+        sample_name: r.get(2)?,
+        sample_weight: r.get(3)?,
+        start_time: r.get(4)?,
+        end_time: r.get(5)?,
+        description: r.get(6)?,
+        operator: r.get(7)?,
+        experiment_type: r.get(8)?,
+        analysis_results_json: r.get(9)?,
+        created_at: r.get(10)?,
+    })
+}
+
+fn sample_from_row(r: &rusqlite::Row) -> rusqlite::Result<SampleRow> {
+    Ok(SampleRow {
+        experiment_id: r.get(0)?,
+        timestamp: r.get(1)?,
+        experiment_duration: r.get(2)?,
+        temperature: r.get(3)?,
+        weight: r.get(4)?,
+        weight_loss: r.get(5)?,
+        co_flow: r.get(6)?,
+        co2_flow: r.get(7)?,
+        n2_flow: r.get(8)?,
+        h2_flow: r.get(9)?,
+        experiment_status: r.get(10)?,
+        system_message: r.get(11)?,
+    })
 }
 
 #[cfg(test)]
@@ -247,6 +372,66 @@ mod tests {
         let s = Storage::open(&path).unwrap();
         assert_eq!(s.journal_mode().unwrap().to_lowercase(), "wal");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finish_and_list_and_get() {
+        let s = Storage::open_in_memory().unwrap();
+        s.insert_experiment(&experiment("e1")).unwrap();
+        s.insert_experiment(&experiment("e2")).unwrap();
+        // Both unfinished at first.
+        assert_eq!(s.unfinished_experiments().unwrap().len(), 2);
+
+        s.finish_experiment("e1", "2026-07-05T11:00:00").unwrap();
+        let open = s.unfinished_experiments().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].experiment_id, "e2");
+
+        let all = s.list_experiments().unwrap();
+        assert_eq!(all.len(), 2);
+        let e1 = s.get_experiment("e1").unwrap().unwrap();
+        assert_eq!(e1.end_time.as_deref(), Some("2026-07-05T11:00:00"));
+        assert!(s.get_experiment("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn set_analysis_results_roundtrips() {
+        let s = Storage::open_in_memory().unwrap();
+        s.insert_experiment(&experiment("e1")).unwrap();
+        s.set_analysis_results("e1", r#"{"rt":50.0}"#).unwrap();
+        let e = s.get_experiment("e1").unwrap().unwrap();
+        assert_eq!(e.analysis_results_json.as_deref(), Some(r#"{"rt":50.0}"#));
+    }
+
+    #[test]
+    fn get_samples_decimates_to_max_points() {
+        let mut s = Storage::open_in_memory().unwrap();
+        s.insert_experiment(&experiment("e1")).unwrap();
+        let rows: Vec<SampleRow> = (0..1000).map(|i| sample("e1", i as f64)).collect();
+        s.insert_samples(&rows).unwrap();
+
+        let all = s.get_samples("e1", 0).unwrap();
+        assert_eq!(all.len(), 1000);
+        assert_eq!(all[0].temperature, 0.0);
+        assert_eq!(all[999].temperature, 999.0);
+
+        let thin = s.get_samples("e1", 100).unwrap();
+        assert!(thin.len() <= 100, "decimated to <= 100, got {}", thin.len());
+        assert!(thin.len() >= 90, "still representative, got {}", thin.len());
+        // First point preserved; ordered oldest→newest.
+        assert_eq!(thin[0].temperature, 0.0);
+        assert!(thin.windows(2).all(|w| w[0].temperature < w[1].temperature));
+    }
+
+    #[test]
+    fn delete_experiment_removes_samples() {
+        let mut s = Storage::open_in_memory().unwrap();
+        s.insert_experiment(&experiment("e1")).unwrap();
+        s.insert_samples(&[sample("e1", 1.0), sample("e1", 2.0)])
+            .unwrap();
+        s.delete_experiment("e1").unwrap();
+        assert_eq!(s.count_samples("e1").unwrap(), 0);
+        assert!(s.get_experiment("e1").unwrap().is_none());
     }
 
     #[test]

@@ -139,7 +139,10 @@ mod tests {
             a.poll_once(Instant::now(), Duration::from_millis(10));
         }
         let cool = a.snapshot().temps[7].expect("channel read");
-        assert!(cool < 105.0, "furnace should cool toward 100 °C, got {cool}");
+        assert!(
+            cool < 105.0,
+            "furnace should cool toward 100 °C, got {cool}"
+        );
     }
 
     #[test]
