@@ -45,3 +45,27 @@ export const GAS = { H2: 0, N2: 1, CO2: 2, CO: 3 } as const;
 export const GAS_NAMES = ["H₂", "N₂", "CO₂", "CO"] as const;
 /** Flammable gases cut by the emergency shutoff. */
 export const FLAMMABLE = [GAS.H2, GAS.CO2, GAS.CO];
+
+export interface ExperimentState {
+  running: boolean;
+  experiment_id?: string | null;
+  mode?: string | null;
+  sample_name?: string | null;
+  started_at?: string | null;
+}
+
+export interface ExperimentParams {
+  sample_id: string;
+  sample_name: string;
+  sample_weight: number;
+  operator: string;
+  experiment_type: string;
+  project_name?: string | null;
+  notes?: string | null;
+}
+
+export const EXPERIMENT_MODES = [
+  { id: "REDUCIBILITY", name: "GB/T 13241 还原性" },
+  { id: "LOW_TEMP_DEGRADATION", name: "GB/T 13242 低温粉化" },
+  { id: "FREE_SWELLING", name: "GB/T 13240 自由膨胀" },
+] as const;

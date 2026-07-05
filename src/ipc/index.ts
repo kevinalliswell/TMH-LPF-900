@@ -3,11 +3,22 @@
 // switch keeps the UI identical in both.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ClampResult, GasLimits, TareResult, TelemetrySnapshot } from "./types";
+import { listen } from "@tauri-apps/api/event";
+import type {
+  ClampResult,
+  ExperimentParams,
+  ExperimentState,
+  GasLimits,
+  TareResult,
+  TelemetrySnapshot,
+} from "./types";
 import {
   mockSetFlow,
   mockSetOnOff,
   mockShutoff,
+  mockStartExperiment,
+  mockStopExperiment,
+  mockSubscribeExperiment,
   mockTare,
   mockTelemetry,
 } from "./mock";
@@ -52,6 +63,25 @@ export async function shutoffFlammableGases(): Promise<void> {
 
 export async function tareBalance(): Promise<TareResult> {
   return isTauri() ? invoke("tare_balance") : mockTare();
+}
+
+export async function startExperiment(params: ExperimentParams): Promise<string> {
+  return isTauri() ? invoke("start_experiment", { params }) : mockStartExperiment(params);
+}
+
+export async function stopExperiment(reason: string): Promise<void> {
+  if (!isTauri()) return void mockStopExperiment();
+  await invoke("stop_experiment", { reason });
+}
+
+export function subscribeExperimentState(cb: (s: ExperimentState) => void): () => void {
+  if (!isTauri()) return mockSubscribeExperiment(cb);
+  void invoke<ExperimentState>("get_experiment_state").then(cb);
+  let un = () => {};
+  void listen<ExperimentState>("experiment-state-changed", (e) => cb(e.payload)).then((u) => {
+    un = u;
+  });
+  return () => un();
 }
 
 /** Subscribe to the 0.2s telemetry stream. Returns an unsubscribe function. */

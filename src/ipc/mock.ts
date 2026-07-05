@@ -1,7 +1,13 @@
 // Browser-only synthetic engine (docs/08 dual-mode). Mirrors the Rust MockTransport
 // so `pnpm dev:web` / the preview renders live data without a Tauri backend.
 
-import type { ClampResult, TareResult, TelemetrySnapshot } from "./types";
+import type {
+  ClampResult,
+  ExperimentParams,
+  ExperimentState,
+  TareResult,
+  TelemetrySnapshot,
+} from "./types";
 
 const H2_ABS = 10;
 const CO_ABS = 10;
@@ -67,4 +73,43 @@ export function mockTelemetry(cb: (s: TelemetrySnapshot) => void): () => void {
   cb(tick());
   const id = setInterval(() => cb(tick()), 200);
   return () => clearInterval(id);
+}
+
+// ---- Experiment (browser mock) ----
+let experiment: ExperimentState = { running: false };
+const expListeners = new Set<(s: ExperimentState) => void>();
+const notify = () => expListeners.forEach((f) => f(experiment));
+
+export function mockStartExperiment(p: ExperimentParams): string {
+  if (!p.sample_id.trim()) throw new Error("样品编号必填");
+  if (!p.sample_name.trim()) throw new Error("样品名称必填");
+  if (!(p.sample_weight > 0)) throw new Error("样品重量必须大于 0");
+  if (!p.operator.trim()) throw new Error("操作员必填");
+  if (experiment.running) throw new Error("实验已在运行");
+  const id = `exp-${Date.now()}`;
+  experiment = {
+    running: true,
+    experiment_id: id,
+    mode: p.experiment_type,
+    sample_name: p.sample_name,
+    started_at: new Date().toISOString(),
+  };
+  notify();
+  return id;
+}
+
+export function mockStopExperiment(): void {
+  // Safety atmosphere: N2=5, flammables 0.
+  sv[1] = 5;
+  sv[0] = 0;
+  sv[2] = 0;
+  sv[3] = 0;
+  experiment = { running: false };
+  notify();
+}
+
+export function mockSubscribeExperiment(cb: (s: ExperimentState) => void): () => void {
+  expListeners.add(cb);
+  cb(experiment);
+  return () => void expListeners.delete(cb);
 }

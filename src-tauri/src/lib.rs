@@ -2,14 +2,23 @@
 //! to the webview through typed commands + a telemetry Channel, and hardens the shell
 //! (single-instance). M3 runs the engine in manual-atmosphere mode only.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
+use tmh_core::storage::{ExperimentRow, Storage};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
+
+/// Registered experiment modes (custom modes land in M4).
+const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
+/// Gas channel indices.
+const GAS_H2: usize = 0;
+const GAS_N2: usize = 1;
+const GAS_CO2: usize = 2;
+const GAS_CO: usize = 3;
 
 /// Managed application state.
 struct AppState {
@@ -18,6 +27,33 @@ struct AppState {
     limit_h2: f64,
     limit_co: f64,
     audit: AuditLog,
+    storage: Mutex<Storage>,
+    experiment: Mutex<ExperimentState>,
+}
+
+/// Minimal experiment state for M3 (manual atmosphere). Full state machine is M4.
+#[derive(Clone, Default, serde::Serialize)]
+struct ExperimentState {
+    running: bool,
+    experiment_id: Option<String>,
+    mode: Option<String>,
+    sample_name: Option<String>,
+    started_at: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExperimentParams {
+    sample_id: String,
+    sample_name: String,
+    sample_weight: f64,
+    operator: String,
+    experiment_type: String,
+    project_name: Option<String>,
+    notes: Option<String>,
+}
+
+fn iso_now() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 fn build_mock_hub() -> DeviceHub {
@@ -212,19 +248,117 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
     });
 }
 
+// ---- Experiment (M3: manual atmosphere; full engine in M4) -------------------
+
+#[tauri::command]
+fn get_experiment_state(state: State<AppState>) -> ExperimentState {
+    state.experiment.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
+    // Parameter validation (docs/05 §5.2).
+    if params.sample_id.trim().is_empty() {
+        return Err("样品编号必填".into());
+    }
+    if params.sample_name.trim().is_empty() {
+        return Err("样品名称必填".into());
+    }
+    if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
+        return Err("样品重量必须大于 0".into());
+    }
+    if params.operator.trim().is_empty() {
+        return Err("操作员必填".into());
+    }
+    if !MODES.contains(&params.experiment_type.as_str()) {
+        return Err("未知实验模式".into());
+    }
+
+    let st = app.state::<AppState>();
+    if st.experiment.lock().unwrap().running {
+        return Err("实验已在运行".into());
+    }
+
+    let now = iso_now();
+    let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let row = ExperimentRow {
+        experiment_id: id.clone(),
+        experiment_name: params.sample_name.clone(),
+        sample_name: params.sample_name.clone(),
+        sample_weight: params.sample_weight,
+        start_time: now.clone(),
+        end_time: None,
+        description: params.notes.clone(),
+        operator: Some(params.operator.clone()),
+        experiment_type: Some(params.experiment_type.clone()),
+        analysis_results_json: None,
+        created_at: now.clone(),
+    };
+    st.storage
+        .lock()
+        .unwrap()
+        .insert_experiment(&row)
+        .map_err(|e| e.to_string())?;
+
+    let new_state = ExperimentState {
+        running: true,
+        experiment_id: Some(id.clone()),
+        mode: Some(params.experiment_type.clone()),
+        sample_name: Some(params.sample_name.clone()),
+        started_at: Some(now),
+    };
+    *st.experiment.lock().unwrap() = new_state.clone();
+    st.audit.write(
+        &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
+            .operator(params.operator)
+            .detail(serde_json::json!({
+                "id": id, "mode": params.experiment_type, "project": params.project_name
+            })),
+    );
+    let _ = app.emit("experiment-state-changed", new_state);
+    Ok(id)
+}
+
+#[tauri::command]
+fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    // SAFETY ATMOSPHERE (docs/05 §5.5, hard invariant): every experiment exit path
+    // sets N2=5.0, H2=CO2=CO=0.
+    // The request is enqueued synchronously inside request_set_flow; we don't need
+    // the clamp reply here, so drop the receiver explicitly.
+    drop(st.hub.request_set_flow(GAS_N2, 5.0));
+    drop(st.hub.request_set_flow(GAS_H2, 0.0));
+    drop(st.hub.request_set_flow(GAS_CO2, 0.0));
+    drop(st.hub.request_set_flow(GAS_CO, 0.0));
+
+    *st.experiment.lock().unwrap() = ExperimentState::default();
+    st.audit.write(
+        &AuditEntry::new(Category::Experiment, "stop", AuditResult::Success)
+            .detail(serde_json::json!({ "reason": reason })),
+    );
+    let _ = app.emit("experiment-state-changed", ExperimentState::default());
+    Ok(())
+}
+
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Build and run the Tauri application.
 pub fn run() {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
-    let audit_dir = std::env::temp_dir().join("tmh-lpf-900").join("logs");
+    let data_root = std::env::temp_dir().join("tmh-lpf-900");
+    let audit_dir = data_root.join("logs");
+    let db_dir = data_root.join("data");
     let _ = std::fs::create_dir_all(&audit_dir);
+    let _ = std::fs::create_dir_all(&db_dir);
+    let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let state = AppState {
         hub: Arc::new(build_mock_hub()),
         mode,
         limit_h2: 5.0,
         limit_co: 5.0,
         audit: AuditLog::new(audit_dir),
+        storage: Mutex::new(storage),
+        experiment: Mutex::new(ExperimentState::default()),
     };
 
     tauri::Builder::default()
@@ -252,7 +386,10 @@ pub fn run() {
             close_all_valves,
             shutoff_flammable_gases,
             tare_balance,
-            subscribe_telemetry
+            subscribe_telemetry,
+            get_experiment_state,
+            start_experiment,
+            stop_experiment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -26,6 +26,16 @@ versioning follows [Semantic Versioning](https://semver.org/).
   sampler (balance-offline rows written with weight=0 + annotation, never dropped);
   `examples/soak` headless fast-forward of the full pipeline (actors → aggregate →
   sample → rusqlite) plus dirty-session replay, wired into CI. M2 core complete.
+- **M3 应用壳 + 综合控制页**: `DeviceHub` runs the bus actors on OS threads and bridges
+  to tokio (watch snapshots + oneshot-reply commands). src-tauri exposes typed commands
+  (set_gas_flow w/ clamp+audit+event, on/off, open/close all, shutoff_flammable, tare,
+  start/stop_experiment, device health) + a 0.2 Hz telemetry Channel; single-instance
+  focuses the first window and audits `start_blocked`. Live 综合控制页 (React + zustand +
+  ECharts): 9 temperature tiles (T8 sample-highlighted), weight, 4 gas PV/SV cards, gas
+  control with clamp toast, one-click all-open/close + red cut-flammable, tare, real-time
+  temperature curve (ring buffer, monotonic axis), device-dot status bar. Start/stop
+  experiment dialog (M3 manual atmosphere; safety atmosphere N₂=5/flammables=0 on stop),
+  error-code→Chinese toast, disconnect greying. Browser mock via `isTauri()` for dev.
 
 ## [0.1.0] - 2026-07-05
 

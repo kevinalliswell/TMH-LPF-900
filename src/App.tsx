@@ -1,7 +1,10 @@
 import { useEffect } from "react";
-import { subscribeTelemetry } from "./ipc";
+import { subscribeExperimentState, subscribeTelemetry } from "./ipc";
+import { useExperiment } from "./stores/experiment";
 import { useTelemetry } from "./stores/telemetry";
+import { Toasts } from "./components/Toasts";
 import { ControlPanel } from "./features/control/ControlPanel";
+import { ExperimentBar } from "./features/control/ExperimentBar";
 import { MonitorPanel } from "./features/control/MonitorPanel";
 import { StatusBar } from "./features/control/StatusBar";
 import { TempChart } from "./features/control/TempChart";
@@ -10,7 +13,9 @@ const NAV = ["首页", "综合控制", "实验模式", "历史查询", "通讯�
 
 export default function App() {
   const setSnapshot = useTelemetry((s) => s.setSnapshot);
+  const setExperiment = useExperiment((s) => s.setState);
   useEffect(() => subscribeTelemetry(setSnapshot), [setSnapshot]);
+  useEffect(() => subscribeExperimentState(setExperiment), [setExperiment]);
 
   return (
     <div className="flex h-full w-full">
@@ -58,6 +63,8 @@ export default function App() {
           </h1>
         </header>
 
+        <ExperimentBar />
+
         <main
           className="flex-1 min-h-0 grid gap-3 p-3"
           style={{ gridTemplateColumns: "1fr 320px", gridTemplateRows: "1fr 250px" }}
@@ -75,6 +82,7 @@ export default function App() {
 
         <StatusBar />
       </div>
+      <Toasts />
     </div>
   );
 }

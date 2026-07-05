@@ -22,4 +22,5 @@ tauri = { workspace = true }
 tmh-core = { path = "../crates/tmh-core" }
 serde = { workspace = true }
 serde_json.workspace = true
+chrono = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
