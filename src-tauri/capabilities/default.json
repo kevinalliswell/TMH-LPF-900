@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Enables the main window to call core APIs and the app's own commands.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:allow-open-path", "opener:allow-reveal-item-in-dir"]
+  "permissions": [
+    "core:default",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
+    "updater:default",
+    "process:default"
+  ]
 }

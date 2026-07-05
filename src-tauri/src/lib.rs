@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
@@ -47,6 +48,8 @@ struct AppState {
     sim_speed: f64,
     /// Directory reports and data exports are written to.
     exports_dir: PathBuf,
+    /// Software-update checking (docs/09 §9.3): OFF by default, enabled via config/env.
+    updater_enabled: bool,
 }
 
 /// Shared control block for the single running experiment. `status` is the published
@@ -1130,12 +1133,123 @@ fn export_experiment(app: AppHandle, id: String, format: String) -> Result<Strin
     Ok(p)
 }
 
+// ---- Software update (docs/09 §9.3) -----------------------------------------
+
+#[derive(serde::Serialize, Clone)]
+struct UpdateCheck {
+    /// Whether update checking is enabled (config/env gate; OFF by default).
+    enabled: bool,
+    current_version: String,
+    available: bool,
+    new_version: Option<String>,
+    notes: Option<String>,
+    /// A friendly message when the manifest endpoint is unreachable (offline工控机).
+    error: Option<String>,
+}
+
+impl UpdateCheck {
+    fn base(enabled: bool, current: String) -> Self {
+        Self {
+            enabled,
+            current_version: current,
+            available: false,
+            new_version: None,
+            notes: None,
+            error: None,
+        }
+    }
+}
+
+#[tauri::command]
+fn get_updater_status(app: AppHandle) -> UpdateCheck {
+    let enabled = app.state::<AppState>().updater_enabled;
+    UpdateCheck::base(enabled, app.package_info().version.to_string())
+}
+
+/// Check the manifest endpoint for a newer version. Gated; never errors into the UI —
+/// an unreachable endpoint yields a friendly `error` string (offline is normal here).
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> UpdateCheck {
+    let current = app.package_info().version.to_string();
+    let (enabled, audit) = {
+        let st = app.state::<AppState>();
+        (st.updater_enabled, st.audit.clone())
+    };
+    let mut check = UpdateCheck::base(enabled, current);
+    if !enabled {
+        return check;
+    }
+    match app.updater() {
+        Ok(updater) => match updater.check().await {
+            Ok(Some(update)) => {
+                check.available = true;
+                check.new_version = Some(update.version.clone());
+                check.notes = update.body.clone();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                check.error = Some(format!("无法连接更新服务器（离线环境属正常）：{e}"));
+            }
+        },
+        Err(e) => check.error = Some(format!("更新器不可用：{e}")),
+    }
+    audit.write(
+        &AuditEntry::new(
+            Category::App,
+            "check_update",
+            if check.error.is_some() {
+                AuditResult::Failure
+            } else {
+                AuditResult::Success
+            },
+        )
+        .detail(
+            serde_json::json!({ "available": check.available, "new_version": check.new_version }),
+        ),
+    );
+    let _ = app.emit("update-status", &check);
+    check
+}
+
+/// Download + verify (minisign) + install the update, then restart. Gated.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    if !app.state::<AppState>().updater_enabled {
+        return Err("更新功能未启用".into());
+    }
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("已是最新版本")?;
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.state::<AppState>().audit.write(&AuditEntry::new(
+        Category::App,
+        "install_update",
+        AuditResult::Success,
+    ));
+    app.restart();
+}
+
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Build and run the Tauri application.
 pub fn run() {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
     let sim_speed = sim_speed(&mode);
+    // Software update checking is OFF by default (docs/09 §9.3); config/env enables it.
+    let updater_enabled = matches!(
+        std::env::var("TMH_UPDATER").as_deref(),
+        Ok("1" | "on" | "true")
+    );
+    // Low-end 工控核显 escape hatch (docs/09 §9.1): disable GPU accel on demand.
+    if std::env::var("TMH_DISABLE_GPU").is_ok() {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
+    }
     let data_root = std::env::temp_dir().join("tmh-lpf-900");
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
@@ -1160,6 +1274,7 @@ pub fn run() {
         exp: Arc::new(ExpControl::new()),
         sim_speed,
         exports_dir,
+        updater_enabled,
     };
 
     tauri::Builder::default()
@@ -1176,6 +1291,8 @@ pub fn run() {
             ));
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -1202,7 +1319,10 @@ pub fn run() {
             analyze_gb13242,
             analyze_gb13240,
             generate_report,
-            export_experiment
+            export_experiment,
+            get_updater_status,
+            check_for_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

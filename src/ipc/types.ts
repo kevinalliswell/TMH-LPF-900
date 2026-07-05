@@ -143,6 +143,16 @@ export interface ExperimentParams {
   notes?: string | null;
 }
 
+/** Software-update check result (docs/09 §9.3). */
+export interface UpdateCheck {
+  enabled: boolean;
+  current_version: string;
+  available: boolean;
+  new_version?: string | null;
+  notes?: string | null;
+  error?: string | null;
+}
+
 export const EXPERIMENT_MODES = [
   { id: "REDUCIBILITY", name: "GB/T 13241 还原性" },
   { id: "LOW_TEMP_DEGRADATION", name: "GB/T 13242 低温粉化" },

@@ -15,6 +15,7 @@ import type {
   SampleDto,
   TareResult,
   TelemetrySnapshot,
+  UpdateCheck,
 } from "./types";
 import {
   mockAnalyze13240,
@@ -184,6 +185,30 @@ export async function exportExperiment(id: string, format: ExportFormat): Promis
   const sep = format === "txt" ? "\t" : ",";
   const ext = format === "txt" ? "txt" : "csv";
   downloadBlob(mockExportText(id, sep), `${id}.${ext}`, "text/plain;charset=utf-8");
+}
+
+const APP_VERSION = "0.1.0";
+
+export async function getUpdaterStatus(): Promise<UpdateCheck> {
+  return isTauri()
+    ? invoke("get_updater_status")
+    : { enabled: false, current_version: APP_VERSION, available: false };
+}
+
+export async function checkForUpdate(): Promise<UpdateCheck> {
+  return isTauri()
+    ? invoke("check_for_update")
+    : {
+        enabled: false,
+        current_version: APP_VERSION,
+        available: false,
+        error: "浏览器预览模式不支持更新检查",
+      };
+}
+
+export async function installUpdate(): Promise<void> {
+  if (!isTauri()) throw new Error("浏览器预览模式不支持安装更新");
+  await invoke("install_update");
 }
 
 export function subscribeExperimentState(cb: (s: ExperimentState) => void): () => void {
