@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
-//! Pure frame codecs for TMH-LPF-900 lab devices. Zero I/O, no deps beyond `crc`.
-//! M0: CRC-16/MODBUS helper only; full device codecs land in M1 (golden-vector tested).
+//! Pure frame codecs for TMH-LPF-900 lab devices. Zero I/O, no runtime deps beyond
+//! `crc`. Byte-exact against docs/golden_vectors.json (M1). Bus discipline, safety
+//! clamp and scaling live in tmh-core (M2); everything here is stateless.
+
+pub mod modbus;
 
 use crc::{Crc, CRC_16_MODBUS};
 
