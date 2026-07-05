@@ -118,10 +118,10 @@ fn modbus_golden() {
     let c = case(&r, sect, "parse_read_all 9regs scale=0.1");
     let frame = unhex(c["rx_hex"].as_str().unwrap());
     let got = modbus::parse_read_all(&frame, 0.1, false).expect("parse ok");
-    for k in 0..9 {
+    for (k, &g) in got.iter().enumerate() {
         let key = format!("T{}", k + 1);
         let e = c["expect"][&key].as_f64().unwrap();
-        assert!((got[k] - e).abs() < 1e-9, "{key}: {} vs {}", got[k], e);
+        assert!((g - e).abs() < 1e-9, "{key}: {g} vs {e}");
     }
 
     let c = case(&r, sect, "extract_read_all skips echoed request");
