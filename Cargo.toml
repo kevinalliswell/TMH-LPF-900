@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tmh-protocols", "crates/tmh-core"]
+members = ["crates/tmh-protocols", "crates/tmh-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,8 @@ authors = ["USTB TMH-LPF-900 Team"]
 [workspace.dependencies]
 crc = "3"
 thiserror = "2"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 strip = true

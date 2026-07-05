@@ -1,0 +1,22 @@
+[package]
+name = "tmh-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TMH-LPF-900 desktop shell (Tauri v2)."
+
+[lib]
+name = "tmh_app_lib"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "tmh-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+tmh-core = { path = "../crates/tmh-core" }
