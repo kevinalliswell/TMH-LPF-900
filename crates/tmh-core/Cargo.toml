@@ -19,6 +19,7 @@ serde_json.workspace = true
 serialport = { workspace = true, optional = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true

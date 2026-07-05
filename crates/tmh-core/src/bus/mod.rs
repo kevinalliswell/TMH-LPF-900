@@ -8,9 +8,11 @@
 //! M2 slice 4.
 
 pub mod balance;
+pub mod hub;
 pub mod mfc;
 pub mod temp;
 
 pub use balance::{BalanceActor, BalanceSnapshot};
+pub use hub::{DeviceHub, HubIntervals};
 pub use mfc::{GasReading, MfcActor, MfcCommand, MfcSnapshot};
 pub use temp::{TempActor, TempSnapshot};
