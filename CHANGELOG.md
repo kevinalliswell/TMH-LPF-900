@@ -17,6 +17,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - `tmh-core` config/audit/storage (M2 slice 2): comm_config.json load + validate +
   atomic write-back; JSON audit log (date-rotated, never throws into control flow);
   rusqlite (bundled, WAL) persistence with schema migrations.
+- `tmh-core` bus core (M2 slice 3): safety clamp (single choke point, compile-time
+  absolute ceiling, zero always passes), health/reconnect state machine (5-fail
+  offline, [1,2,5,10,30]s backoff, staleness), and temperature/MFC/balance actors
+  (clamp integration, set-preempts-poll priority, tare sequence). Deterministic unit
+  tests against MockTransport.
 
 ## [0.1.0] - 2026-07-05
 
