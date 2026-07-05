@@ -730,6 +730,15 @@ fn skip_stage(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
+#[tauri::command]
+fn list_programs() -> Vec<Program> {
+    tmh_core::engine::STANDARD_MODES
+        .iter()
+        .filter_map(|m| standard_program(m))
+        .collect()
+}
+
 // ---- History query ----------------------------------------------------------
 
 #[derive(serde::Serialize)]
@@ -1076,6 +1085,7 @@ pub fn run() {
             start_experiment,
             stop_experiment,
             skip_stage,
+            list_programs,
             list_experiments,
             get_experiment_detail,
             get_experiment_samples,

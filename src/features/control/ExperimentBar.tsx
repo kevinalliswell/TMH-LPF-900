@@ -1,9 +1,16 @@
 import { useState } from "react";
-import { EXPERIMENT_MODES, stopExperiment } from "../../ipc";
+import { EXPERIMENT_MODES, skipStage, stopExperiment } from "../../ipc";
 import { Modal } from "../../components/Modal";
 import { useExperiment } from "../../stores/experiment";
 import { toastError, useToasts } from "../../stores/toast";
 import { StartExperimentDialog } from "../experiment/StartExperimentDialog";
+
+/** Format an elapsed second count as HH:MM:SS. */
+export function fmtHms(totalS: number | undefined): string {
+  const s = Math.max(0, Math.floor(totalS ?? 0));
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+}
 
 export function ExperimentBar() {
   const ex = useExperiment((s) => s.state);
@@ -12,6 +19,7 @@ export function ExperimentBar() {
   const push = useToasts((s) => s.push);
 
   const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? ex.mode ?? "";
+  const stageNo = (ex.stage_index ?? 0) + 1;
 
   const doStop = async () => {
     try {
@@ -21,6 +29,15 @@ export function ExperimentBar() {
       toastError(e);
     } finally {
       setConfirmStop(false);
+    }
+  };
+
+  const doSkip = async () => {
+    try {
+      await skipStage();
+      push("已跳至下一阶段", "info");
+    } catch (e) {
+      toastError(e);
     }
   };
 
@@ -45,7 +62,25 @@ export function ExperimentBar() {
             <span className="mono" style={{ color: "var(--fg-faint)" }}>
               {ex.sample_name}
             </span>
+            {ex.stage_name && (
+              <span
+                className="px-2 py-0.5 rounded"
+                style={{ background: "var(--panel-2)", color: "var(--heat)" }}
+              >
+                阶段 {stageNo}/{ex.total_stages ?? "-"} · {ex.stage_name} → {ex.target_temp ?? 0}℃
+              </span>
+            )}
+            <span className="mono" style={{ color: "var(--fg-faint)" }}>
+              时长 {fmtHms(ex.total_elapsed_s)}
+            </span>
             <div className="flex-1" />
+            <button
+              onClick={doSkip}
+              className="px-2.5 py-1 rounded text-[12px]"
+              style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+            >
+              跳过阶段
+            </button>
             <button
               onClick={() => setConfirmStop(true)}
               className="px-2.5 py-1 rounded text-[12px]"

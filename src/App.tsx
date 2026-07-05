@@ -1,21 +1,49 @@
-import { useEffect } from "react";
+import { useEffect, type FC } from "react";
 import { subscribeExperimentState, subscribeTelemetry } from "./ipc";
 import { useExperiment } from "./stores/experiment";
+import { useNav, type View } from "./stores/nav";
 import { useTelemetry } from "./stores/telemetry";
 import { Toasts } from "./components/Toasts";
-import { ControlPanel } from "./features/control/ControlPanel";
 import { ExperimentBar } from "./features/control/ExperimentBar";
-import { MonitorPanel } from "./features/control/MonitorPanel";
+import { ControlView } from "./features/control/ControlView";
+import { HomeView } from "./features/home/HomeView";
+import { ModeView } from "./features/mode/ModeView";
+import { HistoryView } from "./features/history/HistoryView";
+import { SettingsView } from "./features/settings/SettingsView";
+import { HelpView } from "./features/help/HelpView";
+import { AboutView } from "./features/about/AboutView";
 import { StatusBar } from "./features/control/StatusBar";
-import { TempChart } from "./features/control/TempChart";
 
-const NAV = ["首页", "综合控制", "实验模式", "历史查询", "通讯设置", "帮助", "关于"];
+const NAV: { view: View; label: string }[] = [
+  { view: "home", label: "首页" },
+  { view: "control", label: "综合控制" },
+  { view: "mode", label: "实验模式" },
+  { view: "history", label: "历史查询" },
+  { view: "settings", label: "通讯设置" },
+  { view: "help", label: "帮助" },
+  { view: "about", label: "关于" },
+];
+
+const VIEWS: Record<View, FC> = {
+  home: HomeView,
+  control: ControlView,
+  mode: ModeView,
+  history: HistoryView,
+  settings: SettingsView,
+  help: HelpView,
+  about: AboutView,
+};
 
 export default function App() {
   const setSnapshot = useTelemetry((s) => s.setSnapshot);
   const setExperiment = useExperiment((s) => s.setState);
+  const view = useNav((s) => s.view);
+  const setView = useNav((s) => s.setView);
   useEffect(() => subscribeTelemetry(setSnapshot), [setSnapshot]);
   useEffect(() => subscribeExperimentState(setExperiment), [setExperiment]);
+
+  const title = NAV.find((n) => n.view === view)?.label ?? "";
+  const ViewComponent = VIEWS[view];
 
   return (
     <div className="flex h-full w-full">
@@ -30,19 +58,24 @@ export default function App() {
           </div>
         </div>
         <ul className="py-2 text-[13px]">
-          {NAV.map((n, i) => (
-            <li
-              key={n}
-              className="px-4 py-2 cursor-default"
-              style={{
-                color: i === 1 ? "var(--fg)" : "var(--fg-dim)",
-                background: i === 1 ? "var(--panel-2)" : "transparent",
-                borderLeft: i === 1 ? "2px solid var(--heat)" : "2px solid transparent",
-              }}
-            >
-              {n}
-            </li>
-          ))}
+          {NAV.map((n) => {
+            const active = n.view === view;
+            return (
+              <li key={n.view}>
+                <button
+                  onClick={() => setView(n.view)}
+                  className="w-full text-left px-4 py-2"
+                  style={{
+                    color: active ? "var(--fg)" : "var(--fg-dim)",
+                    background: active ? "var(--panel-2)" : "transparent",
+                    borderLeft: active ? "2px solid var(--heat)" : "2px solid transparent",
+                  }}
+                >
+                  {n.label}
+                </button>
+              </li>
+            );
+          })}
         </ul>
         <div className="flex-1" />
         <div className="px-4 py-3 text-[10px]" style={{ color: "var(--fg-faint)" }}>
@@ -52,11 +85,11 @@ export default function App() {
 
       <div className="flex flex-col flex-1 min-w-0">
         <header
-          className="flex items-center justify-between px-5 h-14 border-b"
+          className="flex items-center justify-between px-5 h-14 border-b shrink-0"
           style={{ borderColor: "var(--border)" }}
         >
           <h1 className="text-base font-semibold flex items-baseline gap-2">
-            综合控制
+            {title}
             <span className="mono text-xs" style={{ color: "var(--fg-faint)" }}>
               TMH-LPF-900 v0.1.0
             </span>
@@ -65,20 +98,7 @@ export default function App() {
 
         <ExperimentBar />
 
-        <main
-          className="flex-1 min-h-0 grid gap-3 p-3"
-          style={{ gridTemplateColumns: "1fr 320px", gridTemplateRows: "1fr 250px" }}
-        >
-          <div className="min-h-0 overflow-auto">
-            <MonitorPanel />
-          </div>
-          <div className="row-span-2 min-h-0 overflow-auto">
-            <ControlPanel />
-          </div>
-          <div className="panel min-h-0">
-            <TempChart />
-          </div>
-        </main>
+        <ViewComponent />
 
         <StatusBar />
       </div>

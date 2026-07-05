@@ -46,12 +46,91 @@ export const GAS_NAMES = ["H₂", "N₂", "CO₂", "CO"] as const;
 /** Flammable gases cut by the emergency shutoff. */
 export const FLAMMABLE = [GAS.H2, GAS.CO2, GAS.CO];
 
+export type Phase =
+  | "IDLE"
+  | "CONFIGURING"
+  | "RUNNING"
+  | "STAGE_TRANSITION"
+  | "COMPLETING"
+  | "STOPPING"
+  | "ERROR";
+
+export type StageKind = "HEATING" | "STABILIZING" | "REDUCING" | "COOLING";
+
 export interface ExperimentState {
   running: boolean;
   experiment_id?: string | null;
   mode?: string | null;
   sample_name?: string | null;
   started_at?: string | null;
+  phase?: Phase;
+  stage_index?: number;
+  total_stages?: number;
+  stage_name?: string | null;
+  stage_kind?: StageKind | null;
+  target_temp?: number;
+  tolerance?: number;
+  stage_elapsed_s?: number;
+  total_elapsed_s?: number;
+}
+
+/** One program stage (mirrors tmh_core::engine::Stage). */
+export interface StageDto {
+  name: string;
+  kind: StageKind;
+  gas: number[]; // [H2, N2, CO2, CO] L/min
+  target_temp: number;
+  tolerance: number;
+  duration_min: number;
+  ramp_rate: number;
+  description: string;
+}
+
+export interface ProgramDto {
+  id: string;
+  name: string;
+  stages: StageDto[];
+}
+
+/** History list row. */
+export interface ExperimentSummary {
+  experiment_id: string;
+  experiment_name: string;
+  sample_name: string;
+  sample_weight: number;
+  start_time: string;
+  end_time?: string | null;
+  operator?: string | null;
+  experiment_type?: string | null;
+  has_analysis: boolean;
+}
+
+export interface ExperimentDetail {
+  experiment_id: string;
+  experiment_name: string;
+  sample_name: string;
+  sample_weight: number;
+  start_time: string;
+  end_time?: string | null;
+  description?: string | null;
+  operator?: string | null;
+  experiment_type?: string | null;
+  analysis?: Record<string, unknown> | null;
+  created_at: string;
+  sample_count: number;
+}
+
+export interface SampleDto {
+  timestamp: string;
+  experiment_duration?: string | null;
+  temperature: number;
+  weight: number;
+  weight_loss: number;
+  co_flow: number;
+  co2_flow: number;
+  n2_flow: number;
+  h2_flow: number;
+  experiment_status?: string | null;
 }
 
 export interface ExperimentParams {
