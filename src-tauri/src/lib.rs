@@ -15,6 +15,7 @@ use tmh_core::clamp::ClampResult;
 use tmh_core::engine::{
     standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
 };
+use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
@@ -880,6 +881,142 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---- GB analysis ------------------------------------------------------------
+
+/// Parse "HH:MM:SS" → minutes (for the reduction-rate least-squares fit).
+fn parse_hms_min(s: &str) -> Option<f64> {
+    let mut it = s.split(':');
+    let h: f64 = it.next()?.parse().ok()?;
+    let m: f64 = it.next()?.parse().ok()?;
+    let sec: f64 = it.next()?.parse().ok()?;
+    Some(h * 60.0 + m + sec / 60.0)
+}
+
+/// Persist an analysis-result JSON onto the experiment row and audit it.
+fn persist_analysis(
+    state: &AppState,
+    id: &str,
+    standard: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .set_analysis_results(id, &json)
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(Category::Experiment, "analyze", AuditResult::Success)
+            .detail(serde_json::json!({ "id": id, "standard": standard })),
+    );
+    Ok(())
+}
+
+fn require_experiment(state: &AppState, id: &str) -> Result<(), String> {
+    let exists = state
+        .storage
+        .lock()
+        .unwrap()
+        .get_experiment(id)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err("实验不存在".into())
+    }
+}
+
+/// GB/T 13241 reducibility: Rt from W0 (sample weight) and Wt (final sample weight),
+/// plus the reduction-rate index over the recorded curve. `o2_pct` is operator-entered.
+#[tauri::command]
+fn analyze_gb13241(
+    state: State<AppState>,
+    id: String,
+    o2_pct: f64,
+) -> Result<serde_json::Value, String> {
+    let (w0, samples) = {
+        let s = state.storage.lock().unwrap();
+        let row = s
+            .get_experiment(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or("实验不存在")?;
+        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
+        (row.sample_weight, samples)
+    };
+    let wt = samples.last().map(|r| r.weight).unwrap_or(w0);
+    let red = reducibility(w0, wt, o2_pct).ok_or("W0 或 O2% 无效")?;
+    let points: Vec<(f64, f64)> = samples
+        .iter()
+        .filter_map(|r| {
+            let m = parse_hms_min(r.experiment_duration.as_deref()?)?;
+            Some((m, reducibility(w0, r.weight, o2_pct)?.rt))
+        })
+        .collect();
+    let value = serde_json::json!({
+        "standard": "GB/T 13241",
+        "w0": w0,
+        "wt": wt,
+        "o2_pct": o2_pct,
+        "rt": red.rt,
+        "delta_w": red.delta_w,
+        "reduction_rate_index": reduction_rate_index(&points),
+        "computed_at": iso_now(),
+    });
+    persist_analysis(&state, &id, "GB/T 13241", &value)?;
+    Ok(value)
+}
+
+/// GB/T 13242 low-temperature degradation RDI from operator-entered sieve masses (g).
+#[tauri::command]
+fn analyze_gb13242(
+    state: State<AppState>,
+    id: String,
+    m0: f64,
+    m_gt63: f64,
+    m_315_63: f64,
+    m_05_315: f64,
+    m_lt05: f64,
+) -> Result<serde_json::Value, String> {
+    require_experiment(&state, &id)?;
+    let r = rdi(m0, m_gt63, m_315_63, m_05_315, m_lt05).ok_or("m0 无效")?;
+    let value = serde_json::json!({
+        "standard": "GB/T 13242",
+        "m0": m0,
+        "m_gt63": m_gt63,
+        "m_315_63": m_315_63,
+        "m_05_315": m_05_315,
+        "m_lt05": m_lt05,
+        "rdi_plus_6_3": r.rdi_plus_6_3,
+        "rdi_plus_3_15": r.rdi_plus_3_15,
+        "rdi_minus_0_5": r.rdi_minus_0_5,
+        "sieve_warning": r.sieve_warning,
+        "computed_at": iso_now(),
+    });
+    persist_analysis(&state, &id, "GB/T 13242", &value)?;
+    Ok(value)
+}
+
+/// GB/T 13240 free-swelling index from operator-entered (V0, V1) volume pairs (mL).
+#[tauri::command]
+fn analyze_gb13240(
+    state: State<AppState>,
+    id: String,
+    volumes: Vec<(f64, f64)>,
+) -> Result<serde_json::Value, String> {
+    require_experiment(&state, &id)?;
+    let r = free_swelling(&volumes).ok_or("无有效试样体积")?;
+    let value = serde_json::json!({
+        "standard": "GB/T 13240",
+        "per_pellet": r.per_pellet,
+        "average": r.average,
+        "computed_at": iso_now(),
+    });
+    persist_analysis(&state, &id, "GB/T 13240", &value)?;
+    Ok(value)
+}
+
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Build and run the Tauri application.
@@ -942,7 +1079,10 @@ pub fn run() {
             list_experiments,
             get_experiment_detail,
             get_experiment_samples,
-            delete_experiment
+            delete_experiment,
+            analyze_gb13241,
+            analyze_gb13242,
+            analyze_gb13240
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
