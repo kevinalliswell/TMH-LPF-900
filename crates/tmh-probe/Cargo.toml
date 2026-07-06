@@ -1,0 +1,18 @@
+[package]
+name = "tmh-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Headless serial bring-up probe for TMH-LPF-900 hardware — reads/records each device with the golden-tested codecs. Ships as a standalone exe."
+
+[[bin]]
+name = "tmh-probe"
+path = "src/main.rs"
+
+[dependencies]
+# tmh-core with the real serial transport + recorder enabled.
+tmh-core = { path = "../tmh-core", features = ["serial"] }
+tmh-protocols = { path = "../tmh-protocols" }
+serialport = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,33 @@
+name: Probe (Windows exe)
+
+# Builds the standalone serial bring-up probe as a downloadable Windows .exe.
+# Run manually (Actions → Probe → Run workflow), then download the "tmh-probe-windows"
+# artifact and copy it to the hardware PC (工控机) via USB — no toolchain needed there.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "crates/tmh-probe/**"
+      - ".github/workflows/probe.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tmh-probe (release)
+        run: cargo build --release -p tmh-probe
+
+      - name: Upload probe exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: tmh-probe-windows
+          path: target/release/tmh-probe.exe
+          if-no-files-found: error
+          retention-days: 90

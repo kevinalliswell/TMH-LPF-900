@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tmh-protocols", "crates/tmh-core", "src-tauri"]
+members = ["crates/tmh-protocols", "crates/tmh-core", "crates/tmh-probe", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,6 +26,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 rust_xlsxwriter = "0.79"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 strip = true
