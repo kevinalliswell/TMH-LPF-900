@@ -212,6 +212,24 @@ fn apply_safety_atmosphere(hub: &DeviceHub) {
     hub.set_temp_target_c(25.0);
 }
 
+/// Like [`apply_safety_atmosphere`] but BLOCKS until the MFC bus thread confirms each
+/// setpoint. Used on application exit (issue #1) so the process never terminates with
+/// flammable gas still commanded. Must run on a non-async thread (the Tauri run-event
+/// loop) — `blocking_recv` panics inside a tokio runtime.
+fn apply_safety_atmosphere_blocking(hub: &DeviceHub) {
+    // Enqueue every setpoint first, then await confirmation, so the MFC thread applies
+    // them in a single drain (keeps exit latency to about one poll cycle).
+    let replies: Vec<_> = SAFETY_ATMOSPHERE
+        .iter()
+        .enumerate()
+        .map(|(gas, &v)| hub.request_set_flow(gas, v))
+        .collect();
+    hub.set_temp_target_c(25.0);
+    for reply in replies {
+        let _ = reply.blocking_recv();
+    }
+}
+
 /// Snapshot one sample row from live telemetry. `status` tags the stage (e.g. REDUCING).
 fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, status: &str) -> SampleRow {
     let temperature = hub.temp_rx().borrow().temps[7].unwrap_or(0.0);
@@ -358,6 +376,35 @@ fn spawn_experiment_task(
                     &mut buffer,
                     &id,
                     "stopped",
+                    engine.total_elapsed_s(),
+                );
+                break;
+            }
+
+            // Safety (issue #3): sustained loss of a safety-critical bus (5 consecutive
+            // failures marks it offline) is an error-exit path — force the protective
+            // atmosphere instead of running blind with flammable gas open.
+            let mfc_ok = hub.mfc_rx().borrow().connected;
+            let temp_ok = hub.temp_rx().borrow().connected;
+            if !mfc_ok || !temp_ok {
+                let device = if !mfc_ok { "mfc" } else { "temp" };
+                audit.write(
+                    &AuditEntry::new(
+                        Category::Experiment,
+                        "device_offline_abort",
+                        AuditResult::Failure,
+                    )
+                    .detail(serde_json::json!({ "id": id, "device": device })),
+                );
+                finalize(
+                    &app,
+                    &hub,
+                    &storage,
+                    &audit,
+                    &exp,
+                    &mut buffer,
+                    &id,
+                    "error",
                     engine.total_elapsed_s(),
                 );
                 break;
@@ -524,6 +571,11 @@ fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
 
 #[tauri::command]
 async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
+    // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
+    // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
+    if gas > GAS_CO {
+        return Err("无效的气体通道".into());
+    }
     let hub = app.state::<AppState>().hub.clone();
     let clamp = hub
         .request_set_flow(gas, value)
@@ -548,6 +600,9 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 
 #[tauri::command]
 fn set_gas_on_off(state: State<AppState>, gas: usize, on: bool) {
+    if gas > GAS_CO {
+        return; // invalid channel from the webview; the MFC actor also guards this
+    }
     state.hub.set_on_off(gas, on);
     state.audit.write(
         &AuditEntry::new(Category::Gas, "on_off", AuditResult::Success)
@@ -1324,6 +1379,21 @@ pub fn run() {
             check_for_update,
             install_update
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Every application-exit path must leave the furnace in the protective
+            // atmosphere (docs/05 §5.5, issue #1). `ExitRequested` fires before teardown;
+            // apply the safety atmosphere synchronously here so gas is never left flowing
+            // after the window closes. The MFC bus thread also zeroes flammables on stop.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let st = app.state::<AppState>();
+                apply_safety_atmosphere_blocking(&st.hub);
+                st.audit.write(&AuditEntry::new(
+                    Category::App,
+                    "exit",
+                    AuditResult::Success,
+                ));
+            }
+        });
 }
