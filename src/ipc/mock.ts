@@ -32,6 +32,7 @@ let seq = 0;
 const approach = (cur: number, tgt: number, frac: number) => cur + (tgt - cur) * frac;
 
 function clampGas(gas: number, value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0; // mirror the backend clamp (#4)
   let limit = Number.POSITIVE_INFINITY;
   if (gas === 0) limit = Math.min(limits.h2, H2_ABS);
   if (gas === 3) limit = Math.min(limits.co, CO_ABS);
