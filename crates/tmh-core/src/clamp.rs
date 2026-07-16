@@ -122,7 +122,10 @@ mod tests {
             assert_eq!(clamp_setpoint(gas, -3.0, 5.0, 5.0).applied, 0.0);
             assert_eq!(clamp_setpoint(gas, f64::NAN, 5.0, 5.0).applied, 0.0);
             assert_eq!(clamp_setpoint(gas, f64::INFINITY, 5.0, 5.0).applied, 0.0);
-            assert_eq!(clamp_setpoint(gas, f64::NEG_INFINITY, 5.0, 5.0).applied, 0.0);
+            assert_eq!(
+                clamp_setpoint(gas, f64::NEG_INFINITY, 5.0, 5.0).applied,
+                0.0
+            );
         }
         // a reject is not a clamp (it's floored, not reduced to the limit)
         assert!(!clamp_setpoint(Gas::H2, -3.0, 5.0, 5.0).clamped);
