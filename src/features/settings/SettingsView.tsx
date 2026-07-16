@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { getGasSafetyLimits, runtimeMode } from "../../ipc";
+import { getGasSafetyLimits } from "../../ipc";
 import type { GasLimits } from "../../ipc/types";
+import { useRuntimeMode } from "../../stores/runtimeMode";
 import { Page, SectionTitle } from "../../components/Page";
 
 const BUSES = [
   {
     name: "温度控制器",
-    detail: "Modbus-RTU · 9600 8N1 · 从站地址 1 · 9 通道（T1–T9，T8 为样品温度）",
+    detail: "Modbus-RTU · 9600 8N1 · 从站地址 0 · 9 通道（T1–T9，T8 为样品温度）",
   },
   {
     name: "气体流量 MFC",
@@ -15,8 +16,16 @@ const BUSES = [
   { name: "电子天平", detail: "RS232 · 连续输出（G S 稳定标志）· 去皮 A00" },
 ];
 
+const MODE_LABEL: Record<string, string> = {
+  web: "web（浏览器模拟）",
+  mock: "mock（后端模拟设备）",
+  real: "real（真实硬件）",
+  replay: "replay（会话回放）",
+};
+
 export function SettingsView() {
   const [limits, setLimits] = useState<GasLimits | null>(null);
+  const mode = useRuntimeMode();
   useEffect(() => {
     getGasSafetyLimits()
       .then(setLimits)
@@ -75,7 +84,7 @@ export function SettingsView() {
       <div className="panel p-4">
         <SectionTitle>运行</SectionTitle>
         <div className="mono text-[12px]" style={{ color: "var(--fg-dim)" }}>
-          设备模式: {runtimeMode() === "web" ? "web（浏览器模拟）" : "mock（后端模拟设备）"}
+          设备模式: {mode === null ? "…" : (MODE_LABEL[mode] ?? mode)}
         </div>
       </div>
     </Page>

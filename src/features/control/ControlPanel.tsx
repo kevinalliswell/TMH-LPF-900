@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   GAS,
   GAS_NAMES,
   closeAllValves,
+  getGasSafetyLimits,
   openAllValves,
   setGasFlow,
   setGasOnOff,
   shutoffFlammableGases,
   tareBalance,
 } from "../../ipc";
+import type { GasLimits } from "../../ipc/types";
 import { useTelemetry } from "../../stores/telemetry";
 import { toastError } from "../../stores/toast";
 
@@ -23,6 +25,13 @@ export function ControlPanel() {
   const [inputs, setInputs] = useState<number[]>([0, 0, 0, 0]);
   const [toast, setToast] = useState<{ msg: string; warn: boolean } | null>(null);
   const [taring, setTaring] = useState(false);
+  // Display the configured safety limits (#13) — enforcement stays in the backend clamp.
+  const [limits, setLimits] = useState<GasLimits | null>(null);
+  useEffect(() => {
+    getGasSafetyLimits()
+      .then(setLimits)
+      .catch(() => {});
+  }, []);
 
   const flash = (msg: string, warn = false) => {
     setToast({ msg, warn });
@@ -113,7 +122,7 @@ export function ControlPanel() {
                 </button>
                 {limited && (
                   <span className="mono text-[10px]" style={{ color: "var(--warn)" }}>
-                    ≤5.0
+                    ≤{(g === GAS.H2 ? limits?.h2 : limits?.co) ?? 5}
                   </span>
                 )}
               </div>

@@ -45,8 +45,17 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export function runtimeMode(): "mock" | "web" {
-  return isTauri() ? "mock" : "web";
+export type RuntimeMode = "real" | "mock" | "replay" | "web";
+
+/** True runtime mode. In Tauri this asks the backend (TMH_DEVICE_MODE = real|mock|replay)
+ *  so real hardware is never mislabelled as a simulation; a plain browser is always "web". */
+export async function getRuntimeMode(): Promise<RuntimeMode> {
+  if (!isTauri()) return "web";
+  try {
+    return await invoke<RuntimeMode>("get_runtime_mode");
+  } catch {
+    return "mock";
+  }
 }
 
 export async function getGasSafetyLimits(): Promise<GasLimits> {
