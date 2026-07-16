@@ -10,6 +10,7 @@ import {
   tareBalance,
 } from "../../ipc";
 import { useTelemetry } from "../../stores/telemetry";
+import { toastError } from "../../stores/toast";
 
 const btn = {
   background: "var(--panel-2)",
@@ -29,16 +30,51 @@ export function ControlPanel() {
   };
 
   const doSet = async (g: number) => {
-    const r = await setGasFlow(g, inputs[g] ?? 0);
-    if (r.clamped) flash(`${GAS_NAMES[g]}：已按安全上限 ${r.applied.toFixed(1)} L/min 执行`, true);
-    else flash(`${GAS_NAMES[g]} 设定为 ${r.applied.toFixed(1)} L/min`);
+    try {
+      const r = await setGasFlow(g, inputs[g] ?? 0);
+      if (r.clamped) flash(`${GAS_NAMES[g]}：已按安全上限 ${r.applied.toFixed(1)} L/min 执行`, true);
+      else flash(`${GAS_NAMES[g]} 设定为 ${r.applied.toFixed(1)} L/min`);
+    } catch (e) {
+      toastError(e);
+    }
   };
 
   const doTare = async () => {
     setTaring(true);
-    const r = await tareBalance();
-    setTaring(false);
-    flash(r.success ? `去皮成功（${(r.weight ?? 0).toFixed(3)} g）` : "去皮失败，请重试", !r.success);
+    try {
+      const r = await tareBalance();
+      flash(r.success ? `去皮成功（${(r.weight ?? 0).toFixed(3)} g）` : "去皮失败，请重试", !r.success);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setTaring(false);
+    }
+  };
+
+  const doOnOff = async (g: number, on: boolean) => {
+    try {
+      await setGasOnOff(g, on);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  const doValves = async (open: boolean) => {
+    try {
+      await (open ? openAllValves() : closeAllValves());
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  // Only report success once the emergency shutoff actually resolves (issue #9).
+  const doShutoff = async () => {
+    try {
+      await shutoffFlammableGases();
+      flash("已切断可燃气（H₂ / CO₂ / CO → 0）", true);
+    } catch (e) {
+      toastError(e);
+    }
   };
 
   return (
@@ -69,7 +105,7 @@ export function ControlPanel() {
                   设定
                 </button>
                 <button
-                  onClick={() => setGasOnOff(g, !on)}
+                  onClick={() => doOnOff(g, !on)}
                   className="px-2.5 py-1 rounded text-[12px] w-9"
                   style={btn}
                 >
@@ -85,18 +121,15 @@ export function ControlPanel() {
           })}
         </div>
         <div className="flex gap-2 mt-3">
-          <button onClick={() => openAllValves()} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
+          <button onClick={() => doValves(true)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
             全开
           </button>
-          <button onClick={() => closeAllValves()} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
+          <button onClick={() => doValves(false)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
             全关
           </button>
         </div>
         <button
-          onClick={() => {
-            shutoffFlammableGases();
-            flash("已切断可燃气（H₂ / CO₂ / CO → 0）", true);
-          }}
+          onClick={doShutoff}
           className="w-full py-2 mt-2 rounded text-[13px] font-semibold"
           style={{ background: "var(--danger)", color: "#fff", boxShadow: "0 0 14px rgba(255,69,58,0.35)" }}
         >

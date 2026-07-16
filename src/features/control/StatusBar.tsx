@@ -1,5 +1,5 @@
 import { runtimeMode } from "../../ipc";
-import { useTelemetry } from "../../stores/telemetry";
+import { useTelemetry, useTelemetryStale } from "../../stores/telemetry";
 
 function Dot({ ok, label }: { ok: boolean | undefined; label: string }) {
   // undefined = never read (amber/stale), true = green, false = red
@@ -22,7 +22,10 @@ function Dot({ ok, label }: { ok: boolean | undefined; label: string }) {
 
 export function StatusBar() {
   const snap = useTelemetry((s) => s.snapshot);
-  const h = snap?.health;
+  const stale = useTelemetryStale();
+  // A stale stream (>5s without a frame) shows amber/stale dots regardless of last-known
+  // health, so frozen data is never presented as live (issue #10).
+  const h = stale ? undefined : snap?.health;
   const mode = runtimeMode();
   return (
     <footer
@@ -32,6 +35,11 @@ export function StatusBar() {
       <Dot ok={h?.temp_connected} label="温度总线" />
       <Dot ok={h?.mfc_connected} label="气体总线" />
       <Dot ok={h?.balance_connected} label="天平" />
+      {stale && snap && (
+        <span className="text-[11px]" style={{ color: "var(--warn)" }}>
+          数据陈旧（&gt;5s）
+        </span>
+      )}
       <div className="flex-1" />
       <span
         className="px-2 py-0.5 rounded text-[11px]"
