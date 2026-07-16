@@ -238,9 +238,10 @@ impl Storage {
         }
     }
 
-    /// Sample rows for an experiment, decimated to at most `max_points` (evenly spaced,
-    /// oldest→newest). `max_points == 0` returns every row. A huge run must not flood
-    /// the chart, so the read thins server-side via a window-function stride.
+    /// Sample rows for an experiment, decimated to about `max_points` (evenly spaced,
+    /// oldest→newest, with the first and last sample always included). `max_points == 0`
+    /// returns every row. A huge run must not flood the chart, so the read thins
+    /// server-side via a window-function stride.
     pub fn get_samples(&self, experiment_id: &str, max_points: usize) -> Result<Vec<SampleRow>> {
         let total = self.count_samples(experiment_id)? as usize;
         let stride = if max_points == 0 || total <= max_points {
@@ -248,14 +249,20 @@ impl Storage {
         } else {
             total.div_ceil(max_points)
         };
+        // Always include the final sample (rn = total-1): it is the endpoint the chart and
+        // GB analysis care about most, and plain `rn % stride == 0` usually drops it (#14).
+        let last_rn = total.saturating_sub(1) as i64;
         let mut stmt = self.conn.prepare(
             "SELECT experiment_id, timestamp, experiment_duration, temperature, weight, \
              weight_loss, co_flow, co2_flow, n2_flow, h2_flow, experiment_status, system_message \
              FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) - 1 AS rn FROM experiment_data \
-             WHERE experiment_id = ?1) WHERE rn % ?2 = 0 ORDER BY id",
+             WHERE experiment_id = ?1) WHERE rn % ?2 = 0 OR rn = ?3 ORDER BY id",
         )?;
         let rows = stmt
-            .query_map(params![experiment_id, stride as i64], sample_from_row)?
+            .query_map(
+                params![experiment_id, stride as i64, last_rn],
+                sample_from_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -416,10 +423,16 @@ mod tests {
         assert_eq!(all[999].temperature, 999.0);
 
         let thin = s.get_samples("e1", 100).unwrap();
-        assert!(thin.len() <= 100, "decimated to <= 100, got {}", thin.len());
+        // ~max_points, plus the always-included final sample (#14).
+        assert!(
+            thin.len() <= 101,
+            "decimated to about 100, got {}",
+            thin.len()
+        );
         assert!(thin.len() >= 90, "still representative, got {}", thin.len());
-        // First point preserved; ordered oldest→newest.
+        // First AND last point preserved; ordered oldest→newest.
         assert_eq!(thin[0].temperature, 0.0);
+        assert_eq!(thin.last().unwrap().temperature, 999.0);
         assert!(thin.windows(2).all(|w| w[0].temperature < w[1].temperature));
     }
 
