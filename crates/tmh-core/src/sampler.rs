@@ -10,7 +10,7 @@ use crate::telemetry::TelemetrySnapshot;
 #[derive(Debug, Clone)]
 pub struct SampleContext {
     pub experiment_id: String,
-    /// Initial sample weight W0 (grams); weight-loss % is relative to this.
+    /// Initial sample weight W0 (grams); weight loss (grams) is relative to this.
     pub initial_weight: f64,
 }
 
@@ -28,11 +28,9 @@ pub fn build_sample_row(
     } else {
         snap.weight.unwrap_or(0.0)
     };
-    let weight_loss = if ctx.initial_weight > 0.0 {
-        (ctx.initial_weight - weight) / ctx.initial_weight * 100.0
-    } else {
-        0.0
-    };
+    // Weight loss in grams (matches the report/export "失重(g)" column and the GB Rt
+    // formula's ΔW = W0 − Wt). Floored at 0 so a tare/noise blip can't go negative.
+    let weight_loss = (ctx.initial_weight - weight).max(0.0);
     let system_message = balance_offline.then(|| "天平离线".to_string());
     SampleRow {
         experiment_id: ctx.experiment_id.clone(),
@@ -118,7 +116,7 @@ mod tests {
         );
         assert_eq!(row.temperature, 900.0); // T8
         assert_eq!(row.weight, 85.0);
-        assert!((row.weight_loss - 15.0).abs() < 1e-9); // (100-85)/100*100
+        assert!((row.weight_loss - 15.0).abs() < 1e-9); // 100 - 85 = 15 g
         assert_eq!(row.n2_flow, 10.5);
         assert_eq!(row.co_flow, 4.5);
         assert_eq!(row.experiment_duration.as_deref(), Some("01:01:01"));

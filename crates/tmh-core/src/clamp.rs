@@ -37,14 +37,19 @@ pub fn clamp_setpoint(gas: Gas, requested: f64, cfg_h2: f64, cfg_co: f64) -> Cla
     let limit = match gas {
         Gas::H2 => cfg_h2.min(H2_ABS_MAX),
         Gas::Co => cfg_co.min(CO_ABS_MAX),
-        Gas::N2 | Gas::Co2 => {
-            return ClampResult {
-                applied: requested,
-                clamped: false,
-                limit: f64::INFINITY,
-            };
-        }
+        // N2 and CO2 are unlimited; INFINITY means `requested > limit` is never true.
+        Gas::N2 | Gas::Co2 => f64::INFINITY,
     };
+    // Non-finite (NaN/Inf) or negative requests are never valid setpoints; floor them to
+    // 0.0 (which always passes) so a negative never reaches the wire and NaN never poisons
+    // telemetry. Zero still passes for every gas — emergency shutoff must never be blocked.
+    if !requested.is_finite() || requested < 0.0 {
+        return ClampResult {
+            applied: 0.0,
+            clamped: false,
+            limit,
+        };
+    }
     // requested <= limit (limit > 0) covers "zero always passes".
     if requested > limit {
         ClampResult {
@@ -108,5 +113,18 @@ mod tests {
     fn n2_and_co2_pass_through() {
         assert!(!clamp_setpoint(Gas::N2, 15.0, 5.0, 5.0).clamped);
         assert!(!clamp_setpoint(Gas::Co2, 15.0, 5.0, 5.0).clamped);
+    }
+
+    #[test]
+    fn negative_and_non_finite_floor_to_zero() {
+        // Negatives must never reach the wire; NaN/Inf must never poison telemetry (#4).
+        for gas in [Gas::H2, Gas::Co, Gas::N2, Gas::Co2] {
+            assert_eq!(clamp_setpoint(gas, -3.0, 5.0, 5.0).applied, 0.0);
+            assert_eq!(clamp_setpoint(gas, f64::NAN, 5.0, 5.0).applied, 0.0);
+            assert_eq!(clamp_setpoint(gas, f64::INFINITY, 5.0, 5.0).applied, 0.0);
+            assert_eq!(clamp_setpoint(gas, f64::NEG_INFINITY, 5.0, 5.0).applied, 0.0);
+        }
+        // a reject is not a clamp (it's floored, not reduced to the limit)
+        assert!(!clamp_setpoint(Gas::H2, -3.0, 5.0, 5.0).clamped);
     }
 }
