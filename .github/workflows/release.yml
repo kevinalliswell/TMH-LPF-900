@@ -3,24 +3,29 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 jobs:
   verify-version:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Tag must match package.json version
-        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Verify tag metadata and main provenance
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/v}"
-          PKG="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG package.json=$PKG"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag v$TAG != package.json $PKG"; exit 1
-          fi
+          node scripts/check-release.mjs "${GITHUB_REF_NAME}"
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+            echo "::error::release tag must point at the current main tip"
+            exit 1
+          }
 
   release:
     needs: verify-version
@@ -40,8 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.targets }}
 
@@ -73,9 +78,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev.{0}', github.run_number) }}
-          releaseName: TMH-LPF-900 ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}
+          tagName: ${{ github.ref_name }}
+          releaseName: TMH-LPF-900 ${{ github.ref_name }}
           releaseBody: "See CHANGELOG.md. NSIS offline installer + signed updater artifacts (latest.json). Windows Authenticode signing requires a certificate — see docs/09."
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}

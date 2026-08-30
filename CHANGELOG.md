@@ -78,5 +78,5 @@ versioning follows [Semantic Versioning](https://semver.org/).
   typecheck, lint, dependency-direction guard, version-consistency check.
 - Release pipeline producing unsigned Windows NSIS and macOS universal `.dmg`.
 
-[Unreleased]: https://github.com/kevinalliswell/TMH-LPF-900/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/kevinalliswell/TMH-LPF-900/releases/tag/v0.1.0
+[Unreleased]: https://github.com/kevinalliswell/TMH-LPF-900/commits/main
+[0.1.0]: https://github.com/kevinalliswell/TMH-LPF-900/tree/4b88741
