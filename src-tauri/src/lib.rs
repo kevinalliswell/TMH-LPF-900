@@ -5,7 +5,7 @@
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::ipc::Channel;
@@ -19,17 +19,15 @@ use tmh_core::engine::{
     standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
 };
 use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
+use tmh_core::sampler::{build_sample_row, SampleContext};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
 
 /// Registered experiment modes (custom modes land in a later slice).
 const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
-/// Gas channel indices.
-const GAS_H2: usize = 0;
-const GAS_N2: usize = 1;
-const GAS_CO2: usize = 2;
-const GAS_CO: usize = 3;
+/// Number of gas channels (order: H2, N2, CO2, CO).
+const GAS_COUNT: usize = 4;
 /// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
 const MOCK_REDUCTION_LOSS: f64 = 0.12;
 /// Flush buffered samples to SQLite every N ticks.
@@ -50,6 +48,8 @@ struct AppState {
     exports_dir: PathBuf,
     /// Software-update checking (docs/09 §9.3): OFF by default, enabled via config/env.
     updater_enabled: bool,
+    /// Bumped on each (un)subscribe so a stale telemetry pump thread exits (issue #8).
+    telemetry_gen: Arc<AtomicU64>,
 }
 
 /// Shared control block for the single running experiment. `status` is the published
@@ -134,12 +134,6 @@ struct ExperimentParams {
 
 fn iso_now() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
-}
-
-/// Format an elapsed second count as HH:MM:SS.
-fn fmt_hms(total_s: f64) -> String {
-    let s = total_s.max(0.0) as u64;
-    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
@@ -230,25 +224,19 @@ fn apply_safety_atmosphere_blocking(hub: &DeviceHub) {
     }
 }
 
-/// Snapshot one sample row from live telemetry. `status` tags the stage (e.g. REDUCING).
+/// Snapshot one sample row from live telemetry. Delegates to the shared core sampler so
+/// the balance-offline annotation, weight=0 rule, PV semantics and grams weight-loss unit
+/// live in exactly one place (issue #7). `status` tags the stage (e.g. REDUCING).
 fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, status: &str) -> SampleRow {
-    let temperature = hub.temp_rx().borrow().temps[7].unwrap_or(0.0);
-    let gas = hub.mfc_rx().borrow().gas;
-    let weight = hub.balance_rx().borrow().weight.unwrap_or(w0);
-    SampleRow {
+    let temp = hub.temp_rx().borrow().clone();
+    let mfc = hub.mfc_rx().borrow().clone();
+    let balance = hub.balance_rx().borrow().clone();
+    let snap = aggregate(0, &temp, &mfc, &balance);
+    let ctx = SampleContext {
         experiment_id: id.to_string(),
-        timestamp: iso_now(),
-        experiment_duration: Some(fmt_hms(total_s)),
-        temperature,
-        weight,
-        weight_loss: (w0 - weight).max(0.0),
-        co_flow: gas[GAS_CO].sv,
-        co2_flow: gas[GAS_CO2].sv,
-        n2_flow: gas[GAS_N2].sv,
-        h2_flow: gas[GAS_H2].sv,
-        experiment_status: Some(status.to_string()),
-        system_message: None,
-    }
+        initial_weight: w0,
+    };
+    build_sample_row(&ctx, &snap, iso_now(), total_s.max(0.0) as u64, status)
 }
 
 /// Build the running-status snapshot from the engine's current position.
@@ -433,6 +421,13 @@ fn spawn_experiment_task(
                             })),
                     );
                 }
+                // Close the stop×stage-atmosphere TOCTOU (issue #5): if a stop landed while
+                // we were applying the stage atmosphere, re-assert the safety atmosphere now.
+                // The MFC thread processes commands FIFO, so this last write wins over the
+                // stage gas and flammables are never left open after a stop.
+                if exp.stop.load(Ordering::Relaxed) {
+                    apply_safety_atmosphere(&hub);
+                }
             }
 
             let status = engine
@@ -573,7 +568,7 @@ fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
 async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
     // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
     // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
-    if gas > GAS_CO {
+    if gas >= GAS_COUNT {
         return Err("无效的气体通道".into());
     }
     let hub = app.state::<AppState>().hub.clone();
@@ -600,7 +595,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 
 #[tauri::command]
 fn set_gas_on_off(state: State<AppState>, gas: usize, on: bool) {
-    if gas > GAS_CO {
+    if gas >= GAS_COUNT {
         return; // invalid channel from the webview; the MFC actor also guards this
     }
     state.hub.set_on_off(gas, on);
@@ -612,14 +607,14 @@ fn set_gas_on_off(state: State<AppState>, gas: usize, on: bool) {
 
 #[tauri::command]
 fn open_all_valves(state: State<AppState>) {
-    for g in 0..4 {
+    for g in 0..GAS_COUNT {
         state.hub.set_on_off(g, true);
     }
 }
 
 #[tauri::command]
 fn close_all_valves(state: State<AppState>) {
-    for g in 0..4 {
+    for g in 0..GAS_COUNT {
         state.hub.set_on_off(g, false);
     }
 }
@@ -660,11 +655,18 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
     let temp_rx = st.hub.temp_rx();
     let mfc_rx = st.hub.mfc_rx();
     let bal_rx = st.hub.balance_rx();
-    // The pump runs on its own thread; it exits when the frontend drops the channel.
+    // Each subscribe claims a new generation; the pump exits when the generation moves on
+    // (a re-subscribe or unsubscribe_telemetry) or the channel drops — so stale pumps from
+    // StrictMode double-invokes / HMR never accumulate (issue #8).
+    let gen = st.telemetry_gen.clone();
+    let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let mut seq = 0u64;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
+            if gen.load(Ordering::SeqCst) != my_gen {
+                break;
+            }
             seq += 1;
             let t = temp_rx.borrow().clone();
             let m = mfc_rx.borrow().clone();
@@ -674,6 +676,12 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
             }
         }
     });
+}
+
+/// Stop the current telemetry pump thread (issue #8). The frontend calls this on unsubscribe.
+#[tauri::command]
+fn unsubscribe_telemetry(state: State<AppState>) {
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 // ---- Experiment -------------------------------------------------------------
@@ -1305,7 +1313,12 @@ pub fn run() {
     if std::env::var("TMH_DISABLE_GPU").is_ok() {
         std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
     }
-    let data_root = std::env::temp_dir().join("tmh-lpf-900");
+    // Persistent per-user data dir (Windows %APPDATA%, Linux ~/.local/share, etc.);
+    // falls back to a temp dir only if the platform dir is unavailable. Experiment
+    // history and the 180-day audit trail must survive OS temp cleanup (issue #6).
+    let data_root = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tmh-lpf-900");
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
     let exports_dir = data_root.join("exports");
@@ -1315,6 +1328,8 @@ pub fn run() {
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let hub = Arc::new(build_mock_hub());
     let audit = Arc::new(AuditLog::new(audit_dir));
+    // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
+    audit.prune(180);
 
     // Crash recovery before the UI comes up (safety atmosphere for any open run).
     recover_unfinished(&hub, &storage, &audit);
@@ -1330,6 +1345,7 @@ pub fn run() {
         sim_speed,
         exports_dir,
         updater_enabled,
+        telemetry_gen: Arc::new(AtomicU64::new(0)),
     };
 
     tauri::Builder::default()
@@ -1361,6 +1377,7 @@ pub fn run() {
             shutoff_flammable_gases,
             tare_balance,
             subscribe_telemetry,
+            unsubscribe_telemetry,
             get_experiment_state,
             start_experiment,
             stop_experiment,

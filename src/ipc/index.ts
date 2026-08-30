@@ -213,12 +213,25 @@ export async function installUpdate(): Promise<void> {
 
 export function subscribeExperimentState(cb: (s: ExperimentState) => void): () => void {
   if (!isTauri()) return mockSubscribeExperiment(cb);
-  void invoke<ExperimentState>("get_experiment_state").then(cb);
-  let un = () => {};
-  void listen<ExperimentState>("experiment-state-changed", (e) => cb(e.payload)).then((u) => {
-    un = u;
+  let cancelled = false;
+  let un: (() => void) | null = null;
+  let gotEvent = false;
+  // If we unmount before listen() resolves, unlisten as soon as it does (no leak); and let
+  // live events win over the initial snapshot so a late query can't clobber newer state (#8).
+  void listen<ExperimentState>("experiment-state-changed", (e) => {
+    gotEvent = true;
+    cb(e.payload);
+  }).then((u) => {
+    if (cancelled) u();
+    else un = u;
   });
-  return () => un();
+  void invoke<ExperimentState>("get_experiment_state").then((s) => {
+    if (!cancelled && !gotEvent) cb(s);
+  });
+  return () => {
+    cancelled = true;
+    un?.();
+  };
 }
 
 /** Subscribe to the 0.2s telemetry stream. Returns an unsubscribe function. */
@@ -229,5 +242,7 @@ export function subscribeTelemetry(cb: (s: TelemetrySnapshot) => void): () => vo
   void invoke("subscribe_telemetry", { channel });
   return () => {
     channel.onmessage = () => {};
+    // Tell the backend to stop the pump thread — nulling onmessage alone leaks it (#8).
+    void invoke("unsubscribe_telemetry");
   };
 }

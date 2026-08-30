@@ -1,19 +1,22 @@
 import { GAS_NAMES } from "../../ipc";
-import { useTelemetry } from "../../stores/telemetry";
+import { useTelemetry, useTelemetryStale } from "../../stores/telemetry";
 
 const TEMP_LABELS = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"];
 
 export function MonitorPanel() {
   const snap = useTelemetry((s) => s.snapshot);
   const h = snap?.health;
-  const tempOff = h ? !h.temp_connected : false;
-  const mfcOff = h ? !h.mfc_connected : false;
-  const balOff = h ? !h.balance_connected : false;
+  // A stale stream (>5s) dims every panel too — frozen values must not read as live (#10).
+  const stale = useTelemetryStale();
+  const tempOff = stale || (h ? !h.temp_connected : false);
+  const mfcOff = stale || (h ? !h.mfc_connected : false);
+  const balOff = stale || (h ? !h.balance_connected : false);
+  const offTag = (off: boolean) => (off ? (stale ? " · 数据陈旧" : " · 离线") : "");
 
   return (
     <div className="flex flex-col gap-3">
       <section className="panel p-3" style={tempOff ? { opacity: 0.4 } : undefined}>
-        <div className="section-title mb-2">温度 · °C{tempOff && " · 离线"}</div>
+        <div className="section-title mb-2">温度 · °C{offTag(tempOff)}</div>
         <div className="grid grid-cols-3 gap-2">
           {TEMP_LABELS.map((label, i) => {
             const sample = i === 7;
@@ -54,7 +57,7 @@ export function MonitorPanel() {
 
       <div className="grid gap-3" style={{ gridTemplateColumns: "190px 1fr" }}>
         <section className="panel p-3" style={balOff ? { opacity: 0.4 } : undefined}>
-          <div className="section-title mb-2">重量 · g{balOff && " · 离线"}</div>
+          <div className="section-title mb-2">重量 · g{offTag(balOff)}</div>
           <div
             className="mono text-3xl"
             style={{ color: snap?.weight == null ? "var(--fg-faint)" : "var(--fg)" }}
@@ -64,7 +67,7 @@ export function MonitorPanel() {
         </section>
 
         <section className="panel p-3" style={mfcOff ? { opacity: 0.4 } : undefined}>
-          <div className="section-title mb-2">气体流量 · L/min（PV 主 / SV 辅）{mfcOff && " · 离线"}</div>
+          <div className="section-title mb-2">气体流量 · L/min（PV 主 / SV 辅）{offTag(mfcOff)}</div>
           <div className="grid grid-cols-4 gap-2">
             {GAS_NAMES.map((name, i) => {
               const g = snap?.gas[i];

@@ -51,6 +51,22 @@ enum BalReq {
     Tare { reply: oneshot::Sender<TareResult> },
 }
 
+/// Apply one MFC request on the bus thread (HIGH priority). Extracted so both the poll
+/// loop and the responsive idle wait can dispatch a command the moment it arrives (#5).
+fn handle_mfc_req(mfc: &mut MfcActor, req: MfcReq) {
+    match req {
+        MfcReq::SetFlow { gas, value, reply } => {
+            let _ = reply.send(mfc.set_flow(gas, value));
+        }
+        MfcReq::SetOnOff { gas, on } => {
+            mfc.handle_command(&MfcCommand::SetOnOff { gas, on });
+        }
+        MfcReq::Shutoff => {
+            mfc.handle_command(&MfcCommand::ShutoffFlammable);
+        }
+    }
+}
+
 /// Owns the running bus threads. Dropping it stops and joins them.
 pub struct DeviceHub {
     stop: Arc<AtomicBool>,
@@ -105,24 +121,28 @@ impl DeviceHub {
                 let mut cmd_rx = mfc_cmd_rx;
                 while !stop.load(Ordering::Relaxed) {
                     while let Ok(req) = cmd_rx.try_recv() {
-                        match req {
-                            MfcReq::SetFlow { gas, value, reply } => {
-                                let _ = reply.send(mfc.set_flow(gas, value));
-                            }
-                            MfcReq::SetOnOff { gas, on } => {
-                                mfc.handle_command(&MfcCommand::SetOnOff { gas, on });
-                            }
-                            MfcReq::Shutoff => {
-                                mfc.handle_command(&MfcCommand::ShutoffFlammable);
-                            }
-                        }
+                        handle_mfc_req(&mut mfc, req);
                     }
                     mfc.poll_next(Instant::now());
                     let _ = mfc_snap_tx.send(mfc.snapshot());
                     if !mfc.snapshot().connected {
                         mfc.reconnect();
                     }
-                    thread::sleep(iv.mfc);
+                    // Responsive idle wait: sleep in short slices so a HIGH-priority command
+                    // (emergency shutoff / safety atmosphere) is applied within ~25 ms rather
+                    // than waiting a full poll interval (issue #5).
+                    let deadline = Instant::now() + iv.mfc;
+                    while !stop.load(Ordering::Relaxed) {
+                        while let Ok(req) = cmd_rx.try_recv() {
+                            handle_mfc_req(&mut mfc, req);
+                            let _ = mfc_snap_tx.send(mfc.snapshot());
+                        }
+                        let now = Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
+                        thread::sleep((deadline - now).min(Duration::from_millis(25)));
+                    }
                 }
                 // Safety net (issue #1): whenever this bus thread stops — app close or
                 // hub drop — zero the flammable gases as its final action, so tearing the
