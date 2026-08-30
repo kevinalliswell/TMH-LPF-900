@@ -3,10 +3,10 @@
     "port": "COM3",
     "baudrate": 9600,
     "bytesize": 8,
-    "parity": "none",
+    "parity": "N",
     "stopbits": 1,
-    "timeout": 0.5,
-    "slave_address": 1,
+    "timeout": 1.0,
+    "slave_address": 0,
     "start_reg": 0,
     "reg_count": 9,
     "TEMP_CHANNELS": ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"],
@@ -17,17 +17,17 @@
     "port": "COM4",
     "baudrate": 9600,
     "bytesize": 8,
-    "parity": "none",
+    "parity": "E",
     "stopbits": 1,
     "timeout": 0.5
   },
   "COM_RS232_Balance": {
     "port": "COM5",
-    "baudrate": 9600,
+    "baudrate": 1200,
     "bytesize": 8,
-    "parity": "none",
+    "parity": "N",
     "stopbits": 1,
-    "timeout": 0.5
+    "timeout": 1.0
   },
   "SAMPLING": { "interval_s": 1.0 },
   "PERFORMANCE_CONFIG": {

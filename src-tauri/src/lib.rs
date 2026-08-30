@@ -15,6 +15,7 @@ use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
+use tmh_core::config::CommConfig;
 use tmh_core::engine::{
     standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
 };
@@ -169,16 +170,42 @@ fn sim_speed(mode: &str) -> f64 {
         .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
 }
 
-fn build_mock_hub() -> DeviceHub {
-    // Idle furnace sits at ambient; a running experiment drives the target per stage.
-    let temp = TempActor::new(Box::new(MockTransport::temp()), 0, 0.1, false);
-    let mfc = MfcActor::new(
-        Box::new(MockTransport::mfc()),
-        [1, 2, 3, 4],
-        [0.1, 1.0, 0.1, 0.1],
-        5.0,
-        5.0,
+/// Compiled-in default comm config (the repo's config/comm_config.json), used when no
+/// external config file is present or it fails to load. Kept in sync with docs/06 §6.4.
+const DEFAULT_COMM_CONFIG: &str = include_str!("../../config/comm_config.json");
+
+/// Load + validate the comm config (docs/06 §6.4) so the safety limits, MFC slave
+/// addresses and flow scaling come from the file (issue #11). Resolution order:
+/// `TMH_COMM_CONFIG` env override, else `config/comm_config.json` in the working dir;
+/// on any failure fall back to the compiled-in default so the app still runs (mock).
+fn load_comm_config() -> CommConfig {
+    let path = std::env::var("TMH_COMM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"));
+    match CommConfig::load(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "comm config unavailable/invalid ({}: {e}); using built-in defaults",
+                path.display()
+            );
+            CommConfig::from_json(DEFAULT_COMM_CONFIG)
+                .expect("built-in default comm config must parse")
+        }
+    }
+}
+
+fn build_mock_hub(cfg: &CommConfig) -> DeviceHub {
+    // Idle furnace sits at ambient; a running experiment drives the target per stage. The
+    // mock actors are driven by the config so edits to limits/scaling/addresses take effect
+    // (the safety clamp is still backed by its compile-time ceiling).
+    let temp = TempActor::new(
+        Box::new(MockTransport::temp()),
+        cfg.temp.slave_address,
+        cfg.temp.scale,
+        cfg.temp.signed_registers,
     );
+    let mfc = MfcActor::from_config(Box::new(MockTransport::mfc()), cfg);
     let balance = BalanceActor::new(Box::new(MockTransport::balance(100.0)));
     DeviceHub::spawn(temp, mfc, balance, HubIntervals::default())
 }
@@ -691,9 +718,8 @@ fn get_experiment_state(state: State<AppState>) -> ExperimentStatus {
     state.exp.snapshot()
 }
 
-#[tauri::command]
-fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
-    // Parameter validation (docs/05 §5.2).
+/// Validate experiment start parameters (docs/05 §5.2). Pure so it is unit-testable.
+fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
     if params.sample_id.trim().is_empty() {
         return Err("样品编号必填".into());
     }
@@ -709,6 +735,12 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     if !MODES.contains(&params.experiment_type.as_str()) {
         return Err("未知实验模式".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
+    validate_experiment_params(&params)?;
 
     let st = app.state::<AppState>();
     if st.exp.is_running() {
@@ -1326,7 +1358,8 @@ pub fn run() {
     let _ = std::fs::create_dir_all(&db_dir);
     let _ = std::fs::create_dir_all(&exports_dir);
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let hub = Arc::new(build_mock_hub());
+    let comm_config = load_comm_config();
+    let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
     // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
     audit.prune(180);
@@ -1337,8 +1370,8 @@ pub fn run() {
     let state = AppState {
         hub,
         mode,
-        limit_h2: 5.0,
-        limit_co: 5.0,
+        limit_h2: comm_config.gas_safety_limits.h2,
+        limit_co: comm_config.gas_safety_limits.co,
         audit,
         storage: Arc::new(Mutex::new(storage)),
         exp: Arc::new(ExpControl::new()),
@@ -1413,4 +1446,75 @@ pub fn run() {
                 ));
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(edit: impl FnOnce(&mut ExperimentParams)) -> ExperimentParams {
+        let mut p = ExperimentParams {
+            sample_id: "S1".into(),
+            sample_name: "样品".into(),
+            sample_weight: 100.0,
+            operator: "张三".into(),
+            experiment_type: "REDUCIBILITY".into(),
+            project_name: None,
+            notes: None,
+        };
+        edit(&mut p);
+        p
+    }
+
+    #[test]
+    fn valid_experiment_params_pass() {
+        assert!(validate_experiment_params(&params(|_| {})).is_ok());
+    }
+
+    #[test]
+    fn blank_or_bad_experiment_params_are_rejected() {
+        assert!(validate_experiment_params(&params(|p| p.sample_id = "  ".into())).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_name = "".into())).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_err());
+        assert!(validate_experiment_params(&params(|p| p.operator = "".into())).is_err());
+        assert!(
+            validate_experiment_params(&params(|p| p.experiment_type = "NOPE".into())).is_err()
+        );
+    }
+
+    #[test]
+    fn hms_minutes_parses() {
+        assert_eq!(parse_hms_min("01:30:00"), Some(90.0));
+        assert_eq!(parse_hms_min("00:00:30"), Some(0.5));
+        assert_eq!(parse_hms_min("bad"), None);
+    }
+
+    #[test]
+    fn reducing_target_matches_program() {
+        assert_eq!(reducing_target(Some("REDUCIBILITY")), Some(900.0));
+        assert_eq!(reducing_target(Some("LOW_TEMP_DEGRADATION")), Some(500.0));
+        assert_eq!(reducing_target(Some("bogus")), None);
+    }
+
+    #[test]
+    fn bundled_default_comm_config_is_valid_and_matches_docs_06() {
+        // Guards against config/comm_config.json drifting from docs/06 §6.4 again (#11).
+        let c = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("parse");
+        c.validate().expect("valid");
+        assert_eq!(c.gas_safety_limits.h2, 5.0);
+        assert_eq!(c.slave_address_mfc.co, 4);
+        assert_eq!(c.balance.baudrate, 1200);
+        assert_eq!(c.mfc.parity, "E");
+        assert_eq!(c.temp.slave_address, 0);
+    }
+
+    #[test]
+    fn load_comm_config_returns_a_valid_config() {
+        // The test working dir has no config/comm_config.json, so this exercises the
+        // compiled-in default fallback path (#11).
+        load_comm_config()
+            .validate()
+            .expect("fallback config valid");
+    }
 }
