@@ -6,7 +6,8 @@
 //! hub can live in Tauri's managed state.
 
 use crate::bus::{
-    BalanceActor, BalanceSnapshot, MfcActor, MfcCommand, MfcSnapshot, TempActor, TempSnapshot,
+    BalanceActor, BalanceSnapshot, MfcActor, MfcCommand, MfcCommandError, MfcSnapshot, TempActor,
+    TempSnapshot,
 };
 use crate::clamp::ClampResult;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,13 +39,20 @@ enum MfcReq {
     SetFlow {
         gas: usize,
         value: f64,
-        reply: oneshot::Sender<ClampResult>,
+        reply: oneshot::Sender<Result<ClampResult, MfcCommandError>>,
     },
     SetOnOff {
         gas: usize,
         on: bool,
+        reply: oneshot::Sender<Result<(), MfcCommandError>>,
     },
-    Shutoff,
+    SetAtmosphere {
+        values: [f64; 4],
+        reply: oneshot::Sender<Result<[ClampResult; 4], MfcCommandError>>,
+    },
+    Shutoff {
+        reply: oneshot::Sender<Result<(), MfcCommandError>>,
+    },
 }
 
 enum BalReq {
@@ -58,11 +66,20 @@ fn handle_mfc_req(mfc: &mut MfcActor, req: MfcReq) {
         MfcReq::SetFlow { gas, value, reply } => {
             let _ = reply.send(mfc.set_flow(gas, value));
         }
-        MfcReq::SetOnOff { gas, on } => {
-            mfc.handle_command(&MfcCommand::SetOnOff { gas, on });
+        MfcReq::SetOnOff { gas, on, reply } => {
+            let result = mfc
+                .handle_command(&MfcCommand::SetOnOff { gas, on })
+                .map(|_| ());
+            let _ = reply.send(result);
         }
-        MfcReq::Shutoff => {
-            mfc.handle_command(&MfcCommand::ShutoffFlammable);
+        MfcReq::SetAtmosphere { values, reply } => {
+            let _ = reply.send(mfc.set_atmosphere(values));
+        }
+        MfcReq::Shutoff { reply } => {
+            let result = mfc
+                .handle_command(&MfcCommand::ShutoffFlammable)
+                .map(|_| ());
+            let _ = reply.send(result);
         }
     }
 }
@@ -149,7 +166,7 @@ impl DeviceHub {
                 // Safety net (issue #1): whenever this bus thread stops — app close or
                 // hub drop — zero the flammable gases as its final action, so tearing the
                 // app down never leaves H2/CO/CO2 flowing.
-                mfc.handle_command(&MfcCommand::ShutoffFlammable);
+                let _ = mfc.handle_command(&MfcCommand::ShutoffFlammable);
             }));
         }
 
@@ -204,17 +221,38 @@ impl DeviceHub {
     }
 
     /// Request a gas setpoint; await the returned receiver for the clamp result.
-    pub fn request_set_flow(&self, gas: usize, value: f64) -> oneshot::Receiver<ClampResult> {
+    pub fn request_set_flow(
+        &self,
+        gas: usize,
+        value: f64,
+    ) -> oneshot::Receiver<Result<ClampResult, MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
         let _ = self.mfc_tx.send(MfcReq::SetFlow { gas, value, reply });
         rx
     }
-    pub fn set_on_off(&self, gas: usize, on: bool) {
-        let _ = self.mfc_tx.send(MfcReq::SetOnOff { gas, on });
+    pub fn request_set_on_off(
+        &self,
+        gas: usize,
+        on: bool,
+    ) -> oneshot::Receiver<Result<(), MfcCommandError>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.mfc_tx.send(MfcReq::SetOnOff { gas, on, reply });
+        rx
+    }
+    /// Apply a four-gas atmosphere and await acknowledgement of every attempted write.
+    pub fn request_set_atmosphere(
+        &self,
+        values: [f64; 4],
+    ) -> oneshot::Receiver<Result<[ClampResult; 4], MfcCommandError>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.mfc_tx.send(MfcReq::SetAtmosphere { values, reply });
+        rx
     }
     /// Shut off flammable gases (H2/CO2/CO → 0). Never blocked by the clamp.
-    pub fn shutoff_flammable(&self) {
-        let _ = self.mfc_tx.send(MfcReq::Shutoff);
+    pub fn request_shutoff_flammable(&self) -> oneshot::Receiver<Result<(), MfcCommandError>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.mfc_tx.send(MfcReq::Shutoff { reply });
+        rx
     }
     /// Request a tare; await the returned receiver for the result.
     pub fn request_tare(&self) -> oneshot::Receiver<TareResult> {
@@ -250,7 +288,7 @@ impl Drop for DeviceHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::transport::{MockFaults, MockTransport};
 
     #[test]
     fn hub_publishes_snapshots_and_handles_set_flow() {
@@ -276,7 +314,11 @@ mod tests {
         assert!(hub.temp_rx().borrow().connected);
         assert!(hub.balance_rx().borrow().weight.is_some());
 
-        let clamp = hub.request_set_flow(0, 8.0).blocking_recv().expect("reply");
+        let clamp = hub
+            .request_set_flow(0, 8.0)
+            .blocking_recv()
+            .expect("reply")
+            .expect("device ack");
         assert_eq!(clamp.applied, 5.0);
         assert!(clamp.clamped);
 
@@ -287,5 +329,39 @@ mod tests {
     fn hub_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<DeviceHub>();
+    }
+
+    #[test]
+    fn hub_returns_transport_failure_instead_of_queue_ack() {
+        let temp = TempActor::new(Box::new(MockTransport::temp()), 0, 0.1, false);
+        let mfc = MfcActor::new(
+            Box::new(MockTransport::mfc().with_faults(MockFaults {
+                drop_every: 1,
+                ..Default::default()
+            })),
+            [1, 2, 3, 4],
+            [0.1, 1.0, 0.1, 0.1],
+            5.0,
+            5.0,
+        );
+        let balance = BalanceActor::new(Box::new(MockTransport::balance(50.0)));
+        let hub = DeviceHub::spawn(
+            temp,
+            mfc,
+            balance,
+            HubIntervals {
+                temp: Duration::from_millis(5),
+                mfc: Duration::from_millis(5),
+                balance: Duration::from_millis(5),
+            },
+        );
+
+        let result = hub
+            .request_set_flow(0, 1.0)
+            .blocking_recv()
+            .expect("actor reply");
+
+        assert!(result.is_err());
+        hub.stop();
     }
 }
