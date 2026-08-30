@@ -102,6 +102,16 @@ impl MfcActor {
     /// Set a gas flow. Passes through the safety clamp (the sole choke point) before
     /// building the frame; returns the clamp decision (for event + audit).
     pub fn set_flow(&mut self, gas_idx: usize, value: f64) -> ClampResult {
+        // The webview is untrusted (docs/03): an out-of-range gas index must never panic
+        // this bus thread — a panic drops the command receiver and silently disables ALL
+        // gas control, including the emergency shutoff. Out of range is a safe no-op.
+        if gas_idx >= self.gas.len() {
+            return ClampResult {
+                applied: 0.0,
+                clamped: false,
+                limit: 0.0,
+            };
+        }
         let clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
         let raw = (clamp.applied / self.scaling[gas_idx] * 10.0).round() as i64;
         let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
@@ -117,7 +127,12 @@ impl MfcActor {
         match cmd {
             MfcCommand::SetFlow { gas, value } => Some(self.set_flow(*gas, *value)),
             MfcCommand::SetOnOff { gas, on } => {
-                let target = if *on { self.gas[*gas].sv.max(0.0) } else { 0.0 };
+                // Bounds-guard the untrusted index (see `set_flow`): out of range -> no-op.
+                let target = if *on {
+                    self.gas.get(*gas).map(|g| g.sv.max(0.0)).unwrap_or(0.0)
+                } else {
+                    0.0
+                };
                 self.set_flow(*gas, target);
                 None
             }
@@ -233,6 +248,21 @@ mod tests {
         assert_eq!(a.gas[IDX_H2].sv, 0.0);
         assert_eq!(a.gas[IDX_CO2].sv, 0.0);
         assert_eq!(a.gas[IDX_CO].sv, 0.0);
+    }
+
+    #[test]
+    fn out_of_range_gas_index_is_a_safe_noop_not_a_panic() {
+        // An untrusted webview could send gas >= 4; it must never panic the bus thread
+        // (which would disable all gas control, incl. emergency shutoff — see issue #2).
+        let mut a = actor();
+        a.set_flow(IDX_H2, 3.0);
+        let clamp = a.set_flow(9, 3.0);
+        assert_eq!(clamp.applied, 0.0);
+        assert!(!clamp.clamped);
+        a.handle_command(&MfcCommand::SetOnOff { gas: 7, on: true });
+        // valid channels are untouched by the out-of-range calls
+        assert_eq!(a.gas[IDX_H2].sv, 3.0);
+        assert!(a.gas[IDX_H2].on);
     }
 
     #[test]

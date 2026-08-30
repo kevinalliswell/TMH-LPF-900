@@ -124,6 +124,10 @@ impl DeviceHub {
                     }
                     thread::sleep(iv.mfc);
                 }
+                // Safety net (issue #1): whenever this bus thread stops — app close or
+                // hub drop — zero the flammable gases as its final action, so tearing the
+                // app down never leaves H2/CO/CO2 flowing.
+                mfc.handle_command(&MfcCommand::ShutoffFlammable);
             }));
         }
 
