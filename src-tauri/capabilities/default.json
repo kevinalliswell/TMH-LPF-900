@@ -6,8 +6,6 @@
   "permissions": [
     "core:default",
     "opener:allow-open-path",
-    "opener:allow-reveal-item-in-dir",
-    "updater:default",
-    "process:default"
+    "opener:allow-reveal-item-in-dir"
   ]
 }
