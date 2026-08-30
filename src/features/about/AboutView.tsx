@@ -52,7 +52,7 @@ function UpdateCard() {
     <div className="panel p-5">
       <SectionTitle>软件更新</SectionTitle>
       <div className="flex items-center gap-3 flex-wrap">
-        <span className="mono text-[13px]">当前版本 v{status?.current_version ?? "0.1.0"}</span>
+        <span className="mono text-[13px]">当前版本 v{status?.current_version ?? "…"}</span>
         <span
           className="text-[11px] px-2 py-0.5 rounded"
           style={{ background: "var(--panel-2)", color: enabled ? "var(--ok)" : "var(--fg-faint)" }}
@@ -111,13 +111,20 @@ function UpdateCard() {
 }
 
 export function AboutView() {
+  // Version comes from the backend package info (getUpdaterStatus), never hard-coded (#13).
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    getUpdaterStatus()
+      .then((s) => setVersion(s.current_version))
+      .catch(() => {});
+  }, []);
   return (
     <Page>
       <div className="panel p-6">
         <div className="flex items-baseline gap-3">
           <div className="text-2xl font-bold tracking-tight">TMH-LPF-900</div>
           <div className="mono text-[12px]" style={{ color: "var(--fg-faint)" }}>
-            v0.1.0
+            v{version ?? "…"}
           </div>
         </div>
         <div className="text-[13px] mt-1" style={{ color: "var(--fg-dim)" }}>

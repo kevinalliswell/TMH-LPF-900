@@ -31,6 +31,12 @@ const targets = [
     file: "src/App.tsx",
     transform: (s) => s.replace(/TMH-LPF-900 v\d+\.\d+\.\d+/g, title),
   },
+  {
+    // Browser-preview fallback version (no backend to report it) — keep it in sync too (#13).
+    file: "src/ipc/index.ts",
+    transform: (s) =>
+      s.replace(/const APP_VERSION = "\d+\.\d+\.\d+"/, `const APP_VERSION = "${version}"`),
+  },
 ];
 
 let drift = false;

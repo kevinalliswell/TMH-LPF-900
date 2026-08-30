@@ -31,7 +31,7 @@ export function TempChart() {
 
     const MAX = 600; // ~2 min at 5 Hz; ring buffer, drop oldest
     const xs: number[] = [];
-    const series: number[][] = Array.from({ length: 9 }, () => []);
+    const series: (number | null)[][] = Array.from({ length: 9 }, () => []);
 
     chart.setOption({
       animation: false,
@@ -56,6 +56,7 @@ export function TempChart() {
         type: "line",
         showSymbol: false,
         emphasis: { disabled: true },
+        connectNulls: false, // draw a gap for an offline channel, not a line to 0 °C (#13)
         lineStyle: { width: i === 7 ? 2.2 : 1, color: i === 7 ? "#ff8c42" : COLORS[i] },
         data: d,
       })),
@@ -68,7 +69,7 @@ export function TempChart() {
       // Time axis advances exactly once per frame (docs/07).
       xs.push(x);
       x += 1;
-      snap.temps.forEach((t, i) => series[i]?.push(t ?? 0));
+      snap.temps.forEach((t, i) => series[i]?.push(t ?? null));
       if (xs.length > MAX) {
         xs.shift();
         series.forEach((s) => s.shift());

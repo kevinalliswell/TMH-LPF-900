@@ -34,6 +34,12 @@ const MOCK_REDUCTION_LOSS: f64 = 0.12;
 /// Flush buffered samples to SQLite every N ticks.
 const FLUSH_EVERY_TICKS: u32 = 5;
 
+/// Lock a mutex tolerating poisoning: a panic while the lock was held must not turn every
+/// later command into a panic (our guarded data stays consistent across such panics) (#14).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Managed application state.
 struct AppState {
     hub: Arc<DeviceHub>,
@@ -71,13 +77,13 @@ impl ExpControl {
         }
     }
     fn snapshot(&self) -> ExperimentStatus {
-        self.status.lock().unwrap().clone()
+        lock(&self.status).clone()
     }
     fn is_running(&self) -> bool {
-        self.status.lock().unwrap().running
+        lock(&self.status).running
     }
     fn set_status(&self, s: ExperimentStatus) {
-        *self.status.lock().unwrap() = s;
+        *lock(&self.status) = s;
     }
 }
 
@@ -602,7 +608,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
     let clamp = hub
         .request_set_flow(gas, value)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "气体总线不可用".to_string())?;
     let st = app.state::<AppState>();
     st.audit.write(
         &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Success).detail(
@@ -659,7 +665,10 @@ fn shutoff_flammable_gases(state: State<AppState>) {
 #[tauri::command]
 async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
     let hub = app.state::<AppState>().hub.clone();
-    let r = hub.request_tare().await.map_err(|e| e.to_string())?;
+    let r = hub
+        .request_tare()
+        .await
+        .map_err(|_| "天平不可用".to_string())?;
     app.state::<AppState>().audit.write(&AuditEntry::new(
         Category::Balance,
         "tare",
@@ -763,9 +772,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         analysis_results_json: None,
         created_at: now.clone(),
     };
-    st.storage
-        .lock()
-        .unwrap()
+    lock(&st.storage)
         .insert_experiment(&row)
         .map_err(|e| e.to_string())?;
 
@@ -952,10 +959,7 @@ fn sample_dto(r: SampleRow) -> SampleDto {
 
 #[tauri::command]
 fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, String> {
-    let rows = state
-        .storage
-        .lock()
-        .unwrap()
+    let rows = lock(&state.storage)
         .list_experiments()
         .map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(summary_of).collect())
@@ -963,7 +967,7 @@ fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, St
 
 #[tauri::command]
 fn get_experiment_detail(state: State<AppState>, id: String) -> Result<ExperimentDetail, String> {
-    let s = state.storage.lock().unwrap();
+    let s = lock(&state.storage);
     let row = s
         .get_experiment(&id)
         .map_err(|e| e.to_string())?
@@ -978,10 +982,7 @@ fn get_experiment_samples(
     id: String,
     max_points: Option<usize>,
 ) -> Result<Vec<SampleDto>, String> {
-    let rows = state
-        .storage
-        .lock()
-        .unwrap()
+    let rows = lock(&state.storage)
         .get_samples(&id, max_points.unwrap_or(2000))
         .map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(sample_dto).collect())
@@ -993,10 +994,7 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
     if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
         return Err("无法删除正在运行的实验".into());
     }
-    state
-        .storage
-        .lock()
-        .unwrap()
+    lock(&state.storage)
         .delete_experiment(&id)
         .map_err(|e| e.to_string())?;
     state.audit.write(
@@ -1025,10 +1023,7 @@ fn persist_analysis(
     value: &serde_json::Value,
 ) -> Result<(), String> {
     let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
-    state
-        .storage
-        .lock()
-        .unwrap()
+    lock(&state.storage)
         .set_analysis_results(id, &json)
         .map_err(|e| e.to_string())?;
     state.audit.write(
@@ -1039,10 +1034,7 @@ fn persist_analysis(
 }
 
 fn require_experiment(state: &AppState, id: &str) -> Result<(), String> {
-    let exists = state
-        .storage
-        .lock()
-        .unwrap()
+    let exists = lock(&state.storage)
         .get_experiment(id)
         .map_err(|e| e.to_string())?
         .is_some();
@@ -1062,7 +1054,7 @@ fn analyze_gb13241(
     o2_pct: f64,
 ) -> Result<serde_json::Value, String> {
     let (w0, samples) = {
-        let s = state.storage.lock().unwrap();
+        let s = lock(&state.storage);
         let row = s
             .get_experiment(&id)
             .map_err(|e| e.to_string())?
@@ -1159,7 +1151,7 @@ fn reducing_target(mode: Option<&str>) -> Option<f64> {
 fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
     let st = app.state::<AppState>();
     let (exp, samples) = {
-        let s = st.storage.lock().unwrap();
+        let s = lock(&st.storage);
         let exp = s
             .get_experiment(&id)
             .map_err(|e| e.to_string())?
@@ -1197,7 +1189,7 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
 fn export_experiment(app: AppHandle, id: String, format: String) -> Result<String, String> {
     let st = app.state::<AppState>();
     let (exp, samples) = {
-        let s = st.storage.lock().unwrap();
+        let s = lock(&st.storage);
         let exp = s
             .get_experiment(&id)
             .map_err(|e| e.to_string())?

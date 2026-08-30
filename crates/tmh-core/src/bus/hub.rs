@@ -100,6 +100,7 @@ impl DeviceHub {
                 let mut temp = temp;
                 let mut tt_rx = temp_target_rx;
                 while !stop.load(Ordering::Relaxed) {
+                    let deadline = Instant::now() + iv.temp;
                     while let Ok(c) = tt_rx.try_recv() {
                         temp.set_target_c(c);
                     }
@@ -108,7 +109,8 @@ impl DeviceHub {
                     if !temp.snapshot().connected {
                         temp.reconnect();
                     }
-                    thread::sleep(iv.temp);
+                    // Deadline-based sleep so the period stays iv.temp, not iv.temp + work (#14).
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
             }));
         }
@@ -159,6 +161,7 @@ impl DeviceHub {
                 let mut cmd_rx = bal_cmd_rx;
                 let mut bt_rx = bal_target_rx;
                 while !stop.load(Ordering::Relaxed) {
+                    let deadline = Instant::now() + iv.balance;
                     while let Ok(g) = bt_rx.try_recv() {
                         balance.set_target_g(g);
                     }
@@ -171,7 +174,8 @@ impl DeviceHub {
                     if !balance.snapshot().connected {
                         balance.reconnect();
                     }
-                    thread::sleep(iv.balance);
+                    // Deadline-based sleep so the period stays iv.balance, not + work (#14).
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
             }));
         }
