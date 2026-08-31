@@ -4,6 +4,10 @@
 //! the furnace through its program stages, applies each stage's atmosphere through the
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
+mod auth_service;
+mod auth_session;
+
+use auth_service::{AuthCode, AuthService, AuthSnapshot, PublicUser};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
+use tmh_core::auth::{hash_password, validate_display_name, UserRole};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
@@ -21,7 +26,7 @@ use tmh_core::engine::{
 };
 use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
 use tmh_core::sampler::{build_sample_row, SampleContext};
-use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
+use tmh_core::storage::{ExperimentRow, SampleRow, Storage, UserRow};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
 
@@ -48,6 +53,7 @@ struct AppState {
     limit_co: f64,
     audit: Arc<AuditLog>,
     storage: Arc<Mutex<Storage>>,
+    auth: Arc<AuthService>,
     exp: Arc<ExpControl>,
     /// Simulated-seconds advanced per real second (mock time acceleration; 1.0 = real).
     sim_speed: f64,
@@ -105,6 +111,10 @@ struct ExperimentStatus {
     tolerance: f64,
     stage_elapsed_s: f64,
     total_elapsed_s: f64,
+    owner_user_id: Option<String>,
+    owner_display_name: Option<String>,
+    can_control: bool,
+    occupied_by_other: bool,
 }
 
 impl ExperimentStatus {
@@ -124,6 +134,10 @@ impl ExperimentStatus {
             tolerance: 0.0,
             stage_elapsed_s: 0.0,
             total_elapsed_s: 0.0,
+            owner_user_id: None,
+            owner_display_name: None,
+            can_control: false,
+            occupied_by_other: false,
         }
     }
 
@@ -142,7 +156,6 @@ struct ExperimentParams {
     sample_id: String,
     sample_name: String,
     sample_weight: f64,
-    operator: String,
     experiment_type: String,
     project_name: Option<String>,
     notes: Option<String>,
@@ -150,6 +163,59 @@ struct ExperimentParams {
 
 fn iso_now() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn epoch_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn auth_error(code: AuthCode) -> String {
+    code.to_string()
+}
+
+fn current_user(state: &AppState) -> Result<UserRow, String> {
+    let storage = lock(&state.storage);
+    state
+        .auth
+        .require_user(&storage, epoch_now())
+        .map_err(auth_error)
+}
+
+fn current_admin(state: &AppState) -> Result<UserRow, String> {
+    let storage = lock(&state.storage);
+    state
+        .auth
+        .require_admin(&storage, epoch_now())
+        .map_err(auth_error)
+}
+
+fn authorize_experiment(
+    state: &AppState,
+    id: &str,
+    user: &UserRow,
+) -> Result<ExperimentRow, String> {
+    let row = lock(&state.storage)
+        .get_experiment(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "实验不存在".to_string())?;
+    if user.role.is_admin() || row.owner_user_id.as_deref() == Some(user.user_id.as_str()) {
+        Ok(row)
+    } else {
+        Err(AuthCode::Forbidden.to_string())
+    }
+}
+
+fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
+    let user = current_user(state)?;
+    let status = state.exp.snapshot();
+    if !status.running
+        || user.role.is_admin()
+        || status.owner_user_id.as_deref() == Some(user.user_id.as_str())
+    {
+        Ok(user)
+    } else {
+        Err(AuthCode::Forbidden.to_string())
+    }
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
@@ -284,6 +350,8 @@ fn status_running(
     mode: &str,
     sample: &str,
     started: &str,
+    owner_user_id: &str,
+    owner_display_name: &str,
 ) -> ExperimentStatus {
     let stage = engine.current_stage();
     ExperimentStatus {
@@ -301,6 +369,10 @@ fn status_running(
         tolerance: stage.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: engine.stage_elapsed_s(),
         total_elapsed_s: engine.total_elapsed_s(),
+        owner_user_id: Some(owner_user_id.to_string()),
+        owner_display_name: Some(owner_display_name.to_string()),
+        can_control: true,
+        occupied_by_other: false,
     }
 }
 
@@ -318,6 +390,7 @@ fn flush(storage: &Arc<Mutex<Storage>>, buffer: &mut Vec<SampleRow>) {
 }
 
 /// Publish + emit the current running status.
+#[allow(clippy::too_many_arguments)]
 fn publish_running(
     app: &AppHandle,
     exp: &ExpControl,
@@ -326,8 +399,18 @@ fn publish_running(
     mode: &str,
     sample: &str,
     started: &str,
+    owner_user_id: &str,
+    owner_display_name: &str,
 ) {
-    let status = status_running(engine, id, mode, sample, started);
+    let status = status_running(
+        engine,
+        id,
+        mode,
+        sample,
+        started,
+        owner_user_id,
+        owner_display_name,
+    );
     exp.set_status(status.clone());
     let _ = app.emit("experiment-state-changed", status);
 }
@@ -406,6 +489,8 @@ fn spawn_experiment_task(
     sample: String,
     w0: f64,
     started: String,
+    owner_user_id: String,
+    owner_display_name: String,
     sim_speed: f64,
 ) {
     std::thread::spawn(move || {
@@ -435,7 +520,17 @@ fn spawn_experiment_task(
                 return;
             }
         }
-        publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+        publish_running(
+            &app,
+            &exp,
+            &engine,
+            &id,
+            &mode,
+            &sample,
+            &started,
+            &owner_user_id,
+            &owner_display_name,
+        );
 
         let mut ticks_since_flush = 0u32;
 
@@ -573,7 +668,17 @@ fn spawn_experiment_task(
                 break;
             }
 
-            publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+            publish_running(
+                &app,
+                &exp,
+                &engine,
+                &id,
+                &mode,
+                &sample,
+                &started,
+                &owner_user_id,
+                &owner_display_name,
+            );
         }
     });
 }
@@ -637,7 +742,230 @@ struct TareResultDto {
     weight: Option<f64>,
 }
 
+#[derive(serde::Serialize)]
+struct PublicSafetyStatus {
+    experiment_running: bool,
+    mfc_connected: bool,
+    temp_connected: bool,
+}
+
 // ---- Commands ---------------------------------------------------------------
+
+#[tauri::command]
+fn get_auth_state(state: State<AppState>) -> Result<AuthSnapshot, String> {
+    state
+        .auth
+        .snapshot(&lock(&state.storage), epoch_now())
+        .map_err(auth_error)
+}
+
+#[tauri::command]
+fn bootstrap_admin(
+    state: State<AppState>,
+    username: String,
+    display_name: String,
+    password: String,
+) -> Result<PublicUser, String> {
+    let user = state
+        .auth
+        .bootstrap(
+            &lock(&state.storage),
+            &username,
+            &display_name,
+            &password,
+            epoch_now(),
+        )
+        .map_err(auth_error)?;
+    state.audit.write(
+        &AuditEntry::new(Category::App, "bootstrap_admin", AuditResult::Success)
+            .operator(user.display_name.clone())
+            .detail(serde_json::json!({ "user_id": user.user_id })),
+    );
+    Ok(PublicUser::from(&user))
+}
+
+#[tauri::command]
+fn login(
+    state: State<AppState>,
+    username: String,
+    password: String,
+) -> Result<AuthSnapshot, String> {
+    let result = state
+        .auth
+        .login(&lock(&state.storage), &username, &password, epoch_now());
+    state.audit.write(
+        &AuditEntry::new(
+            Category::App,
+            "login",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .detail(serde_json::json!({ "username": username })),
+    );
+    result.map_err(auth_error)?;
+    get_auth_state(state)
+}
+
+#[tauri::command]
+fn logout(state: State<AppState>) {
+    state.auth.logout();
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn lock_session(state: State<AppState>) {
+    state.auth.lock();
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn touch_session(state: State<AppState>) -> Result<(), String> {
+    state.auth.touch(epoch_now()).map_err(auth_error)
+}
+
+#[tauri::command]
+fn change_own_password(
+    state: State<AppState>,
+    current_password: String,
+    new_password: String,
+) -> Result<(), String> {
+    state
+        .auth
+        .change_own_password(
+            &lock(&state.storage),
+            &current_password,
+            &new_password,
+            epoch_now(),
+        )
+        .map_err(auth_error)
+}
+
+#[tauri::command]
+fn list_users(state: State<AppState>) -> Result<Vec<PublicUser>, String> {
+    current_admin(&state)?;
+    let users = lock(&state.storage)
+        .list_users()
+        .map_err(|e| e.to_string())?;
+    Ok(users.iter().map(PublicUser::from).collect())
+}
+
+#[tauri::command]
+fn create_user(
+    state: State<AppState>,
+    username: String,
+    display_name: String,
+    temporary_password: String,
+    role: UserRole,
+) -> Result<PublicUser, String> {
+    let user = state
+        .auth
+        .create_user(
+            &lock(&state.storage),
+            &username,
+            &display_name,
+            &temporary_password,
+            role,
+            epoch_now(),
+        )
+        .map_err(auth_error)?;
+    Ok(PublicUser::from(&user))
+}
+
+#[tauri::command]
+fn update_user(
+    state: State<AppState>,
+    user_id: String,
+    display_name: String,
+    role: UserRole,
+    is_active: bool,
+) -> Result<PublicUser, String> {
+    let actor = current_admin(&state)?;
+    let display_name =
+        validate_display_name(&display_name).map_err(|_| AuthCode::InvalidInput.to_string())?;
+    let storage = lock(&state.storage);
+    let target = storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+    if target.user_id == actor.user_id && (role != target.role || !is_active) {
+        return Err(AuthCode::Forbidden.to_string());
+    }
+    if target.role.is_admin()
+        && target.is_active
+        && (!role.is_admin() || !is_active)
+        && storage.active_admin_count().map_err(|e| e.to_string())? <= 1
+    {
+        return Err(AuthCode::LastAdmin.to_string());
+    }
+    storage
+        .update_user(&user_id, &display_name, role, is_active, &iso_now())
+        .map_err(|e| e.to_string())?;
+    let updated = storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+    Ok(PublicUser::from(&updated))
+}
+
+#[tauri::command]
+fn reset_user_password(
+    state: State<AppState>,
+    user_id: String,
+    temporary_password: String,
+) -> Result<(), String> {
+    let actor = current_admin(&state)?;
+    if actor.user_id == user_id {
+        return Err(AuthCode::Forbidden.to_string());
+    }
+    let hash =
+        hash_password(&temporary_password).map_err(|_| AuthCode::InvalidInput.to_string())?;
+    let storage = lock(&state.storage);
+    if storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("USER_NOT_FOUND".into());
+    }
+    storage
+        .set_user_password(&user_id, &hash, true, &iso_now())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_experiment_owner(
+    state: State<AppState>,
+    experiment_id: String,
+    owner_user_id: Option<String>,
+) -> Result<(), String> {
+    current_admin(&state)?;
+    if state.exp.snapshot().experiment_id.as_deref() == Some(experiment_id.as_str()) {
+        return Err("无法变更正在运行实验的归属".into());
+    }
+    let storage = lock(&state.storage);
+    if storage
+        .get_experiment(&experiment_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("实验不存在".into());
+    }
+    if let Some(owner_id) = owner_user_id.as_deref() {
+        let owner = storage
+            .get_user(owner_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+        if !owner.is_active {
+            return Err(AuthCode::AccountDisabled.to_string());
+        }
+    }
+    storage
+        .set_experiment_owner(&experiment_id, owner_user_id.as_deref())
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 fn get_app_info() -> AppInfo {
@@ -682,7 +1010,41 @@ fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
 }
 
 #[tauri::command]
+fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
+    PublicSafetyStatus {
+        experiment_running: state.exp.is_running(),
+        mfc_connected: state.hub.mfc_rx().borrow().connected,
+        temp_connected: state.hub.temp_rx().borrow().connected,
+    }
+}
+
+#[tauri::command]
+async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    st.exp.stop.store(true, Ordering::Relaxed);
+    let result = match st.hub.request_set_atmosphere(SAFETY_ATMOSPHERE).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    st.hub.set_temp_target_c(25.0);
+    st.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "emergency_safe_shutdown",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .detail(serde_json::json!({ "authenticated": false })),
+    );
+    result
+}
+
+#[tauri::command]
 async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
     // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
     if gas >= GAS_COUNT {
@@ -730,6 +1092,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 
 #[tauri::command]
 async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     if gas >= GAS_COUNT {
         return Err("INVALID_PARAMS".into());
     }
@@ -783,6 +1146,7 @@ async fn set_all_valves(app: &AppHandle, on: bool, action: &str) -> Result<(), S
 
 #[tauri::command]
 async fn open_all_valves(app: AppHandle) -> Result<(), String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     set_all_valves(&app, true, "open_all").await
 }
 
@@ -812,6 +1176,7 @@ async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     let hub = app.state::<AppState>().hub.clone();
     let r = hub
         .request_tare()
@@ -834,8 +1199,9 @@ async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
 }
 
 #[tauri::command]
-fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
+fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> Result<(), String> {
     let st = app.state::<AppState>();
+    current_user(&st)?;
     let temp_rx = st.hub.temp_rx();
     let mfc_rx = st.hub.mfc_rx();
     let bal_rx = st.hub.balance_rx();
@@ -860,19 +1226,32 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
             }
         }
     });
+    Ok(())
 }
 
 /// Stop the current telemetry pump thread (issue #8). The frontend calls this on unsubscribe.
 #[tauri::command]
-fn unsubscribe_telemetry(state: State<AppState>) {
+fn unsubscribe_telemetry(state: State<AppState>) -> Result<(), String> {
+    current_user(&state)?;
     state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 
 // ---- Experiment -------------------------------------------------------------
 
 #[tauri::command]
-fn get_experiment_state(state: State<AppState>) -> ExperimentStatus {
-    state.exp.snapshot()
+fn get_experiment_state(state: State<AppState>) -> Result<ExperimentStatus, String> {
+    let user = current_user(&state)?;
+    let mut status = state.exp.snapshot();
+    let owns = status.owner_user_id.as_deref() == Some(user.user_id.as_str());
+    status.can_control = user.role.is_admin() || owns;
+    status.occupied_by_other = status.running && !status.can_control;
+    if status.occupied_by_other {
+        status.sample_name = None;
+        status.owner_user_id = None;
+        status.owner_display_name = None;
+    }
+    Ok(status)
 }
 
 /// Validate experiment start parameters (docs/05 §5.2). Pure so it is unit-testable.
@@ -886,9 +1265,6 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
     if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
         return Err("样品重量必须大于 0".into());
     }
-    if params.operator.trim().is_empty() {
-        return Err("操作员必填".into());
-    }
     if !MODES.contains(&params.experiment_type.as_str()) {
         return Err("未知实验模式".into());
     }
@@ -900,6 +1276,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     validate_experiment_params(&params)?;
 
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
     if st.exp.is_running() {
         return Err("实验已在运行".into());
     }
@@ -915,11 +1292,11 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         start_time: now.clone(),
         end_time: None,
         description: params.notes.clone(),
-        operator: Some(params.operator.clone()),
+        operator: Some(user.display_name.clone()),
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
         created_at: now.clone(),
-        owner_user_id: None,
+        owner_user_id: Some(user.user_id.clone()),
     };
     lock(&st.storage)
         .insert_experiment(&row)
@@ -944,11 +1321,15 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: 0.0,
         total_elapsed_s: 0.0,
+        owner_user_id: Some(user.user_id.clone()),
+        owner_display_name: Some(user.display_name.clone()),
+        can_control: true,
+        occupied_by_other: false,
     };
     st.exp.set_status(initial.clone());
     st.audit.write(
         &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
-            .operator(params.operator.clone())
+            .operator(user.display_name.clone())
             .detail(serde_json::json!({
                 "id": id, "mode": params.experiment_type, "project": params.project_name
             })),
@@ -967,6 +1348,8 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         params.sample_name.clone(),
         params.sample_weight,
         now,
+        user.user_id,
+        user.display_name,
         st.sim_speed,
     );
     Ok(id)
@@ -974,6 +1357,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
 
 #[tauri::command]
 async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     let (hub, audit, exp) = {
         let st = app.state::<AppState>();
         (st.hub.clone(), st.audit.clone(), st.exp.clone())
@@ -1017,6 +1401,7 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
 
 #[tauri::command]
 fn skip_stage(state: State<AppState>) -> Result<(), String> {
+    require_experiment_controller(&state)?;
     if !state.exp.is_running() {
         return Err("没有正在运行的实验".into());
     }
@@ -1026,11 +1411,12 @@ fn skip_stage(state: State<AppState>) -> Result<(), String> {
 
 /// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
 #[tauri::command]
-fn list_programs() -> Vec<Program> {
-    tmh_core::engine::STANDARD_MODES
+fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
+    current_user(&state)?;
+    Ok(tmh_core::engine::STANDARD_MODES
         .iter()
         .filter_map(|m| standard_program(m))
-        .collect()
+        .collect())
 }
 
 // ---- History query ----------------------------------------------------------
@@ -1046,6 +1432,7 @@ struct ExperimentSummary {
     operator: Option<String>,
     experiment_type: Option<String>,
     has_analysis: bool,
+    owner_user_id: Option<String>,
 }
 
 fn summary_of(r: ExperimentRow) -> ExperimentSummary {
@@ -1059,6 +1446,7 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
         end_time: r.end_time,
         operator: r.operator,
         experiment_type: r.experiment_type,
+        owner_user_id: r.owner_user_id,
     }
 }
 
@@ -1076,6 +1464,7 @@ struct ExperimentDetail {
     analysis: Option<serde_json::Value>,
     created_at: String,
     sample_count: i64,
+    owner_user_id: Option<String>,
 }
 
 fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
@@ -1096,6 +1485,7 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
         analysis,
         created_at: r.created_at,
         sample_count,
+        owner_user_id: r.owner_user_id,
     }
 }
 
@@ -1130,14 +1520,21 @@ fn sample_dto(r: SampleRow) -> SampleDto {
 
 #[tauri::command]
 fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, String> {
-    let rows = lock(&state.storage)
-        .list_experiments()
-        .map_err(|e| e.to_string())?;
+    let user = current_user(&state)?;
+    let storage = lock(&state.storage);
+    let rows = if user.role.is_admin() {
+        storage.list_experiments()
+    } else {
+        storage.list_experiments_for_owner(&user.user_id)
+    }
+    .map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(summary_of).collect())
 }
 
 #[tauri::command]
 fn get_experiment_detail(state: State<AppState>, id: String) -> Result<ExperimentDetail, String> {
+    let user = current_user(&state)?;
+    authorize_experiment(&state, &id, &user)?;
     let s = lock(&state.storage);
     let row = s
         .get_experiment(&id)
@@ -1153,6 +1550,8 @@ fn get_experiment_samples(
     id: String,
     max_points: Option<usize>,
 ) -> Result<Vec<SampleDto>, String> {
+    let user = current_user(&state)?;
+    authorize_experiment(&state, &id, &user)?;
     let rows = lock(&state.storage)
         .get_samples(&id, max_points.unwrap_or(2000))
         .map_err(|e| e.to_string())?;
@@ -1161,6 +1560,7 @@ fn get_experiment_samples(
 
 #[tauri::command]
 fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
+    current_admin(&state)?;
     // Never delete the run currently in progress.
     if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
         return Err("无法删除正在运行的实验".into());
@@ -1205,15 +1605,8 @@ fn persist_analysis(
 }
 
 fn require_experiment(state: &AppState, id: &str) -> Result<(), String> {
-    let exists = lock(&state.storage)
-        .get_experiment(id)
-        .map_err(|e| e.to_string())?
-        .is_some();
-    if exists {
-        Ok(())
-    } else {
-        Err("实验不存在".into())
-    }
+    let user = current_user(state)?;
+    authorize_experiment(state, id, &user).map(|_| ())
 }
 
 /// GB/T 13241 reducibility: Rt from W0 (sample weight) and Wt (final sample weight),
@@ -1321,6 +1714,8 @@ fn reducing_target(mode: Option<&str>) -> Option<f64> {
 #[tauri::command]
 fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    authorize_experiment(&st, &id, &user)?;
     let (exp, samples) = {
         let s = lock(&st.storage);
         let exp = s
@@ -1340,7 +1735,9 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
         analysis.as_ref(),
         reducing_target(exp.experiment_type.as_deref()),
     );
-    let path = st.exports_dir.join(format!("report-{id}.html"));
+    let user_dir = st.exports_dir.join(&user.user_id);
+    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
+    let path = user_dir.join(format!("report-{id}.html"));
     std::fs::write(&path, html).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().to_string();
     let _ = app.opener().open_path(p.clone(), None::<&str>);
@@ -1359,6 +1756,8 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
 #[tauri::command]
 fn export_experiment(app: AppHandle, id: String, format: String) -> Result<String, String> {
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    authorize_experiment(&st, &id, &user)?;
     let (exp, samples) = {
         let s = lock(&st.storage);
         let exp = s
@@ -1380,7 +1779,9 @@ fn export_experiment(app: AppHandle, id: String, format: String) -> Result<Strin
         "xlsx" => (tmh_core::report::samples_to_xlsx(&exp, &samples)?, "xlsx"),
         _ => return Err("未知导出格式".into()),
     };
-    let path = st.exports_dir.join(format!("{id}.{ext}"));
+    let user_dir = st.exports_dir.join(&user.user_id);
+    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
+    let path = user_dir.join(format!("{id}.{ext}"));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().to_string();
     let _ = app.opener().open_path(p.clone(), None::<&str>);
@@ -1537,6 +1938,7 @@ pub fn run() {
         limit_co: comm_config.gas_safety_limits.co,
         audit,
         storage: Arc::new(Mutex::new(storage)),
+        auth: Arc::new(AuthService::new(15 * 60)),
         exp: Arc::new(ExpControl::new()),
         sim_speed,
         exports_dir,
@@ -1562,6 +1964,20 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            get_auth_state,
+            bootstrap_admin,
+            login,
+            logout,
+            lock_session,
+            touch_session,
+            change_own_password,
+            list_users,
+            create_user,
+            update_user,
+            reset_user_password,
+            set_experiment_owner,
+            get_public_safety_status,
+            emergency_safe_shutdown,
             get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,
@@ -1630,7 +2046,6 @@ mod tests {
             sample_id: "S1".into(),
             sample_name: "样品".into(),
             sample_weight: 100.0,
-            operator: "张三".into(),
             experiment_type: "REDUCIBILITY".into(),
             project_name: None,
             notes: None,
@@ -1650,7 +2065,6 @@ mod tests {
         assert!(validate_experiment_params(&params(|p| p.sample_name = "".into())).is_err());
         assert!(validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_err());
         assert!(validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_err());
-        assert!(validate_experiment_params(&params(|p| p.operator = "".into())).is_err());
         assert!(
             validate_experiment_params(&params(|p| p.experiment_type = "NOPE".into())).is_err()
         );
