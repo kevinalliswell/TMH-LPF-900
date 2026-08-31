@@ -8,6 +8,7 @@ import type {
   ClampResult,
   ExperimentDetail,
   ExperimentParams,
+  ExperimentPreflightResult,
   ExperimentState,
   ExperimentSummary,
   GasLimits,
@@ -21,12 +22,15 @@ import {
   mockAnalyze13240,
   mockAnalyze13241,
   mockAnalyze13242,
+  mockDeleteCustomProgram,
   mockDeleteExperiment,
   mockExportText,
   mockGetExperimentDetail,
   mockGetExperimentSamples,
   mockListExperiments,
   mockListPrograms,
+  mockPreflightExperiment,
+  mockSaveCustomProgram,
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
@@ -94,18 +98,37 @@ export async function startExperiment(params: ExperimentParams): Promise<string>
   return isTauri() ? invoke("start_experiment", { params }) : mockStartExperiment(params);
 }
 
+export async function preflightExperiment(
+  params: ExperimentParams,
+): Promise<ExperimentPreflightResult> {
+  return isTauri()
+    ? invoke("preflight_experiment", { params })
+    : mockPreflightExperiment(params);
+}
+
 export async function stopExperiment(reason: string): Promise<void> {
   if (!isTauri()) return void mockStopExperiment();
   await invoke("stop_experiment", { reason });
 }
 
-export async function skipStage(): Promise<void> {
-  if (!isTauri()) return void mockSkipStage();
-  await invoke("skip_stage");
+export async function skipStage(reason: string): Promise<void> {
+  if (!isTauri()) return void mockSkipStage(reason);
+  await invoke("skip_stage", { reason });
 }
 
 export async function listPrograms(): Promise<ProgramDto[]> {
   return isTauri() ? invoke("list_programs") : mockListPrograms();
+}
+
+export async function saveCustomProgram(program: ProgramDto): Promise<ProgramDto> {
+  return isTauri()
+    ? invoke("save_custom_program", { program })
+    : mockSaveCustomProgram(program);
+}
+
+export async function deleteCustomProgram(id: string): Promise<void> {
+  if (!isTauri()) return void mockDeleteCustomProgram(id);
+  await invoke("delete_custom_program", { id });
 }
 
 export async function listExperiments(): Promise<ExperimentSummary[]> {

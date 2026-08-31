@@ -17,7 +17,8 @@ use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
-    standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
+    standard_program, validate_program, ExperimentEngine, Phase, Program, ProgramSource, Stage,
+    StageKind, SAFETY_ATMOSPHERE, STANDARD_MODES,
 };
 use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
 use tmh_core::sampler::{build_sample_row, SampleContext};
@@ -25,8 +26,6 @@ use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
 
-/// Registered experiment modes (custom modes land in a later slice).
-const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
 /// Number of gas channels (order: H2, N2, CO2, CO).
 const GAS_COUNT: usize = 4;
 /// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
@@ -53,6 +52,8 @@ struct AppState {
     sim_speed: f64,
     /// Directory reports and data exports are written to.
     exports_dir: PathBuf,
+    /// Operator-defined experiment modes live here as JSON.
+    custom_modes_path: PathBuf,
     /// Software-update checking (docs/09 §9.3): OFF by default, enabled via config/env.
     updater_enabled: bool,
     /// Bumped on each (un)subscribe so a stale telemetry pump thread exits (issue #8).
@@ -66,6 +67,7 @@ struct ExpControl {
     status: Mutex<ExperimentStatus>,
     stop: AtomicBool,
     skip: AtomicBool,
+    skip_reason: Mutex<Option<String>>,
 }
 
 impl ExpControl {
@@ -74,6 +76,7 @@ impl ExpControl {
             status: Mutex::new(ExperimentStatus::idle()),
             stop: AtomicBool::new(false),
             skip: AtomicBool::new(false),
+            skip_reason: Mutex::new(None),
         }
     }
     fn snapshot(&self) -> ExperimentStatus {
@@ -150,6 +153,92 @@ struct ExperimentParams {
 
 fn iso_now() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn custom_program_id() -> String {
+    format!("custom-{}", chrono::Local::now().format("%Y%m%d%H%M%S%3f"))
+}
+
+fn read_custom_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            if text.trim().is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut programs: Vec<Program> = serde_json::from_str(&text)
+                .map_err(|e| format!("自定义实验模式文件解析失败: {e}"))?;
+            programs.retain(|p| p.source == ProgramSource::Custom);
+            for p in &programs {
+                validate_program(p)?;
+            }
+            Ok(programs)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("读取自定义实验模式失败: {e}")),
+    }
+}
+
+fn write_custom_programs(path: &PathBuf, programs: &[Program]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建模式配置目录失败: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(programs).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写入自定义实验模式失败: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("保存自定义实验模式失败: {e}"))?;
+    Ok(())
+}
+
+fn standard_programs() -> Vec<Program> {
+    STANDARD_MODES
+        .iter()
+        .filter_map(|m| standard_program(m))
+        .collect()
+}
+
+fn all_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
+    let mut programs = standard_programs();
+    programs.extend(read_custom_programs(path)?);
+    Ok(programs)
+}
+
+fn program_by_id(state: &AppState, id: &str) -> Result<Program, String> {
+    if let Some(p) = standard_program(id) {
+        return Ok(p);
+    }
+    read_custom_programs(&state.custom_modes_path)?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "未知实验模式".to_string())
+}
+
+fn flammable_warnings(program: &Program, h2_limit: f64, co_limit: f64) -> Vec<PreflightIssue> {
+    let mut warnings = Vec::new();
+    for (i, stage) in program.stages.iter().enumerate() {
+        if stage.gas[0] > h2_limit {
+            warnings.push(PreflightIssue::warning(
+                "H2_LIMIT",
+                format!(
+                    "第 {} 阶段 H₂ 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
+                    i + 1,
+                    stage.gas[0],
+                    h2_limit
+                ),
+            ));
+        }
+        if stage.gas[3] > co_limit {
+            warnings.push(PreflightIssue::warning(
+                "CO_LIMIT",
+                format!(
+                    "第 {} 阶段 CO 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
+                    i + 1,
+                    stage.gas[3],
+                    co_limit
+                ),
+            ));
+        }
+    }
+    warnings
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
@@ -488,13 +577,21 @@ fn spawn_experiment_task(
 
             let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(25.0);
             let result = if exp.skip.swap(false, Ordering::Relaxed) {
+                let from_stage = engine.stage_index();
+                let reason = lock(&exp.skip_reason)
+                    .take()
+                    .unwrap_or_else(|| "未填写".to_string());
+                let result = engine.skip_stage();
                 audit.write(
                     &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
-                        .detail(
-                            serde_json::json!({ "id": id, "from_stage": engine.stage_index() }),
-                        ),
+                        .detail(serde_json::json!({
+                            "id": id,
+                            "from_stage": from_stage,
+                            "to_stage": if result.completed { None } else { Some(engine.stage_index()) },
+                            "reason": reason
+                        })),
                 );
-                engine.skip_stage()
+                result
             } else {
                 engine.tick(t8, sim_speed)
             };
@@ -635,6 +732,36 @@ struct TareResultDto {
     success: bool,
     a00_found: bool,
     weight: Option<f64>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct PreflightIssue {
+    code: String,
+    message_zh: String,
+}
+
+impl PreflightIssue {
+    fn blocking(code: &str, message_zh: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message_zh: message_zh.into(),
+        }
+    }
+
+    fn warning(code: &str, message_zh: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message_zh: message_zh.into(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ExperimentPreflightResult {
+    ok: bool,
+    blocking: Vec<PreflightIssue>,
+    warnings: Vec<PreflightIssue>,
+    program: Option<Program>,
 }
 
 // ---- Commands ---------------------------------------------------------------
@@ -876,34 +1003,101 @@ fn get_experiment_state(state: State<AppState>) -> ExperimentStatus {
 }
 
 /// Validate experiment start parameters (docs/05 §5.2). Pure so it is unit-testable.
-fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
+fn validate_experiment_params(params: &ExperimentParams) -> Vec<PreflightIssue> {
+    let mut issues = Vec::new();
     if params.sample_id.trim().is_empty() {
-        return Err("样品编号必填".into());
+        issues.push(PreflightIssue::blocking("SAMPLE_ID", "样品编号必填"));
     }
     if params.sample_name.trim().is_empty() {
-        return Err("样品名称必填".into());
+        issues.push(PreflightIssue::blocking("SAMPLE_NAME", "样品名称必填"));
     }
     if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
-        return Err("样品重量必须大于 0".into());
+        issues.push(PreflightIssue::blocking("SAMPLE_WEIGHT", "样品重量必须大于 0"));
     }
     if params.operator.trim().is_empty() {
-        return Err("操作员必填".into());
+        issues.push(PreflightIssue::blocking("OPERATOR", "操作员必填"));
     }
-    if !MODES.contains(&params.experiment_type.as_str()) {
-        return Err("未知实验模式".into());
+    issues
+}
+
+fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
+    let mut blocking = validate_experiment_params(params);
+    let mut warnings = Vec::new();
+
+    if state.exp.is_running() {
+        blocking.push(PreflightIssue::blocking("EXPERIMENT_RUNNING", "实验已在运行"));
     }
-    Ok(())
+
+    let program = match program_by_id(state, &params.experiment_type) {
+        Ok(p) => {
+            warnings.extend(flammable_warnings(&p, state.limit_h2, state.limit_co));
+            Some(p)
+        }
+        Err(e) => {
+            blocking.push(PreflightIssue::blocking("PROGRAM_NOT_FOUND", e));
+            None
+        }
+    };
+
+    let temp = state.hub.temp_rx().borrow().clone();
+    let mfc = state.hub.mfc_rx().borrow().clone();
+    let balance = state.hub.balance_rx().borrow().clone();
+    if !temp.connected {
+        blocking.push(PreflightIssue::blocking("TEMP_OFFLINE", "温度总线离线，无法启动实验"));
+    }
+    if !mfc.connected {
+        blocking.push(PreflightIssue::blocking("MFC_OFFLINE", "气体流量 MFC 离线，无法启动实验"));
+    }
+    if !balance.connected {
+        blocking.push(PreflightIssue::blocking("BALANCE_OFFLINE", "电子天平离线，无法启动实验"));
+    }
+    if let Some(weight) = balance.weight {
+        if params.sample_weight > 0.0 {
+            let diff = (weight - params.sample_weight).abs();
+            let threshold = (params.sample_weight * 0.02).max(0.1);
+            if diff > threshold {
+                warnings.push(PreflightIssue::warning(
+                    "WEIGHT_MISMATCH",
+                    format!(
+                        "当前天平读数 {:.3} g 与输入样品重量 {:.3} g 差异较大，请确认初始重量",
+                        weight, params.sample_weight
+                    ),
+                ));
+            }
+        }
+    } else if balance.connected {
+        warnings.push(PreflightIssue::warning(
+            "BALANCE_NO_WEIGHT",
+            "电子天平在线但暂无有效重量读数，请确认初始重量",
+        ));
+    }
+
+    ExperimentPreflightResult {
+        ok: blocking.is_empty(),
+        blocking,
+        warnings,
+        program,
+    }
+}
+
+#[tauri::command]
+fn preflight_experiment(
+    state: State<AppState>,
+    params: ExperimentParams,
+) -> ExperimentPreflightResult {
+    build_preflight(&state, &params)
 }
 
 #[tauri::command]
 fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
-    validate_experiment_params(&params)?;
-
     let st = app.state::<AppState>();
-    if st.exp.is_running() {
-        return Err("实验已在运行".into());
+    let preflight = build_preflight(&st, &params);
+    if let Some(issue) = preflight.blocking.first() {
+        return Err(issue.message_zh.clone());
     }
-    let program = standard_program(&params.experiment_type).ok_or("未知实验模式")?;
+    let program = preflight.program.ok_or("未知实验模式")?;
+    validate_program(&program)?;
+    let program_snapshot_json = serde_json::to_string(&program).map_err(|e| e.to_string())?;
 
     let now = iso_now();
     let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
@@ -918,6 +1112,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         operator: Some(params.operator.clone()),
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
+        program_snapshot_json: Some(program_snapshot_json),
         created_at: now.clone(),
     };
     lock(&st.storage)
@@ -927,6 +1122,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     // Reset signals and publish the initial running status before the task spins up.
     st.exp.stop.store(false, Ordering::Relaxed);
     st.exp.skip.store(false, Ordering::Relaxed);
+    *lock(&st.exp.skip_reason) = None;
     let first = program.stages.first();
     let initial = ExperimentStatus {
         running: true,
@@ -1015,21 +1211,71 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn skip_stage(state: State<AppState>) -> Result<(), String> {
+fn skip_stage(state: State<AppState>, reason: String) -> Result<(), String> {
     if !state.exp.is_running() {
         return Err("没有正在运行的实验".into());
     }
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("跳过阶段原因必填".into());
+    }
+    *lock(&state.exp.skip_reason) = Some(reason.to_string());
     state.exp.skip.store(true, Ordering::Relaxed);
     Ok(())
 }
 
 /// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
 #[tauri::command]
-fn list_programs() -> Vec<Program> {
-    tmh_core::engine::STANDARD_MODES
-        .iter()
-        .filter_map(|m| standard_program(m))
-        .collect()
+fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
+    all_programs(&state.custom_modes_path)
+}
+
+#[tauri::command]
+fn save_custom_program(state: State<AppState>, mut program: Program) -> Result<Program, String> {
+    let replacing_existing = !program.id.trim().is_empty();
+    if program.id.trim().is_empty() {
+        program.id = custom_program_id();
+    } else {
+        program.id = program.id.trim().to_string();
+    }
+    program.name = program.name.trim().to_string();
+    program.source = ProgramSource::Custom;
+    if STANDARD_MODES.contains(&program.id.as_str()) {
+        return Err("标准模式不可覆盖，请复制为自定义模式".into());
+    }
+    validate_program(&program)?;
+
+    let mut programs = read_custom_programs(&state.custom_modes_path)?;
+    if let Some(existing) = programs.iter_mut().find(|p| p.id == program.id) {
+        *existing = program.clone();
+    } else {
+        programs.push(program.clone());
+    }
+    write_custom_programs(&state.custom_modes_path, &programs)?;
+    state.audit.write(
+        &AuditEntry::new(Category::Config, "save_custom_program", AuditResult::Success)
+            .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
+    );
+    Ok(program)
+}
+
+#[tauri::command]
+fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), String> {
+    if STANDARD_MODES.contains(&id.as_str()) {
+        return Err("标准模式不可删除".into());
+    }
+    let mut programs = read_custom_programs(&state.custom_modes_path)?;
+    let before = programs.len();
+    programs.retain(|p| p.id != id);
+    if programs.len() == before {
+        return Err("自定义模式不存在".into());
+    }
+    write_custom_programs(&state.custom_modes_path, &programs)?;
+    state.audit.write(
+        &AuditEntry::new(Category::Config, "delete_custom_program", AuditResult::Success)
+            .detail(serde_json::json!({ "id": id })),
+    );
+    Ok(())
 }
 
 // ---- History query ----------------------------------------------------------
@@ -1073,6 +1319,7 @@ struct ExperimentDetail {
     operator: Option<String>,
     experiment_type: Option<String>,
     analysis: Option<serde_json::Value>,
+    program_snapshot: Option<Program>,
     created_at: String,
     sample_count: i64,
 }
@@ -1080,6 +1327,10 @@ struct ExperimentDetail {
 fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
     let analysis = r
         .analysis_results_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    let program_snapshot = r
+        .program_snapshot_json
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
     ExperimentDetail {
@@ -1093,6 +1344,7 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
         operator: r.operator,
         experiment_type: r.experiment_type,
         analysis,
+        program_snapshot,
         created_at: r.created_at,
         sample_count,
     }
@@ -1306,14 +1558,29 @@ fn analyze_gb13240(
 
 // ---- Report & export --------------------------------------------------------
 
-/// The reducing-stage target temperature for a mode (for report condition checks).
-fn reducing_target(mode: Option<&str>) -> Option<f64> {
-    mode.and_then(standard_program).and_then(|p| {
-        p.stages
-            .into_iter()
-            .find(|s| s.kind == StageKind::Reducing)
-            .map(|s| s.target_temp)
-    })
+fn reducing_target_from_program(program: &Program) -> Option<f64> {
+    program
+        .stages
+        .iter()
+        .find(|s| s.kind == StageKind::Reducing)
+        .map(|s| s.target_temp)
+}
+
+/// The reducing-stage target temperature for condition checks. Prefer the stored
+/// per-run program snapshot; old records fall back to the current standard table.
+fn reducing_target(exp: &ExperimentRow) -> Option<f64> {
+    exp.program_snapshot_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Program>(j).ok())
+        .as_ref()
+        .and_then(reducing_target_from_program)
+        .or_else(|| {
+            exp.experiment_type
+                .as_deref()
+                .and_then(standard_program)
+                .as_ref()
+                .and_then(reducing_target_from_program)
+        })
 }
 
 /// Generate a self-contained HTML report to the exports dir and open it. Returns the path.
@@ -1337,7 +1604,7 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
         &exp,
         &samples,
         analysis.as_ref(),
-        reducing_target(exp.experiment_type.as_deref()),
+        reducing_target(&exp),
     );
     let path = st.exports_dir.join(format!("report-{id}.html"));
     std::fs::write(&path, html).map_err(|e| e.to_string())?;
@@ -1516,9 +1783,11 @@ pub fn run() {
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
     let exports_dir = data_root.join("exports");
+    let config_dir = data_root.join("config");
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
     let _ = std::fs::create_dir_all(&exports_dir);
+    let _ = std::fs::create_dir_all(&config_dir);
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let comm_config = load_comm_config();
     let hub = Arc::new(build_mock_hub(&comm_config));
@@ -1539,6 +1808,7 @@ pub fn run() {
         exp: Arc::new(ExpControl::new()),
         sim_speed,
         exports_dir,
+        custom_modes_path: config_dir.join("experiment_modes.json"),
         updater_enabled,
         telemetry_gen: Arc::new(AtomicU64::new(0)),
     };
@@ -1574,10 +1844,13 @@ pub fn run() {
             subscribe_telemetry,
             unsubscribe_telemetry,
             get_experiment_state,
+            preflight_experiment,
             start_experiment,
             stop_experiment,
             skip_stage,
             list_programs,
+            save_custom_program,
+            delete_custom_program,
             list_experiments,
             get_experiment_detail,
             get_experiment_samples,
@@ -1640,19 +1913,16 @@ mod tests {
 
     #[test]
     fn valid_experiment_params_pass() {
-        assert!(validate_experiment_params(&params(|_| {})).is_ok());
+        assert!(validate_experiment_params(&params(|_| {})).is_empty());
     }
 
     #[test]
     fn blank_or_bad_experiment_params_are_rejected() {
-        assert!(validate_experiment_params(&params(|p| p.sample_id = "  ".into())).is_err());
-        assert!(validate_experiment_params(&params(|p| p.sample_name = "".into())).is_err());
-        assert!(validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_err());
-        assert!(validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_err());
-        assert!(validate_experiment_params(&params(|p| p.operator = "".into())).is_err());
-        assert!(
-            validate_experiment_params(&params(|p| p.experiment_type = "NOPE".into())).is_err()
-        );
+        assert!(!validate_experiment_params(&params(|p| p.sample_id = "  ".into())).is_empty());
+        assert!(!validate_experiment_params(&params(|p| p.sample_name = "".into())).is_empty());
+        assert!(!validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_empty());
+        assert!(!validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_empty());
+        assert!(!validate_experiment_params(&params(|p| p.operator = "".into())).is_empty());
     }
 
     #[test]
@@ -1664,9 +1934,29 @@ mod tests {
 
     #[test]
     fn reducing_target_matches_program() {
-        assert_eq!(reducing_target(Some("REDUCIBILITY")), Some(900.0));
-        assert_eq!(reducing_target(Some("LOW_TEMP_DEGRADATION")), Some(500.0));
-        assert_eq!(reducing_target(Some("bogus")), None);
+        let mut exp = ExperimentRow {
+            experiment_id: "e1".into(),
+            experiment_name: "e".into(),
+            sample_name: "s".into(),
+            sample_weight: 100.0,
+            start_time: "t0".into(),
+            end_time: None,
+            description: None,
+            operator: None,
+            experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
+            analysis_results_json: None,
+            program_snapshot_json: None,
+            created_at: "t0".into(),
+        };
+        assert_eq!(reducing_target(&exp), Some(500.0));
+
+        let mut snapshot = standard_program("REDUCIBILITY").unwrap();
+        snapshot.id = "custom-rt".into();
+        snapshot.name = "快照".into();
+        snapshot.source = ProgramSource::Custom;
+        snapshot.stages[2].target_temp = 720.0;
+        exp.program_snapshot_json = Some(serde_json::to_string(&snapshot).unwrap());
+        assert_eq!(reducing_target(&exp), Some(720.0));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     operator               TEXT,
     experiment_type        TEXT,
     analysis_results_json  TEXT,
+    program_snapshot_json  TEXT,
     created_at             TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS experiment_data (
@@ -61,6 +62,7 @@ pub struct ExperimentRow {
     pub operator: Option<String>,
     pub experiment_type: Option<String>,
     pub analysis_results_json: Option<String>,
+    pub program_snapshot_json: Option<String>,
     pub created_at: String,
 }
 
@@ -103,6 +105,12 @@ impl Storage {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.execute_batch(SCHEMA)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 && !column_exists(&conn, "experiments", "program_snapshot_json")? {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN program_snapshot_json TEXT",
+                [],
+            )?;
+        }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -128,7 +136,7 @@ impl Storage {
         self.conn.execute(
             "INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, \
              start_time, end_time, description, operator, experiment_type, analysis_results_json, \
-             created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+             program_snapshot_json, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 e.experiment_id,
                 e.experiment_name,
@@ -140,6 +148,7 @@ impl Storage {
                 e.operator,
                 e.experiment_type,
                 e.analysis_results_json,
+                e.program_snapshot_json,
                 e.created_at,
             ],
         )?;
@@ -284,7 +293,19 @@ impl Storage {
 /// Column list shared by every `experiments` SELECT (keeps `experiment_from_row` in sync).
 const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_name, \
      sample_weight, start_time, end_time, description, operator, experiment_type, \
-     analysis_results_json, created_at FROM experiments";
+     analysis_results_json, program_snapshot_json, created_at FROM experiments";
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
     Ok(ExperimentRow {
@@ -298,7 +319,8 @@ fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
         operator: r.get(7)?,
         experiment_type: r.get(8)?,
         analysis_results_json: r.get(9)?,
-        created_at: r.get(10)?,
+        program_snapshot_json: r.get(10)?,
+        created_at: r.get(11)?,
     })
 }
 
@@ -335,6 +357,7 @@ mod tests {
             operator: Some("op".into()),
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
+            program_snapshot_json: None,
             created_at: "2026-07-05T10:00:00".into(),
         }
     }
@@ -357,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_inits_at_version_1() {
+    fn schema_inits_at_version_2() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 1);
+        assert_eq!(s.user_version().unwrap(), 2);
     }
 
     #[test]
@@ -411,6 +434,16 @@ mod tests {
     }
 
     #[test]
+    fn program_snapshot_roundtrips() {
+        let s = Storage::open_in_memory().unwrap();
+        let mut e = experiment("e1");
+        e.program_snapshot_json = Some(r#"{"id":"custom-1"}"#.into());
+        s.insert_experiment(&e).unwrap();
+        let saved = s.get_experiment("e1").unwrap().unwrap();
+        assert_eq!(saved.program_snapshot_json, e.program_snapshot_json);
+    }
+
+    #[test]
     fn get_samples_decimates_to_max_points() {
         let mut s = Storage::open_in_memory().unwrap();
         s.insert_experiment(&experiment("e1")).unwrap();
@@ -458,8 +491,56 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 1);
+        assert_eq!(s.user_version().unwrap(), 2);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v1_database_migrates_program_snapshot_column() {
+        let dir = std::env::temp_dir().join(format!("tmh_db3_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("experiments.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE experiments (
+                    experiment_id TEXT PRIMARY KEY,
+                    experiment_name TEXT NOT NULL,
+                    sample_name TEXT NOT NULL,
+                    sample_weight REAL NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT,
+                    description TEXT,
+                    operator TEXT,
+                    experiment_type TEXT,
+                    analysis_results_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE experiment_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+                    timestamp TEXT NOT NULL,
+                    experiment_duration TEXT,
+                    temperature REAL NOT NULL,
+                    weight REAL NOT NULL,
+                    weight_loss REAL NOT NULL,
+                    co_flow REAL NOT NULL,
+                    co2_flow REAL NOT NULL,
+                    n2_flow REAL NOT NULL,
+                    h2_flow REAL NOT NULL,
+                    experiment_status TEXT,
+                    system_message TEXT
+                );
+                PRAGMA user_version=1;
+                "#,
+            )
+            .unwrap();
+        }
+        let s = Storage::open(&path).unwrap();
+        assert_eq!(s.user_version().unwrap(), 2);
+        assert!(column_exists(&s.conn, "experiments", "program_snapshot_json").unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -71,6 +71,7 @@ fn mock_soak(minutes: u64) {
             operator: None,
             experiment_type: None,
             analysis_results_json: None,
+            program_snapshot_json: None,
             created_at: "2026-07-05T00:00:00".into(),
         })
         .unwrap();

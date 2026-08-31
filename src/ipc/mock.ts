@@ -7,6 +7,7 @@ import type {
   ClampResult,
   ExperimentDetail,
   ExperimentParams,
+  ExperimentPreflightResult,
   ExperimentState,
   ExperimentSummary,
   ProgramDto,
@@ -106,6 +107,7 @@ const PROGRAMS: ProgramDto[] = [
   {
     id: "REDUCIBILITY",
     name: "GB/T 13241 还原性",
+    source: "standard",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
       st("恒温", "STABILIZING", [0, 15, 0, 0], 900, 5, 30, 0, "900℃恒温30min,N₂气氛"),
@@ -116,6 +118,7 @@ const PROGRAMS: ProgramDto[] = [
   {
     id: "LOW_TEMP_DEGRADATION",
     name: "GB/T 13242 低温粉化",
+    source: "standard",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 500, 5, 0, 10, "升温至500℃,N₂保护"),
       st("恒温", "STABILIZING", [0, 15, 0, 0], 500, 5, 30, 0, "500℃恒温30min,N₂气氛"),
@@ -126,6 +129,7 @@ const PROGRAMS: ProgramDto[] = [
   {
     id: "FREE_SWELLING",
     name: "GB/T 13240 自由膨胀",
+    source: "standard",
     stages: [
       st("升温", "HEATING", [0, 10, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
       st("恒温", "STABILIZING", [0, 15, 0, 0], 900, 5, 15, 0, "900℃恒温15min,N₂气氛"),
@@ -135,8 +139,102 @@ const PROGRAMS: ProgramDto[] = [
   },
 ];
 
+let customPrograms: ProgramDto[] = [];
+
+function cloneProgram(program: ProgramDto): ProgramDto {
+  return {
+    ...program,
+    stages: program.stages.map((s) => ({ ...s, gas: [...s.gas] })),
+  };
+}
+
+function allPrograms(): ProgramDto[] {
+  return [...PROGRAMS, ...customPrograms].map(cloneProgram);
+}
+
 export function mockListPrograms(): ProgramDto[] {
-  return PROGRAMS.map((p) => ({ ...p, stages: p.stages.map((s) => ({ ...s })) }));
+  return allPrograms();
+}
+
+function validateProgram(program: ProgramDto): string | null {
+  if (!program.name.trim()) return "模式名称必填";
+  if (program.stages.length === 0) return "至少需要一个阶段";
+  for (const [i, stage] of program.stages.entries()) {
+    const n = i + 1;
+    if (!stage.name.trim()) return `第 ${n} 阶段名称必填`;
+    if (!Number.isFinite(stage.target_temp)) return `第 ${n} 阶段目标温度无效`;
+    if (!Number.isFinite(stage.tolerance) || stage.tolerance < 0) return `第 ${n} 阶段容差必须为非负数`;
+    if (!Number.isFinite(stage.duration_min) || stage.duration_min < 0) return `第 ${n} 阶段时长必须为非负数`;
+    if (!Number.isFinite(stage.ramp_rate)) return `第 ${n} 阶段升温率无效`;
+    if (stage.gas.some((v) => !Number.isFinite(v) || v < 0)) return `第 ${n} 阶段气体流量必须为非负数`;
+    if (stage.gas.reduce((a, b) => a + b, 0) <= 0) return `第 ${n} 阶段总流量必须大于 0`;
+  }
+  return null;
+}
+
+function flammableWarnings(program: ProgramDto): ExperimentPreflightResult["warnings"] {
+  const warnings: ExperimentPreflightResult["warnings"] = [];
+  program.stages.forEach((stage, i) => {
+    const h2 = stage.gas[0] ?? 0;
+    const co = stage.gas[3] ?? 0;
+    if (h2 > limits.h2) {
+      warnings.push({
+        code: "H2_LIMIT",
+        message_zh: `第 ${i + 1} 阶段 H₂ 设定 ${h2.toFixed(1)} L/min 超过安全上限 ${limits.h2.toFixed(1)} L/min，执行时会被钳制`,
+      });
+    }
+    if (co > limits.co) {
+      warnings.push({
+        code: "CO_LIMIT",
+        message_zh: `第 ${i + 1} 阶段 CO 设定 ${co.toFixed(1)} L/min 超过安全上限 ${limits.co.toFixed(1)} L/min，执行时会被钳制`,
+      });
+    }
+  });
+  return warnings;
+}
+
+export function mockSaveCustomProgram(program: ProgramDto): ProgramDto {
+  const saved = cloneProgram(program);
+  saved.id = saved.id.trim() || `custom-${Date.now()}`;
+  saved.name = saved.name.trim();
+  saved.source = "custom";
+  if (PROGRAMS.some((p) => p.id === saved.id)) throw new Error("标准模式不可覆盖，请复制为自定义模式");
+  const error = validateProgram(saved);
+  if (error) throw new Error(error);
+  const idx = customPrograms.findIndex((p) => p.id === saved.id);
+  if (idx >= 0) customPrograms[idx] = cloneProgram(saved);
+  else customPrograms.push(cloneProgram(saved));
+  return cloneProgram(saved);
+}
+
+export function mockDeleteCustomProgram(id: string): void {
+  if (PROGRAMS.some((p) => p.id === id)) throw new Error("标准模式不可删除");
+  const before = customPrograms.length;
+  customPrograms = customPrograms.filter((p) => p.id !== id);
+  if (customPrograms.length === before) throw new Error("自定义模式不存在");
+}
+
+export function mockPreflightExperiment(p: ExperimentParams): ExperimentPreflightResult {
+  const blocking: ExperimentPreflightResult["blocking"] = [];
+  if (!p.sample_id.trim()) blocking.push({ code: "SAMPLE_ID", message_zh: "样品编号必填" });
+  if (!p.sample_name.trim()) blocking.push({ code: "SAMPLE_NAME", message_zh: "样品名称必填" });
+  if (!(p.sample_weight > 0)) blocking.push({ code: "SAMPLE_WEIGHT", message_zh: "样品重量必须大于 0" });
+  if (!p.operator.trim()) blocking.push({ code: "OPERATOR", message_zh: "操作员必填" });
+  if (experiment.running) blocking.push({ code: "EXPERIMENT_RUNNING", message_zh: "实验已在运行" });
+  const program = allPrograms().find((pr) => pr.id === p.experiment_type) ?? null;
+  if (!program) blocking.push({ code: "PROGRAM_NOT_FOUND", message_zh: "未知实验模式" });
+  const warnings = program ? flammableWarnings(program) : [];
+  if (program && p.sample_weight > 0) {
+    const diff = Math.abs(weight - p.sample_weight);
+    const threshold = Math.max(p.sample_weight * 0.02, 0.1);
+    if (diff > threshold) {
+      warnings.push({
+        code: "WEIGHT_MISMATCH",
+        message_zh: `当前天平读数 ${weight.toFixed(3)} g 与输入样品重量 ${p.sample_weight.toFixed(3)} g 差异较大，请确认初始重量`,
+      });
+    }
+  }
+  return { ok: blocking.length === 0, blocking, warnings, program };
 }
 
 // ---- experiment stage engine (browser) ----
@@ -232,6 +330,7 @@ function archive(r: MockRun): void {
     operator: r.operator || null,
     experiment_type: r.mode,
     analysis: null,
+    program_snapshot: cloneProgram(r.program),
     created_at: r.started,
     sample_count: r.samples.length,
   };
@@ -286,18 +385,15 @@ function completeRun(): void {
 }
 
 export function mockStartExperiment(p: ExperimentParams): string {
-  if (!p.sample_id.trim()) throw new Error("样品编号必填");
-  if (!p.sample_name.trim()) throw new Error("样品名称必填");
-  if (!(p.sample_weight > 0)) throw new Error("样品重量必须大于 0");
-  if (!p.operator.trim()) throw new Error("操作员必填");
-  if (experiment.running) throw new Error("实验已在运行");
-  const program = PROGRAMS.find((pr) => pr.id === p.experiment_type);
+  const preflight = mockPreflightExperiment(p);
+  if (preflight.blocking[0]) throw new Error(preflight.blocking[0].message_zh);
+  const program = preflight.program;
   if (!program) throw new Error("未知实验模式");
 
   const id = `exp-${Date.now()}`;
   const started = new Date().toISOString();
   run = {
-    program: { ...program, stages: program.stages.map((s) => ({ ...s })) },
+    program: cloneProgram(program),
     id,
     mode: p.experiment_type,
     sample: p.sample_name,
@@ -337,7 +433,8 @@ export function mockStopExperiment(): void {
   notify();
 }
 
-export function mockSkipStage(): void {
+export function mockSkipStage(reason: string): void {
+  if (!reason.trim()) throw new Error("跳过阶段原因必填");
   if (run) run.skip = true;
 }
 
@@ -406,6 +503,7 @@ function seed(id: string, name: string, mode: string, start: string, w0: number)
       operator: "张工",
       experiment_type: mode,
       analysis: null,
+      program_snapshot: cloneProgram(program),
       created_at: start,
       sample_count: samples.length,
     },

@@ -358,6 +358,7 @@ mod tests {
             operator: Some("张工".into()),
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
+            program_snapshot_json: None,
             created_at: "2026-07-05T10:00:00".into(),
         }
     }

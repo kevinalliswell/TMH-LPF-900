@@ -86,10 +86,25 @@ export interface StageDto {
   description: string;
 }
 
+export type ProgramSource = "standard" | "custom";
+
 export interface ProgramDto {
   id: string;
   name: string;
+  source: ProgramSource;
   stages: StageDto[];
+}
+
+export interface PreflightIssue {
+  code: string;
+  message_zh: string;
+}
+
+export interface ExperimentPreflightResult {
+  ok: boolean;
+  blocking: PreflightIssue[];
+  warnings: PreflightIssue[];
+  program?: ProgramDto | null;
 }
 
 /** History list row. */
@@ -116,6 +131,7 @@ export interface ExperimentDetail {
   operator?: string | null;
   experiment_type?: string | null;
   analysis?: Record<string, unknown> | null;
+  program_snapshot?: ProgramDto | null;
   created_at: string;
   sample_count: number;
 }

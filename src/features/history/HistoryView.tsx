@@ -12,6 +12,8 @@ import {
 import type { ExperimentDetail, ExperimentSummary, SampleDto } from "../../ipc/types";
 import { toastError, useToasts } from "../../stores/toast";
 import { Modal } from "../../components/Modal";
+import { SectionTitle } from "../../components/Page";
+import { ProgramPreview } from "../experiment/ProgramPreview";
 import { AnalyzePanel } from "./AnalyzePanel";
 import { HistoryChart } from "./HistoryChart";
 
@@ -208,6 +210,13 @@ export function HistoryView() {
                 ))}
               </div>
             </div>
+
+            {detail.program_snapshot && (
+              <div className="panel p-3">
+                <SectionTitle>程序快照</SectionTitle>
+                <ProgramPreview program={detail.program_snapshot} compact />
+              </div>
+            )}
 
             <div className="panel p-3">
               <div className="section-title px-1 pb-1">温度 / 质量曲线</div>

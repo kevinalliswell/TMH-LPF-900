@@ -4,14 +4,14 @@
 //! stage's atmosphere through the safety clamp. Sampling/DB/crash-recovery wire in
 //! at the command layer.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Protection atmosphere applied on EVERY experiment exit (docs/05 §5.5).
 /// Order [H2, N2, CO2, CO] L/min.
 pub const SAFETY_ATMOSPHERE: [f64; 4] = [0.0, 5.0, 0.0, 0.0];
 
 /// Experiment phase (docs/05 §5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Phase {
     Idle,
@@ -46,7 +46,7 @@ pub fn is_legal_transition(from: Phase, to: Phase) -> bool {
 }
 
 /// Stage type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum StageKind {
     Heating,
@@ -56,7 +56,15 @@ pub enum StageKind {
 }
 
 /// One program stage (docs/05 §5.3).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramSource {
+    Standard,
+    Custom,
+}
+
+/// One program stage (docs/05 §5.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stage {
     pub name: String,
     pub kind: StageKind,
@@ -71,10 +79,11 @@ pub struct Stage {
 }
 
 /// A full experiment program.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub id: String,
     pub name: String,
+    pub source: ProgramSource,
     pub stages: Vec<Stage>,
 }
 
@@ -108,6 +117,7 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "REDUCIBILITY" => Program {
             id: "REDUCIBILITY".into(),
             name: "GB/T 13241 还原性".into(),
+            source: ProgramSource::Standard,
             stages: vec![
                 stage(
                     "升温",
@@ -154,6 +164,7 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "LOW_TEMP_DEGRADATION" => Program {
             id: "LOW_TEMP_DEGRADATION".into(),
             name: "GB/T 13242 低温粉化".into(),
+            source: ProgramSource::Standard,
             stages: vec![
                 stage(
                     "升温",
@@ -200,6 +211,7 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "FREE_SWELLING" => Program {
             id: "FREE_SWELLING".into(),
             name: "GB/T 13240 自由膨胀".into(),
+            source: ProgramSource::Standard,
             stages: vec![
                 stage(
                     "升温",
@@ -250,6 +262,48 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
 
 /// All standard mode ids.
 pub const STANDARD_MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
+
+/// Validate an operator-defined program before saving or running it.
+pub fn validate_program(program: &Program) -> Result<(), String> {
+    if program.id.trim().is_empty() {
+        return Err("模式 ID 必填".into());
+    }
+    if program.name.trim().is_empty() {
+        return Err("模式名称必填".into());
+    }
+    if program.stages.is_empty() {
+        return Err("至少需要一个阶段".into());
+    }
+    for (i, stage) in program.stages.iter().enumerate() {
+        let n = i + 1;
+        if stage.name.trim().is_empty() {
+            return Err(format!("第 {n} 阶段名称必填"));
+        }
+        if !stage.target_temp.is_finite() {
+            return Err(format!("第 {n} 阶段目标温度无效"));
+        }
+        if !stage.tolerance.is_finite() || stage.tolerance < 0.0 {
+            return Err(format!("第 {n} 阶段容差必须为非负数"));
+        }
+        if !stage.duration_min.is_finite() || stage.duration_min < 0.0 {
+            return Err(format!("第 {n} 阶段时长必须为非负数"));
+        }
+        if !stage.ramp_rate.is_finite() {
+            return Err(format!("第 {n} 阶段升温率无效"));
+        }
+        let mut total_flow = 0.0;
+        for (gas, value) in stage.gas.iter().enumerate() {
+            if !value.is_finite() || *value < 0.0 {
+                return Err(format!("第 {n} 阶段第 {} 路气体流量必须为非负数", gas + 1));
+            }
+            total_flow += value;
+        }
+        if total_flow <= 0.0 {
+            return Err(format!("第 {n} 阶段总流量必须大于 0"));
+        }
+    }
+    Ok(())
+}
 
 /// A running experiment. Tick it once per second with the current T8.
 pub struct ExperimentEngine {
@@ -386,6 +440,7 @@ mod tests {
     #[test]
     fn program_tables_match_docs_05() {
         let p = standard_program("REDUCIBILITY").unwrap();
+        assert_eq!(p.source, ProgramSource::Standard);
         assert_eq!(p.stages.len(), 4);
         assert_eq!(p.stages[0].gas, [0.0, 5.0, 0.0, 0.0]);
         assert_eq!(p.stages[0].target_temp, 900.0);
@@ -454,5 +509,20 @@ mod tests {
         }
         assert_eq!(applied, vec![0, 1, 2, 3]); // all 4 stages entered in order
         assert_eq!(e.phase(), Phase::Completing);
+    }
+
+    #[test]
+    fn custom_program_validation_catches_bad_shapes() {
+        let mut p = standard_program("REDUCIBILITY").unwrap();
+        p.id = "custom-1".into();
+        p.name = "自定义".into();
+        p.source = ProgramSource::Custom;
+        validate_program(&p).unwrap();
+
+        p.stages[0].gas = [0.0, 0.0, 0.0, 0.0];
+        assert!(validate_program(&p).is_err());
+        p.stages[0].gas = [0.0, 5.0, 0.0, 0.0];
+        p.stages[0].duration_min = -1.0;
+        assert!(validate_program(&p).is_err());
     }
 }
