@@ -16,7 +16,22 @@ import type {
   TareResult,
   TelemetrySnapshot,
   UpdateCheck,
+  AuthSnapshot,
+  PublicUser,
+  UserRole,
 } from "./types";
+import {
+  mockAuthState,
+  mockBootstrapAdmin,
+  mockChangePassword,
+  mockCreateUser,
+  mockListUsers,
+  mockLock,
+  mockLogin,
+  mockLogout,
+  mockResetPassword,
+  mockUpdateUser,
+} from "./authMock";
 import {
   mockAnalyze13240,
   mockAnalyze13241,
@@ -34,6 +49,7 @@ import {
   mockSkipStage,
   mockStartExperiment,
   mockStopExperiment,
+  mockSetExperimentOwner,
   mockSubscribeExperiment,
   mockTare,
   mockTelemetry,
@@ -43,6 +59,107 @@ export * from "./types";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function getAuthState(): Promise<AuthSnapshot> {
+  return isTauri() ? invoke("get_auth_state") : mockAuthState();
+}
+
+export async function bootstrapAdmin(
+  username: string,
+  displayName: string,
+  password: string,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("bootstrap_admin", { username, display_name: displayName, password })
+    : mockBootstrapAdmin(username, displayName, password);
+}
+
+export async function login(username: string, password: string): Promise<AuthSnapshot> {
+  return isTauri() ? invoke("login", { username, password }) : mockLogin(username, password);
+}
+
+export async function logout(): Promise<void> {
+  if (isTauri()) await invoke("logout");
+  else mockLogout();
+}
+
+export async function lockSession(): Promise<void> {
+  if (isTauri()) await invoke("lock_session");
+  else mockLock();
+}
+
+export async function touchSession(): Promise<void> {
+  if (isTauri()) await invoke("touch_session");
+}
+
+export async function emergencySafeShutdown(): Promise<void> {
+  if (isTauri()) await invoke("emergency_safe_shutdown");
+  else mockShutoff();
+}
+
+export async function changeOwnPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  if (isTauri()) {
+    await invoke("change_own_password", {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  } else mockChangePassword(currentPassword, newPassword);
+}
+
+export async function listUsers(): Promise<PublicUser[]> {
+  return isTauri() ? invoke("list_users") : mockListUsers();
+}
+
+export async function createUser(
+  username: string,
+  displayName: string,
+  temporaryPassword: string,
+  role: UserRole,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("create_user", {
+        username,
+        display_name: displayName,
+        temporary_password: temporaryPassword,
+        role,
+      })
+    : mockCreateUser(username, displayName, temporaryPassword, role);
+}
+
+export async function updateUser(
+  userId: string,
+  displayName: string,
+  role: UserRole,
+  isActive: boolean,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("update_user", {
+        user_id: userId,
+        display_name: displayName,
+        role,
+        is_active: isActive,
+      })
+    : mockUpdateUser(userId, displayName, role, isActive);
+}
+
+export async function resetUserPassword(userId: string, temporaryPassword: string): Promise<void> {
+  if (isTauri()) await invoke("reset_user_password", { user_id: userId, temporary_password: temporaryPassword });
+  else mockResetPassword(userId, temporaryPassword);
+}
+
+export async function setExperimentOwner(
+  experimentId: string,
+  ownerUserId: string | null,
+): Promise<void> {
+  if (!isTauri()) return void mockSetExperimentOwner(experimentId, ownerUserId);
+  await invoke("set_experiment_owner", {
+    experiment_id: experimentId,
+    owner_user_id: ownerUserId,
+  });
 }
 
 export type RuntimeMode = "real" | "mock" | "replay" | "web";

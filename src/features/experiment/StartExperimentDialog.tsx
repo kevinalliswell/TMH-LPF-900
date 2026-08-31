@@ -7,7 +7,6 @@ type Form = {
   sample_id: string;
   sample_name: string;
   sample_weight: string;
-  operator: string;
   experiment_type: string;
   project_name: string;
   notes: string;
@@ -17,7 +16,6 @@ const empty: Form = {
   sample_id: "",
   sample_name: "",
   sample_weight: "",
-  operator: "",
   experiment_type: EXPERIMENT_MODES[0].id,
   project_name: "",
   notes: "",
@@ -36,7 +34,6 @@ export function StartExperimentDialog({ onClose }: { onClose: () => void }) {
         sample_id: f.sample_id,
         sample_name: f.sample_name,
         sample_weight: parseFloat(f.sample_weight) || 0,
-        operator: f.operator,
         experiment_type: f.experiment_type,
         project_name: f.project_name || null,
         notes: f.notes || null,
@@ -87,7 +84,6 @@ export function StartExperimentDialog({ onClose }: { onClose: () => void }) {
         {field("样品编号 *", "sample_id")}
         {field("样品名称 *", "sample_name")}
         {field("样品重量 g *", "sample_weight", "number")}
-        {field("操作员 *", "operator")}
         {field("项目名", "project_name")}
         {field("备注", "notes")}
       </div>

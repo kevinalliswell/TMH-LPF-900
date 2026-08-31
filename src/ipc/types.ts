@@ -72,6 +72,35 @@ export interface ExperimentState {
   tolerance?: number;
   stage_elapsed_s?: number;
   total_elapsed_s?: number;
+  owner_user_id?: string | null;
+  owner_display_name?: string | null;
+  can_control?: boolean;
+  occupied_by_other?: boolean;
+}
+
+export type UserRole = "ADMIN" | "USER";
+export type AuthStatus =
+  | "SETUP_REQUIRED"
+  | "ANONYMOUS"
+  | "AUTHENTICATED"
+  | "PASSWORD_CHANGE_REQUIRED"
+  | "LOCKED";
+
+export interface PublicUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at?: string | null;
+}
+
+export interface AuthSnapshot {
+  status: AuthStatus;
+  user?: PublicUser | null;
+  idle_timeout_s: number;
 }
 
 /** One program stage (mirrors tmh_core::engine::Stage). */
@@ -103,6 +132,7 @@ export interface ExperimentSummary {
   operator?: string | null;
   experiment_type?: string | null;
   has_analysis: boolean;
+  owner_user_id?: string | null;
 }
 
 export interface ExperimentDetail {
@@ -118,6 +148,7 @@ export interface ExperimentDetail {
   analysis?: Record<string, unknown> | null;
   created_at: string;
   sample_count: number;
+  owner_user_id?: string | null;
 }
 
 export interface SampleDto {
@@ -137,7 +168,6 @@ export interface ExperimentParams {
   sample_id: string;
   sample_name: string;
   sample_weight: number;
-  operator: string;
   experiment_type: string;
   project_name?: string | null;
   notes?: string | null;
