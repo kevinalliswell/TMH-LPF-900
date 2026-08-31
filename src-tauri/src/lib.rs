@@ -126,6 +126,15 @@ impl ExperimentStatus {
             total_elapsed_s: 0.0,
         }
     }
+
+    fn safety_error(experiment_id: &str, total_elapsed_s: f64) -> Self {
+        Self {
+            experiment_id: Some(experiment_id.to_string()),
+            phase: Phase::Error,
+            total_elapsed_s,
+            ..Self::idle()
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -220,41 +229,37 @@ fn build_mock_hub(cfg: &CommConfig) -> DeviceHub {
 
 /// Apply a stage's atmosphere through the clamp and steer the mock furnace/balance.
 /// The MFC bus actor clamps H2/CO at frame-build time — this is not an enforcement point.
-fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) {
-    for (gas, &v) in stage.gas.iter().enumerate() {
-        drop(hub.request_set_flow(gas, v));
-    }
+fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) -> Result<(), String> {
+    hub.request_set_atmosphere(stage.gas)
+        .blocking_recv()
+        .map_err(|_| "DEVICE_OFFLINE".to_string())?
+        .map_err(|_| "DEVICE_OFFLINE".to_string())?;
     hub.set_temp_target_c(stage.target_temp);
     if stage.kind == StageKind::Reducing {
         // Mock only: reduction strips oxygen, so the sample loses mass over the stage.
         hub.set_balance_target_g(w0 * (1.0 - MOCK_REDUCTION_LOSS));
     }
+    Ok(())
 }
 
 /// The safety atmosphere (docs/05 §5.5): N2=5.0, H2=CO2=CO=0. Applied on EVERY exit.
-fn apply_safety_atmosphere(hub: &DeviceHub) {
-    for (gas, &v) in SAFETY_ATMOSPHERE.iter().enumerate() {
-        drop(hub.request_set_flow(gas, v));
-    }
+fn apply_safety_atmosphere(hub: &DeviceHub) -> Result<(), String> {
+    let result = hub
+        .request_set_atmosphere(SAFETY_ATMOSPHERE)
+        .blocking_recv()
+        .map_err(|_| "DEVICE_OFFLINE".to_string())?
+        .map_err(|_| "DEVICE_OFFLINE".to_string())
+        .map(|_| ());
     hub.set_temp_target_c(25.0);
+    result
 }
 
 /// Like [`apply_safety_atmosphere`] but BLOCKS until the MFC bus thread confirms each
 /// setpoint. Used on application exit (issue #1) so the process never terminates with
 /// flammable gas still commanded. Must run on a non-async thread (the Tauri run-event
 /// loop) — `blocking_recv` panics inside a tokio runtime.
-fn apply_safety_atmosphere_blocking(hub: &DeviceHub) {
-    // Enqueue every setpoint first, then await confirmation, so the MFC thread applies
-    // them in a single drain (keeps exit latency to about one poll cycle).
-    let replies: Vec<_> = SAFETY_ATMOSPHERE
-        .iter()
-        .enumerate()
-        .map(|(gas, &v)| hub.request_set_flow(gas, v))
-        .collect();
-    hub.set_temp_target_c(25.0);
-    for reply in replies {
-        let _ = reply.blocking_recv();
-    }
+fn apply_safety_atmosphere_blocking(hub: &DeviceHub) -> Result<(), String> {
+    apply_safety_atmosphere(hub)
 }
 
 /// Snapshot one sample row from live telemetry. Delegates to the shared core sampler so
@@ -341,19 +346,48 @@ fn finalize(
     outcome: &str,
     total_s: f64,
 ) {
-    apply_safety_atmosphere(hub); // hard invariant — every exit path
+    let safety_result = apply_safety_atmosphere(hub); // hard invariant — every exit path
     flush(storage, buffer);
     let end = iso_now();
     if let Ok(s) = storage.lock() {
         let _ = s.finish_experiment(id, &end);
     }
+    let safety_ok = safety_result.is_ok();
     audit.write(
-        &AuditEntry::new(Category::Experiment, outcome, AuditResult::Success)
-            .detail(serde_json::json!({ "id": id, "elapsed_s": total_s })),
+        &AuditEntry::new(
+            Category::Experiment,
+            "safety_atmosphere",
+            if safety_ok {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .detail(serde_json::json!({ "id": id, "error": safety_result.err() })),
     );
-    let idle = ExperimentStatus::idle();
-    exp.set_status(idle.clone());
-    let _ = app.emit("experiment-state-changed", idle);
+    audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            outcome,
+            if safety_ok {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .detail(serde_json::json!({
+            "id": id,
+            "elapsed_s": total_s,
+            "safety_atmosphere_confirmed": safety_ok
+        })),
+    );
+    let final_status = if safety_ok {
+        ExperimentStatus::idle()
+    } else {
+        ExperimentStatus::safety_error(id, total_s)
+    };
+    exp.set_status(final_status.clone());
+    let _ = app.emit("experiment-state-changed", final_status);
 }
 
 /// Spawn the per-run control loop: tick the engine once per real second (advancing
@@ -376,12 +410,33 @@ fn spawn_experiment_task(
 ) {
     std::thread::spawn(move || {
         let mut engine = ExperimentEngine::start(program);
+        let mut buffer: Vec<SampleRow> = Vec::new();
         if let Some(s) = engine.current_stage() {
-            apply_stage_atmosphere(&hub, s, w0);
+            if apply_stage_atmosphere(&hub, s, w0).is_err() {
+                audit.write(
+                    &AuditEntry::new(
+                        Category::Experiment,
+                        "stage_atmosphere",
+                        AuditResult::Failure,
+                    )
+                    .detail(serde_json::json!({ "id": id, "stage": 0 })),
+                );
+                finalize(
+                    &app,
+                    &hub,
+                    &storage,
+                    &audit,
+                    &exp,
+                    &mut buffer,
+                    &id,
+                    "error",
+                    0.0,
+                );
+                return;
+            }
         }
         publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
 
-        let mut buffer: Vec<SampleRow> = Vec::new();
         let mut ticks_since_flush = 0u32;
 
         loop {
@@ -446,7 +501,30 @@ fn spawn_experiment_task(
 
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
                 if let Some(s) = engine.current_stage() {
-                    apply_stage_atmosphere(&hub, s, w0);
+                    if apply_stage_atmosphere(&hub, s, w0).is_err() {
+                        audit.write(
+                            &AuditEntry::new(
+                                Category::Experiment,
+                                "stage_atmosphere",
+                                AuditResult::Failure,
+                            )
+                            .detail(serde_json::json!({
+                                "id": id, "stage": engine.stage_index(), "name": s.name
+                            })),
+                        );
+                        finalize(
+                            &app,
+                            &hub,
+                            &storage,
+                            &audit,
+                            &exp,
+                            &mut buffer,
+                            &id,
+                            "error",
+                            engine.total_elapsed_s(),
+                        );
+                        break;
+                    }
                     audit.write(
                         &AuditEntry::new(Category::Experiment, "stage_enter", AuditResult::Success)
                             .detail(serde_json::json!({
@@ -459,7 +537,7 @@ fn spawn_experiment_task(
                 // The MFC thread processes commands FIFO, so this last write wins over the
                 // stage gas and flammables are never left open after a stop.
                 if exp.stop.load(Ordering::Relaxed) {
-                    apply_safety_atmosphere(&hub);
+                    let _ = apply_safety_atmosphere(&hub);
                 }
             }
 
@@ -507,7 +585,13 @@ fn recover_unfinished(hub: &DeviceHub, storage: &Storage, audit: &AuditLog) {
     if unfinished.is_empty() {
         return;
     }
-    apply_safety_atmosphere(hub);
+    if let Err(error) = apply_safety_atmosphere(hub) {
+        audit.write(
+            &AuditEntry::new(Category::Experiment, "crash_recovery", AuditResult::Failure)
+                .detail(serde_json::json!({ "error": error, "recovered": [] })),
+        );
+        return;
+    }
     let now = iso_now();
     let ids: Vec<String> = unfinished.iter().map(|e| e.experiment_id.clone()).collect();
     for id in &ids {
@@ -605,11 +689,29 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
         return Err("无效的气体通道".into());
     }
     let hub = app.state::<AppState>().hub.clone();
-    let clamp = hub
-        .request_set_flow(gas, value)
-        .await
-        .map_err(|_| "气体总线不可用".to_string())?;
+    let result = match hub.request_set_flow(gas, value).await {
+        Ok(result) => result,
+        Err(_) => {
+            app.state::<AppState>().audit.write(
+                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure).detail(
+                    serde_json::json!({ "gas": gas, "requested": value, "error": "actor_unavailable" }),
+                ),
+            );
+            return Err("DEVICE_OFFLINE".into());
+        }
+    };
     let st = app.state::<AppState>();
+    let clamp = match result {
+        Ok(clamp) => clamp,
+        Err(error) => {
+            st.audit.write(
+                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure).detail(
+                    serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
+                ),
+            );
+            return Err("DEVICE_OFFLINE".into());
+        }
+    };
     st.audit.write(
         &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Success).detail(
             serde_json::json!({
@@ -627,39 +729,85 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 }
 
 #[tauri::command]
-fn set_gas_on_off(state: State<AppState>, gas: usize, on: bool) {
+async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
     if gas >= GAS_COUNT {
-        return; // invalid channel from the webview; the MFC actor also guards this
+        return Err("INVALID_PARAMS".into());
     }
-    state.hub.set_on_off(gas, on);
-    state.audit.write(
-        &AuditEntry::new(Category::Gas, "on_off", AuditResult::Success)
-            .detail(serde_json::json!({ "gas": gas, "on": on })),
+    let hub = app.state::<AppState>().hub.clone();
+    let result = match hub.request_set_on_off(gas, on).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(
+            Category::Gas,
+            "on_off",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .detail(serde_json::json!({ "gas": gas, "on": on })),
     );
+    result
 }
 
-#[tauri::command]
-fn open_all_valves(state: State<AppState>) {
+async fn set_all_valves(app: &AppHandle, on: bool, action: &str) -> Result<(), String> {
+    let hub = app.state::<AppState>().hub.clone();
+    let mut replies = Vec::with_capacity(GAS_COUNT);
     for g in 0..GAS_COUNT {
-        state.hub.set_on_off(g, true);
+        replies.push(hub.request_set_on_off(g, on));
+    }
+    let mut failed = false;
+    for reply in replies {
+        if !matches!(reply.await, Ok(Ok(()))) {
+            failed = true;
+        }
+    }
+    app.state::<AppState>().audit.write(&AuditEntry::new(
+        Category::Gas,
+        action,
+        if failed {
+            AuditResult::Failure
+        } else {
+            AuditResult::Success
+        },
+    ));
+    if failed {
+        Err("DEVICE_OFFLINE".into())
+    } else {
+        Ok(())
     }
 }
 
 #[tauri::command]
-fn close_all_valves(state: State<AppState>) {
-    for g in 0..GAS_COUNT {
-        state.hub.set_on_off(g, false);
-    }
+async fn open_all_valves(app: AppHandle) -> Result<(), String> {
+    set_all_valves(&app, true, "open_all").await
 }
 
 #[tauri::command]
-fn shutoff_flammable_gases(state: State<AppState>) {
-    state.hub.shutoff_flammable();
-    state.audit.write(&AuditEntry::new(
+async fn close_all_valves(app: AppHandle) -> Result<(), String> {
+    set_all_valves(&app, false, "close_all").await
+}
+
+#[tauri::command]
+async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
+    let hub = app.state::<AppState>().hub.clone();
+    let result = match hub.request_shutoff_flammable().await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    app.state::<AppState>().audit.write(&AuditEntry::new(
         Category::Gas,
         "shutoff",
-        AuditResult::Success,
+        if result.is_ok() {
+            AuditResult::Success
+        } else {
+            AuditResult::Failure
+        },
     ));
+    result
 }
 
 #[tauri::command]
@@ -824,24 +972,46 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
 }
 
 #[tauri::command]
-fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
-    let st = app.state::<AppState>();
+async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
+    let (hub, audit, exp) = {
+        let st = app.state::<AppState>();
+        (st.hub.clone(), st.audit.clone(), st.exp.clone())
+    };
     // Signal the tick task to finalize (it publishes idle within ≤1s).
-    st.exp.stop.store(true, Ordering::Relaxed);
+    exp.stop.store(true, Ordering::Relaxed);
     // HARD INVARIANT (docs/05 §5.5): apply the safety atmosphere immediately here too —
     // belt-and-suspenders even if the tick task has already died.
-    apply_safety_atmosphere(&st.hub);
-    st.audit.write(
-        &AuditEntry::new(Category::Experiment, "stop", AuditResult::Success)
-            .detail(serde_json::json!({ "reason": reason })),
+    let safety_result = match hub.request_set_atmosphere(SAFETY_ATMOSPHERE).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    hub.set_temp_target_c(25.0);
+    audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "stop",
+            if safety_result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .detail(serde_json::json!({
+            "reason": reason,
+            "safety_atmosphere_confirmed": safety_result.is_ok()
+        })),
     );
     // If nothing was running, there is no task to publish idle — do it here.
-    if !st.exp.is_running() {
-        let idle = ExperimentStatus::idle();
-        st.exp.set_status(idle.clone());
-        let _ = app.emit("experiment-state-changed", idle);
+    if !exp.is_running() {
+        let status = if safety_result.is_ok() {
+            ExperimentStatus::idle()
+        } else {
+            ExperimentStatus::safety_error("manual-stop", 0.0)
+        };
+        exp.set_status(status.clone());
+        let _ = app.emit("experiment-state-changed", status);
     }
-    Ok(())
+    safety_result
 }
 
 #[tauri::command]
@@ -1428,13 +1598,23 @@ pub fn run() {
             // atmosphere (docs/05 §5.5, issue #1). `ExitRequested` fires before teardown;
             // apply the safety atmosphere synchronously here so gas is never left flowing
             // after the window closes. The MFC bus thread also zeroes flammables on stop.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 let st = app.state::<AppState>();
-                apply_safety_atmosphere_blocking(&st.hub);
+                let result = apply_safety_atmosphere_blocking(&st.hub);
+                if result.is_err() {
+                    // A normal window-close must not tear the process down after the
+                    // protective atmosphere failed. Keep the actor alive for retry/operator
+                    // intervention; OS-forced termination still falls back to Drop's best effort.
+                    api.prevent_exit();
+                }
                 st.audit.write(&AuditEntry::new(
                     Category::App,
                     "exit",
-                    AuditResult::Success,
+                    if result.is_ok() {
+                        AuditResult::Success
+                    } else {
+                        AuditResult::Failure
+                    },
                 ));
             }
         });

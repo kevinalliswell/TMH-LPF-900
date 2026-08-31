@@ -50,8 +50,8 @@ fn mock_soak(minutes: u64) {
     let mut balance = BalanceActor::new(Box::new(MockTransport::balance(100.0)));
 
     // Reducing atmosphere (also exercises the clamp): CO=4.5, N2=10.5 L/min.
-    mfc.set_flow(1, 10.5);
-    mfc.set_flow(3, 4.5);
+    mfc.set_flow(1, 10.5).expect("mock MFC write ack");
+    mfc.set_flow(3, 4.5).expect("mock MFC write ack");
 
     let dir = std::env::temp_dir().join("tmh_soak");
     let _ = std::fs::create_dir_all(&dir);

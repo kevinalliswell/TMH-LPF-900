@@ -14,5 +14,5 @@ pub mod temp;
 
 pub use balance::{BalanceActor, BalanceSnapshot};
 pub use hub::{DeviceHub, HubIntervals};
-pub use mfc::{GasReading, MfcActor, MfcCommand, MfcSnapshot};
+pub use mfc::{GasReading, MfcActor, MfcCommand, MfcCommandError, MfcSnapshot};
 pub use temp::{TempActor, TempSnapshot};
