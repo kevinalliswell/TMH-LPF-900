@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-31
+
+### Security
+- MFC 写命令现在等待并校验设备事务回执；超时、断线、空响应或错误回显不再被审计或提示为成功。
+- Webview 不再直接拥有 updater/process 高权限 capability，Tauri 启用最小 CSP，更新与重启仅通过受控 Rust 命令。
+- ECharts 升级至 6.1.0，CI 增加生产依赖审计和 Tauri 安全配置回归检查。
+
+### Fixed
+- 保护气氛、紧急切断、实验停止/完成、崩溃恢复及应用退出路径会等待 MFC 确认，并在失败时进入可观察错误状态。
+- 四路气氛批处理在单路失败后仍尝试其余通道，避免局部故障阻断其它可燃气归零操作。
+
+### Changed
+- Node 固定为 24 LTS、Rust 固定为 1.95.0；版本同步覆盖 package、Cargo、Tauri 和 UI 显示点。
+- 正式 Release 仅允许由指向当前 `main` 顶端的匹配 SemVer Tag 触发，并先生成草稿供人工核验。
+- 增加 Dependabot、版本治理路线、回滚要求和现场验收退出条件。
+
+### Known limitations
+- 本版本仅作为 mock/安全控制面基线；real/replay 仍未完成真实传输与配置 fail-closed 验收（#19），不得宣称真实硬件可用。
+- MFC “ON/全开”在没有可恢复非零设定值时可能确认写入 0（#28）；修复前不得用于真实设备操作。
+- 完整命令边界校验、管理员删除授权和稳定错误 DTO 仍按 #21 的后续路线推进。
+- Windows 安装包尚无 Authenticode；SmartScreen 可能显示“未知发布者”。更新端点仍需部署到匿名可达的公开托管位置。
+
 ### Added
 - `tmh-protocols`: byte-exact codecs for the three device protocols (Modbus-RTU
   temperature, Azbil CPL MFC, RS232 balance), verified against all 26 golden
@@ -78,5 +100,6 @@ versioning follows [Semantic Versioning](https://semver.org/).
   typecheck, lint, dependency-direction guard, version-consistency check.
 - Release pipeline producing unsigned Windows NSIS and macOS universal `.dmg`.
 
-[Unreleased]: https://github.com/kevinalliswell/TMH-LPF-900/commits/main
+[Unreleased]: https://github.com/kevinalliswell/TMH-LPF-900/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kevinalliswell/TMH-LPF-900/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kevinalliswell/TMH-LPF-900/tree/4b88741

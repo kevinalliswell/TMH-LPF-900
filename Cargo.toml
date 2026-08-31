@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/tmh-protocols", "crates/tmh-core", "crates/tmh-probe", "src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.77.2"
 license = "Proprietary"

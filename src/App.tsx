@@ -91,7 +91,7 @@ export default function App() {
           <h1 className="text-base font-semibold flex items-baseline gap-2">
             {title}
             <span className="mono text-xs" style={{ color: "var(--fg-faint)" }}>
-              TMH-LPF-900 v0.1.0
+              TMH-LPF-900 v0.2.0
             </span>
           </h1>
         </header>

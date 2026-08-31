@@ -196,7 +196,7 @@ export async function exportExperiment(id: string, format: ExportFormat): Promis
   downloadBlob(mockExportText(id, sep), `${id}.${ext}`, "text/plain;charset=utf-8");
 }
 
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.2.0";
 
 export async function getUpdaterStatus(): Promise<UpdateCheck> {
   return isTauri()
