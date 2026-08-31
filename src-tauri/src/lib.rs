@@ -919,6 +919,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
         created_at: now.clone(),
+        owner_user_id: None,
     };
     lock(&st.storage)
         .insert_experiment(&row)

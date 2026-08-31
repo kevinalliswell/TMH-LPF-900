@@ -72,6 +72,7 @@ fn mock_soak(minutes: u64) {
             experiment_type: None,
             analysis_results_json: None,
             created_at: "2026-07-05T00:00:00".into(),
+            owner_user_id: None,
         })
         .unwrap();
 

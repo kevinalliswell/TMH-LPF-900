@@ -359,6 +359,7 @@ mod tests {
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
             created_at: "2026-07-05T10:00:00".into(),
+            owner_user_id: None,
         }
     }
 

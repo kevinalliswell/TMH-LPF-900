@@ -62,6 +62,7 @@ fn reducibility_run_drives_devices_and_persists() {
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
             created_at: "t0".into(),
+            owner_user_id: None,
         })
         .unwrap();
 
