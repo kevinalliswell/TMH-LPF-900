@@ -91,6 +91,10 @@ export type ProgramSource = "standard" | "custom";
 export interface ProgramDto {
   id: string;
   name: string;
+  description: string;
+  category: string;
+  enabled: boolean;
+  sample_prefix: string;
   source: ProgramSource;
   stages: StageDto[];
 }
@@ -111,10 +115,13 @@ export interface ExperimentPreflightResult {
 export interface ExperimentSummary {
   experiment_id: string;
   experiment_name: string;
+  sample_id?: string | null;
   sample_name: string;
   sample_weight: number;
   start_time: string;
+  experiment_time?: string | null;
   end_time?: string | null;
+  project_name?: string | null;
   operator?: string | null;
   experiment_type?: string | null;
   has_analysis: boolean;
@@ -123,10 +130,13 @@ export interface ExperimentSummary {
 export interface ExperimentDetail {
   experiment_id: string;
   experiment_name: string;
+  sample_id?: string | null;
   sample_name: string;
   sample_weight: number;
   start_time: string;
+  experiment_time?: string | null;
   end_time?: string | null;
+  project_name?: string | null;
   description?: string | null;
   operator?: string | null;
   experiment_type?: string | null;
@@ -155,8 +165,58 @@ export interface ExperimentParams {
   sample_weight: number;
   operator: string;
   experiment_type: string;
+  experiment_time?: string | null;
   project_name?: string | null;
   notes?: string | null;
+}
+
+export interface ExperimentStartDefaults {
+  sample_id: string;
+  sample_name: string;
+  sample_weight?: number | null;
+  operator: string;
+  experiment_type: string;
+  project_name?: string | null;
+  experiment_time: string;
+  notes?: string | null;
+}
+
+export interface SerialParamsDto {
+  port: string;
+  baudrate: number;
+  bytesize: number;
+  parity: string;
+  stopbits: number;
+  timeout: number;
+}
+
+export interface TempParamsDto extends SerialParamsDto {
+  slave_address: number;
+  start_reg: number;
+  reg_count: number;
+  TEMP_CHANNELS: string[];
+  scale: number;
+  signed_registers?: boolean;
+}
+
+export interface CommConfigDto {
+  COM_RS485_MFC: SerialParamsDto;
+  COM_RS485_TEMP: TempParamsDto;
+  COM_RS232_Balance: SerialParamsDto;
+  SAMPLING: { interval_s: number };
+  PERFORMANCE_CONFIG: {
+    data_collection_interval: number;
+    experiment_data_interval: number;
+    heartbeat_timeout: number;
+  };
+  SLAVE_ADDRESS_MFC: { H2: number; N2: number; CO2: number; CO: number };
+  FLOW_SCALING: { H2: number; N2: number; CO2: number; CO: number };
+  GAS_SAFETY_LIMITS: { H2: number; CO: number };
+}
+
+export interface AdminAuthStatus {
+  initialized: boolean;
+  must_change: boolean;
 }
 
 /** Software-update check result (docs/09 §9.3). */

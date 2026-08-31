@@ -83,8 +83,29 @@ pub struct Stage {
 pub struct Program {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_program_category")]
+    pub category: String,
+    #[serde(default = "default_program_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sample_prefix: String,
+    #[serde(default = "default_program_source")]
     pub source: ProgramSource,
     pub stages: Vec<Stage>,
+}
+
+fn default_program_category() -> String {
+    "custom".into()
+}
+
+fn default_program_enabled() -> bool {
+    true
+}
+
+fn default_program_source() -> ProgramSource {
+    ProgramSource::Custom
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,6 +138,10 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "REDUCIBILITY" => Program {
             id: "REDUCIBILITY".into(),
             name: "GB/T 13241 还原性".into(),
+            description: "GB/T 13241-2017 铁矿石还原性的测定方法".into(),
+            category: "standard".into(),
+            enabled: true,
+            sample_prefix: "RED".into(),
             source: ProgramSource::Standard,
             stages: vec![
                 stage(
@@ -164,6 +189,10 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "LOW_TEMP_DEGRADATION" => Program {
             id: "LOW_TEMP_DEGRADATION".into(),
             name: "GB/T 13242 低温粉化".into(),
+            description: "GB/T 13242-2017 铁矿石低温粉化试验方法".into(),
+            category: "standard".into(),
+            enabled: true,
+            sample_prefix: "RDI".into(),
             source: ProgramSource::Standard,
             stages: vec![
                 stage(
@@ -211,6 +240,10 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
         "FREE_SWELLING" => Program {
             id: "FREE_SWELLING".into(),
             name: "GB/T 13240 自由膨胀".into(),
+            description: "GB/T 13240-2018 球团矿自由膨胀指数测定方法".into(),
+            category: "standard".into(),
+            enabled: true,
+            sample_prefix: "FSI".into(),
             source: ProgramSource::Standard,
             stages: vec![
                 stage(
@@ -441,6 +474,8 @@ mod tests {
     fn program_tables_match_docs_05() {
         let p = standard_program("REDUCIBILITY").unwrap();
         assert_eq!(p.source, ProgramSource::Standard);
+        assert_eq!(p.sample_prefix, "RED");
+        assert!(p.enabled);
         assert_eq!(p.stages.len(), 4);
         assert_eq!(p.stages[0].gas, [0.0, 5.0, 0.0, 0.0]);
         assert_eq!(p.stages[0].target_temp, 900.0);
@@ -451,11 +486,13 @@ mod tests {
         assert_eq!(p.stages[3].target_temp, 25.0);
 
         let d = standard_program("LOW_TEMP_DEGRADATION").unwrap();
+        assert_eq!(d.sample_prefix, "RDI");
         assert_eq!(d.stages[0].target_temp, 500.0);
         assert_eq!(d.stages[2].gas, [0.0, 9.0, 3.0, 3.0]); // N2=9 CO2=3 CO=3
         assert_eq!(d.stages[2].duration_min, 60.0);
 
         let s = standard_program("FREE_SWELLING").unwrap();
+        assert_eq!(s.sample_prefix, "FSI");
         assert_eq!(s.stages[0].gas, [0.0, 10.0, 0.0, 0.0]); // N2=10
         assert_eq!(s.stages[1].duration_min, 15.0);
         assert_eq!(s.stages[3].target_temp, 50.0);
@@ -524,5 +561,29 @@ mod tests {
         p.stages[0].gas = [0.0, 5.0, 0.0, 0.0];
         p.stages[0].duration_min = -1.0;
         assert!(validate_program(&p).is_err());
+    }
+
+    #[test]
+    fn older_program_json_uses_metadata_defaults() {
+        let json = r#"{
+            "id":"custom-legacy",
+            "name":"legacy",
+            "stages":[{
+                "name":"heat",
+                "kind":"HEATING",
+                "gas":[0.0,5.0,0.0,0.0],
+                "target_temp":900.0,
+                "tolerance":5.0,
+                "duration_min":0.0,
+                "ramp_rate":10.0,
+                "description":""
+            }]
+        }"#;
+        let p: Program = serde_json::from_str(json).unwrap();
+        assert_eq!(p.description, "");
+        assert_eq!(p.category, "custom");
+        assert!(p.enabled);
+        assert_eq!(p.sample_prefix, "");
+        assert_eq!(p.source, ProgramSource::Custom);
     }
 }

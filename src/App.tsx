@@ -1,4 +1,14 @@
 import { useEffect, type FC } from "react";
+import {
+  Cable,
+  CircleHelp,
+  FlaskConical,
+  Gauge,
+  History,
+  Home,
+  Info,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { subscribeExperimentState, subscribeTelemetry } from "./ipc";
 import { useExperiment } from "./stores/experiment";
 import { useNav, type View } from "./stores/nav";
@@ -14,14 +24,14 @@ import { HelpView } from "./features/help/HelpView";
 import { AboutView } from "./features/about/AboutView";
 import { StatusBar } from "./features/control/StatusBar";
 
-const NAV: { view: View; label: string }[] = [
-  { view: "home", label: "首页" },
-  { view: "control", label: "综合控制" },
-  { view: "mode", label: "实验模式" },
-  { view: "history", label: "历史查询" },
-  { view: "settings", label: "通讯设置" },
-  { view: "help", label: "帮助" },
-  { view: "about", label: "关于" },
+const NAV: { view: View; label: string; Icon: LucideIcon }[] = [
+  { view: "home", label: "首页", Icon: Home },
+  { view: "control", label: "综合控制", Icon: Gauge },
+  { view: "mode", label: "实验模式", Icon: FlaskConical },
+  { view: "history", label: "历史查询", Icon: History },
+  { view: "settings", label: "通讯设置", Icon: Cable },
+  { view: "help", label: "帮助", Icon: CircleHelp },
+  { view: "about", label: "关于", Icon: Info },
 ];
 
 const VIEWS: Record<View, FC> = {
@@ -64,14 +74,15 @@ export default function App() {
               <li key={n.view}>
                 <button
                   onClick={() => setView(n.view)}
-                  className="w-full text-left px-4 py-2"
+                  className="w-full flex items-center gap-2 text-left px-4 py-2"
                   style={{
                     color: active ? "var(--fg)" : "var(--fg-dim)",
                     background: active ? "var(--panel-2)" : "transparent",
                     borderLeft: active ? "2px solid var(--heat)" : "2px solid transparent",
                   }}
                 >
-                  {n.label}
+                  <n.Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+                  <span>{n.label}</span>
                 </button>
               </li>
             );

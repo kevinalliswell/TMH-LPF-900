@@ -6,9 +6,12 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ClampResult,
+  AdminAuthStatus,
+  CommConfigDto,
   ExperimentDetail,
   ExperimentParams,
   ExperimentPreflightResult,
+  ExperimentStartDefaults,
   ExperimentState,
   ExperimentSummary,
   GasLimits,
@@ -22,6 +25,11 @@ import {
   mockAnalyze13240,
   mockAnalyze13241,
   mockAnalyze13242,
+  mockChangeAdminPassword,
+  mockGenerateSampleId,
+  mockGetAdminAuthStatus,
+  mockGetCommConfig,
+  mockGetExperimentStartDefaults,
   mockDeleteCustomProgram,
   mockDeleteExperiment,
   mockExportText,
@@ -31,6 +39,7 @@ import {
   mockListPrograms,
   mockPreflightExperiment,
   mockSaveCustomProgram,
+  mockUpdateCommConfig,
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
@@ -64,6 +73,25 @@ export async function getRuntimeMode(): Promise<RuntimeMode> {
 
 export async function getGasSafetyLimits(): Promise<GasLimits> {
   return isTauri() ? invoke("get_gas_safety_limits") : { h2: 5, co: 5 };
+}
+
+export async function getCommConfig(): Promise<CommConfigDto> {
+  return isTauri() ? invoke("get_comm_config") : mockGetCommConfig();
+}
+
+export async function getAdminAuthStatus(): Promise<AdminAuthStatus> {
+  return isTauri() ? invoke("get_admin_auth_status") : mockGetAdminAuthStatus();
+}
+
+export async function changeAdminPassword(oldPassword: string, newPassword: string): Promise<void> {
+  if (!isTauri()) return void mockChangeAdminPassword(oldPassword, newPassword);
+  await invoke("change_admin_password", { old_password: oldPassword, new_password: newPassword });
+}
+
+export async function updateCommConfig(config: CommConfigDto, password: string): Promise<CommConfigDto> {
+  return isTauri()
+    ? invoke("update_comm_config", { config, password })
+    : mockUpdateCommConfig(config, password);
 }
 
 export async function setGasFlow(gas: number, value: number): Promise<ClampResult> {
@@ -104,6 +132,23 @@ export async function preflightExperiment(
   return isTauri()
     ? invoke("preflight_experiment", { params })
     : mockPreflightExperiment(params);
+}
+
+export async function generateSampleId(
+  programId: string,
+  experimentTime: string,
+): Promise<string> {
+  return isTauri()
+    ? invoke("generate_sample_id", { program_id: programId, experiment_time: experimentTime })
+    : mockGenerateSampleId(programId, experimentTime);
+}
+
+export async function getExperimentStartDefaults(
+  programId: string,
+): Promise<ExperimentStartDefaults> {
+  return isTauri()
+    ? invoke("get_experiment_start_defaults", { program_id: programId })
+    : mockGetExperimentStartDefaults(programId);
 }
 
 export async function stopExperiment(reason: string): Promise<void> {

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { X } from "lucide-react";
 
 export function Modal({
   title,
@@ -26,13 +27,13 @@ export function Modal({
       onClick={onClose}
     >
       <div
-        className={`panel p-4 max-w-[92vw] ${wide ? "w-[900px]" : "w-[460px]"}`}
+        className={`panel p-4 max-w-[92vw] max-h-[90vh] overflow-auto ${wide ? "w-[980px]" : "w-[460px]"}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-3">
           <div className="text-sm font-semibold">{title}</div>
           <button onClick={onClose} style={{ color: "var(--fg-faint)" }} aria-label="关闭">
-            ✕
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
         {children}

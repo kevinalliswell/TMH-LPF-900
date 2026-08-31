@@ -4,7 +4,9 @@
 //! the furnace through its program stages, applies each stage's atmosphere through the
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
-use std::path::PathBuf;
+mod auth;
+
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,6 +56,10 @@ struct AppState {
     exports_dir: PathBuf,
     /// Operator-defined experiment modes live here as JSON.
     custom_modes_path: PathBuf,
+    /// Communication config currently loaded at startup and edited by the settings page.
+    comm_config_path: PathBuf,
+    /// Administrator password hash file.
+    auth_path: PathBuf,
     /// Software-update checking (docs/09 §9.3): OFF by default, enabled via config/env.
     updater_enabled: bool,
     /// Bumped on each (un)subscribe so a stale telemetry pump thread exits (issue #8).
@@ -147,6 +153,7 @@ struct ExperimentParams {
     sample_weight: f64,
     operator: String,
     experiment_type: String,
+    experiment_time: Option<String>,
     project_name: Option<String>,
     notes: Option<String>,
 }
@@ -159,6 +166,53 @@ fn custom_program_id() -> String {
     format!("custom-{}", chrono::Local::now().format("%Y%m%d%H%M%S%3f"))
 }
 
+fn clean_opt(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn sample_prefix_fallback(id: &str) -> &'static str {
+    match id {
+        "REDUCIBILITY" => "RED",
+        "LOW_TEMP_DEGRADATION" => "RDI",
+        "FREE_SWELLING" => "FSI",
+        _ => "CUS",
+    }
+}
+
+fn normalize_sample_prefix(raw: &str, id: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if cleaned.len() < 2 {
+        sample_prefix_fallback(id).into()
+    } else {
+        cleaned
+    }
+}
+
+fn normalize_custom_program(program: &mut Program) {
+    program.source = ProgramSource::Custom;
+    program.id = program.id.trim().to_string();
+    program.name = program.name.trim().to_string();
+    program.description = program.description.trim().to_string();
+    if program.category.trim().is_empty() || program.category == "standard" {
+        program.category = "custom".into();
+    } else {
+        program.category = program.category.trim().to_string();
+    }
+    program.sample_prefix = normalize_sample_prefix(&program.sample_prefix, &program.id);
+    for stage in &mut program.stages {
+        stage.name = stage.name.trim().to_string();
+        stage.description = stage.description.trim().to_string();
+    }
+}
+
 fn read_custom_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -168,7 +222,8 @@ fn read_custom_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
             let mut programs: Vec<Program> = serde_json::from_str(&text)
                 .map_err(|e| format!("自定义实验模式文件解析失败: {e}"))?;
             programs.retain(|p| p.source == ProgramSource::Custom);
-            for p in &programs {
+            for p in &mut programs {
+                normalize_custom_program(p);
                 validate_program(p)?;
             }
             Ok(programs)
@@ -278,15 +333,18 @@ fn sim_speed(mode: &str) -> f64 {
 /// external config file is present or it fails to load. Kept in sync with docs/06 §6.4.
 const DEFAULT_COMM_CONFIG: &str = include_str!("../../config/comm_config.json");
 
+fn comm_config_path() -> PathBuf {
+    std::env::var("TMH_COMM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"))
+}
+
 /// Load + validate the comm config (docs/06 §6.4) so the safety limits, MFC slave
 /// addresses and flow scaling come from the file (issue #11). Resolution order:
 /// `TMH_COMM_CONFIG` env override, else `config/comm_config.json` in the working dir;
 /// on any failure fall back to the compiled-in default so the app still runs (mock).
-fn load_comm_config() -> CommConfig {
-    let path = std::env::var("TMH_COMM_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"));
-    match CommConfig::load(&path) {
+fn load_comm_config_from(path: &Path) -> CommConfig {
+    match CommConfig::load(path) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!(
@@ -764,6 +822,40 @@ struct ExperimentPreflightResult {
     program: Option<Program>,
 }
 
+#[derive(serde::Serialize)]
+struct ExperimentStartDefaults {
+    sample_id: String,
+    sample_name: String,
+    sample_weight: Option<f64>,
+    operator: String,
+    experiment_type: String,
+    project_name: Option<String>,
+    experiment_time: String,
+    notes: Option<String>,
+}
+
+fn compact_date(value: &str) -> String {
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 8 {
+        digits[..8].to_string()
+    } else {
+        chrono::Local::now().format("%Y%m%d").to_string()
+    }
+}
+
+fn next_sample_id(program: &Program, experiment_time: &str, rows: &[ExperimentRow]) -> String {
+    let prefix = normalize_sample_prefix(&program.sample_prefix, &program.id);
+    let stem = format!("{}-{}-", prefix, compact_date(experiment_time));
+    let max_seq = rows
+        .iter()
+        .filter_map(|r| r.sample_id.as_deref())
+        .filter_map(|id| id.strip_prefix(&stem))
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("{stem}{:03}", max_seq + 1)
+}
+
 // ---- Commands ---------------------------------------------------------------
 
 #[tauri::command]
@@ -785,6 +877,81 @@ fn get_gas_safety_limits(state: State<AppState>) -> GasLimits {
         h2: state.limit_h2,
         co: state.limit_co,
     }
+}
+
+#[tauri::command]
+fn get_comm_config(state: State<AppState>) -> Result<CommConfig, String> {
+    Ok(load_comm_config_from(&state.comm_config_path))
+}
+
+#[tauri::command]
+fn get_admin_auth_status(state: State<AppState>) -> Result<auth::AdminAuthStatus, String> {
+    auth::status(&state.auth_path)
+}
+
+#[tauri::command]
+fn change_admin_password(
+    state: State<AppState>,
+    old_password: String,
+    new_password: String,
+) -> Result<(), String> {
+    let result = auth::change_password(&state.auth_path, &old_password, &new_password);
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Config,
+            "change_admin_password",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .detail(serde_json::json!({ "error": result.as_ref().err() })),
+    );
+    result
+}
+
+#[tauri::command]
+fn update_comm_config(
+    state: State<AppState>,
+    config: CommConfig,
+    password: String,
+) -> Result<CommConfig, String> {
+    let result = (|| {
+        if state.exp.is_running() {
+            return Err("实验运行中不可修改通讯设置".to_string());
+        }
+        let auth_status = auth::status(&state.auth_path)?;
+        if auth_status.must_change {
+            return Err("请先修改默认管理员口令".to_string());
+        }
+        auth::verify(&state.auth_path, &password)?;
+        config.validate().map_err(|e| e.to_string())?;
+        if let Some(parent) = state.comm_config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建通讯配置目录失败: {e}"))?;
+        }
+        config
+            .save(&state.comm_config_path)
+            .map_err(|e| e.to_string())?;
+        Ok(config)
+    })();
+
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Config,
+            "update_comm_config",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .detail(serde_json::json!({
+            "path": state.comm_config_path.to_string_lossy(),
+            "error": result.as_ref().err()
+        })),
+    );
+    result
 }
 
 #[tauri::command]
@@ -1012,7 +1179,10 @@ fn validate_experiment_params(params: &ExperimentParams) -> Vec<PreflightIssue> 
         issues.push(PreflightIssue::blocking("SAMPLE_NAME", "样品名称必填"));
     }
     if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
-        issues.push(PreflightIssue::blocking("SAMPLE_WEIGHT", "样品重量必须大于 0"));
+        issues.push(PreflightIssue::blocking(
+            "SAMPLE_WEIGHT",
+            "样品重量必须大于 0",
+        ));
     }
     if params.operator.trim().is_empty() {
         issues.push(PreflightIssue::blocking("OPERATOR", "操作员必填"));
@@ -1025,11 +1195,20 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
     let mut warnings = Vec::new();
 
     if state.exp.is_running() {
-        blocking.push(PreflightIssue::blocking("EXPERIMENT_RUNNING", "实验已在运行"));
+        blocking.push(PreflightIssue::blocking(
+            "EXPERIMENT_RUNNING",
+            "实验已在运行",
+        ));
     }
 
     let program = match program_by_id(state, &params.experiment_type) {
         Ok(p) => {
+            if !p.enabled {
+                blocking.push(PreflightIssue::blocking(
+                    "PROGRAM_DISABLED",
+                    "实验模式已停用，无法启动",
+                ));
+            }
             warnings.extend(flammable_warnings(&p, state.limit_h2, state.limit_co));
             Some(p)
         }
@@ -1043,13 +1222,22 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
     let mfc = state.hub.mfc_rx().borrow().clone();
     let balance = state.hub.balance_rx().borrow().clone();
     if !temp.connected {
-        blocking.push(PreflightIssue::blocking("TEMP_OFFLINE", "温度总线离线，无法启动实验"));
+        blocking.push(PreflightIssue::blocking(
+            "TEMP_OFFLINE",
+            "温度总线离线，无法启动实验",
+        ));
     }
     if !mfc.connected {
-        blocking.push(PreflightIssue::blocking("MFC_OFFLINE", "气体流量 MFC 离线，无法启动实验"));
+        blocking.push(PreflightIssue::blocking(
+            "MFC_OFFLINE",
+            "气体流量 MFC 离线，无法启动实验",
+        ));
     }
     if !balance.connected {
-        blocking.push(PreflightIssue::blocking("BALANCE_OFFLINE", "电子天平离线，无法启动实验"));
+        blocking.push(PreflightIssue::blocking(
+            "BALANCE_OFFLINE",
+            "电子天平离线，无法启动实验",
+        ));
     }
     if let Some(weight) = balance.weight {
         if params.sample_weight > 0.0 {
@@ -1089,6 +1277,54 @@ fn preflight_experiment(
 }
 
 #[tauri::command]
+fn generate_sample_id(
+    state: State<AppState>,
+    program_id: String,
+    experiment_time: String,
+) -> Result<String, String> {
+    let program = program_by_id(&state, &program_id)?;
+    let rows = lock(&state.storage)
+        .list_experiments()
+        .map_err(|e| e.to_string())?;
+    Ok(next_sample_id(&program, &experiment_time, &rows))
+}
+
+#[tauri::command]
+fn get_experiment_start_defaults(
+    state: State<AppState>,
+    program_id: String,
+) -> Result<ExperimentStartDefaults, String> {
+    let program = program_by_id(&state, &program_id)?;
+    let now = iso_now();
+    let (latest, rows) = {
+        let storage = lock(&state.storage);
+        (
+            storage.latest_experiment().map_err(|e| e.to_string())?,
+            storage.list_experiments().map_err(|e| e.to_string())?,
+        )
+    };
+    let balance = state.hub.balance_rx().borrow().clone();
+    Ok(ExperimentStartDefaults {
+        sample_id: next_sample_id(&program, &now, &rows),
+        sample_name: latest
+            .as_ref()
+            .map(|r| r.sample_name.clone())
+            .unwrap_or_default(),
+        sample_weight: balance
+            .weight
+            .filter(|w| balance.connected && w.is_finite() && *w > 0.0),
+        operator: latest
+            .as_ref()
+            .and_then(|r| r.operator.clone())
+            .unwrap_or_default(),
+        experiment_type: program_id,
+        project_name: latest.and_then(|r| r.project_name),
+        experiment_time: now,
+        notes: None,
+    })
+}
+
+#[tauri::command]
 fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
     let st = app.state::<AppState>();
     let preflight = build_preflight(&st, &params);
@@ -1100,15 +1336,24 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     let program_snapshot_json = serde_json::to_string(&program).map_err(|e| e.to_string())?;
 
     let now = iso_now();
+    let project_name = clean_opt(params.project_name.clone());
+    let notes = clean_opt(params.notes.clone());
+    let experiment_time = clean_opt(params.experiment_time.clone()).unwrap_or_else(|| now.clone());
+    let experiment_name = project_name
+        .clone()
+        .unwrap_or_else(|| params.sample_name.clone());
     let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let row = ExperimentRow {
         experiment_id: id.clone(),
-        experiment_name: params.sample_name.clone(),
+        experiment_name,
+        sample_id: clean_opt(Some(params.sample_id.clone())),
         sample_name: params.sample_name.clone(),
         sample_weight: params.sample_weight,
         start_time: now.clone(),
+        experiment_time: Some(experiment_time.clone()),
         end_time: None,
-        description: params.notes.clone(),
+        project_name: project_name.clone(),
+        description: notes,
         operator: Some(params.operator.clone()),
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
@@ -1145,7 +1390,11 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
             .operator(params.operator.clone())
             .detail(serde_json::json!({
-                "id": id, "mode": params.experiment_type, "project": params.project_name
+                "id": id,
+                "mode": params.experiment_type.clone(),
+                "project": project_name,
+                "sample_id": params.sample_id,
+                "experiment_time": experiment_time
             })),
     );
     let _ = app.emit("experiment-state-changed", initial);
@@ -1238,8 +1487,7 @@ fn save_custom_program(state: State<AppState>, mut program: Program) -> Result<P
     } else {
         program.id = program.id.trim().to_string();
     }
-    program.name = program.name.trim().to_string();
-    program.source = ProgramSource::Custom;
+    normalize_custom_program(&mut program);
     if STANDARD_MODES.contains(&program.id.as_str()) {
         return Err("标准模式不可覆盖，请复制为自定义模式".into());
     }
@@ -1253,8 +1501,12 @@ fn save_custom_program(state: State<AppState>, mut program: Program) -> Result<P
     }
     write_custom_programs(&state.custom_modes_path, &programs)?;
     state.audit.write(
-        &AuditEntry::new(Category::Config, "save_custom_program", AuditResult::Success)
-            .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
+        &AuditEntry::new(
+            Category::Config,
+            "save_custom_program",
+            AuditResult::Success,
+        )
+        .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
     );
     Ok(program)
 }
@@ -1272,8 +1524,12 @@ fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), Strin
     }
     write_custom_programs(&state.custom_modes_path, &programs)?;
     state.audit.write(
-        &AuditEntry::new(Category::Config, "delete_custom_program", AuditResult::Success)
-            .detail(serde_json::json!({ "id": id })),
+        &AuditEntry::new(
+            Category::Config,
+            "delete_custom_program",
+            AuditResult::Success,
+        )
+        .detail(serde_json::json!({ "id": id })),
     );
     Ok(())
 }
@@ -1284,10 +1540,13 @@ fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), Strin
 struct ExperimentSummary {
     experiment_id: String,
     experiment_name: String,
+    sample_id: Option<String>,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
+    experiment_time: Option<String>,
     end_time: Option<String>,
+    project_name: Option<String>,
     operator: Option<String>,
     experiment_type: Option<String>,
     has_analysis: bool,
@@ -1298,10 +1557,13 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
         has_analysis: r.analysis_results_json.is_some(),
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
+        sample_id: r.sample_id,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
+        experiment_time: r.experiment_time,
         end_time: r.end_time,
+        project_name: r.project_name,
         operator: r.operator,
         experiment_type: r.experiment_type,
     }
@@ -1311,10 +1573,13 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
 struct ExperimentDetail {
     experiment_id: String,
     experiment_name: String,
+    sample_id: Option<String>,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
+    experiment_time: Option<String>,
     end_time: Option<String>,
+    project_name: Option<String>,
     description: Option<String>,
     operator: Option<String>,
     experiment_type: Option<String>,
@@ -1336,10 +1601,13 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
     ExperimentDetail {
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
+        sample_id: r.sample_id,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
+        experiment_time: r.experiment_time,
         end_time: r.end_time,
+        project_name: r.project_name,
         description: r.description,
         operator: r.operator,
         experiment_type: r.experiment_type,
@@ -1789,7 +2057,8 @@ pub fn run() {
     let _ = std::fs::create_dir_all(&exports_dir);
     let _ = std::fs::create_dir_all(&config_dir);
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let comm_config = load_comm_config();
+    let comm_config_path = comm_config_path();
+    let comm_config = load_comm_config_from(&comm_config_path);
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
     // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
@@ -1809,6 +2078,8 @@ pub fn run() {
         sim_speed,
         exports_dir,
         custom_modes_path: config_dir.join("experiment_modes.json"),
+        comm_config_path,
+        auth_path: config_dir.join("auth.json"),
         updater_enabled,
         telemetry_gen: Arc::new(AtomicU64::new(0)),
     };
@@ -1834,6 +2105,10 @@ pub fn run() {
             get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,
+            get_comm_config,
+            get_admin_auth_status,
+            change_admin_password,
+            update_comm_config,
             get_device_health,
             set_gas_flow,
             set_gas_on_off,
@@ -1845,6 +2120,8 @@ pub fn run() {
             unsubscribe_telemetry,
             get_experiment_state,
             preflight_experiment,
+            generate_sample_id,
+            get_experiment_start_defaults,
             start_experiment,
             stop_experiment,
             skip_stage,
@@ -1904,6 +2181,7 @@ mod tests {
             sample_weight: 100.0,
             operator: "张三".into(),
             experiment_type: "REDUCIBILITY".into(),
+            experiment_time: None,
             project_name: None,
             notes: None,
         };
@@ -1937,10 +2215,13 @@ mod tests {
         let mut exp = ExperimentRow {
             experiment_id: "e1".into(),
             experiment_name: "e".into(),
+            sample_id: None,
             sample_name: "s".into(),
             sample_weight: 100.0,
             start_time: "t0".into(),
+            experiment_time: None,
             end_time: None,
+            project_name: None,
             description: None,
             operator: None,
             experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
@@ -1960,6 +2241,51 @@ mod tests {
     }
 
     #[test]
+    fn sample_id_uses_program_prefix_date_and_next_sequence() {
+        let program = standard_program("LOW_TEMP_DEGRADATION").unwrap();
+        let rows = vec![
+            ExperimentRow {
+                experiment_id: "e1".into(),
+                experiment_name: "e".into(),
+                sample_id: Some("RDI-20260831-001".into()),
+                sample_name: "s".into(),
+                sample_weight: 100.0,
+                start_time: "t0".into(),
+                experiment_time: None,
+                end_time: None,
+                project_name: None,
+                description: None,
+                operator: None,
+                experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
+                analysis_results_json: None,
+                program_snapshot_json: None,
+                created_at: "t0".into(),
+            },
+            ExperimentRow {
+                experiment_id: "e2".into(),
+                experiment_name: "e".into(),
+                sample_id: Some("RDI-20260831-009".into()),
+                sample_name: "s".into(),
+                sample_weight: 100.0,
+                start_time: "t1".into(),
+                experiment_time: None,
+                end_time: None,
+                project_name: None,
+                description: None,
+                operator: None,
+                experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
+                analysis_results_json: None,
+                program_snapshot_json: None,
+                created_at: "t1".into(),
+            },
+        ];
+        assert_eq!(
+            next_sample_id(&program, "2026-08-31T22:16", &rows),
+            "RDI-20260831-010"
+        );
+    }
+
+    #[test]
     fn bundled_default_comm_config_is_valid_and_matches_docs_06() {
         // Guards against config/comm_config.json drifting from docs/06 §6.4 again (#11).
         let c = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("parse");
@@ -1975,7 +2301,7 @@ mod tests {
     fn load_comm_config_returns_a_valid_config() {
         // The test working dir has no config/comm_config.json, so this exercises the
         // compiled-in default fallback path (#11).
-        load_comm_config()
+        load_comm_config_from(&comm_config_path())
             .validate()
             .expect("fallback config valid");
     }

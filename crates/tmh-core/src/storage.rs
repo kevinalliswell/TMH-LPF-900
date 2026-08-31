@@ -6,16 +6,19 @@
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id          TEXT PRIMARY KEY,
     experiment_name        TEXT NOT NULL,
+    sample_id              TEXT,
     sample_name            TEXT NOT NULL,
     sample_weight          REAL NOT NULL,
     start_time             TEXT NOT NULL,
+    experiment_time        TEXT,
     end_time               TEXT,
+    project_name           TEXT,
     description            TEXT,
     operator               TEXT,
     experiment_type        TEXT,
@@ -54,10 +57,13 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 pub struct ExperimentRow {
     pub experiment_id: String,
     pub experiment_name: String,
+    pub sample_id: Option<String>,
     pub sample_name: String,
     pub sample_weight: f64,
     pub start_time: String,
+    pub experiment_time: Option<String>,
     pub end_time: Option<String>,
+    pub project_name: Option<String>,
     pub description: Option<String>,
     pub operator: Option<String>,
     pub experiment_type: Option<String>,
@@ -105,12 +111,10 @@ impl Storage {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.execute_batch(SCHEMA)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 2 && !column_exists(&conn, "experiments", "program_snapshot_json")? {
-            conn.execute(
-                "ALTER TABLE experiments ADD COLUMN program_snapshot_json TEXT",
-                [],
-            )?;
-        }
+        add_column_if_missing(&conn, "experiments", "program_snapshot_json TEXT")?;
+        add_column_if_missing(&conn, "experiments", "sample_id TEXT")?;
+        add_column_if_missing(&conn, "experiments", "experiment_time TEXT")?;
+        add_column_if_missing(&conn, "experiments", "project_name TEXT")?;
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -134,16 +138,20 @@ impl Storage {
     /// Insert an experiment metadata row.
     pub fn insert_experiment(&self, e: &ExperimentRow) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, \
-             start_time, end_time, description, operator, experiment_type, analysis_results_json, \
-             program_snapshot_json, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT INTO experiments (experiment_id, experiment_name, sample_id, sample_name, \
+             sample_weight, start_time, experiment_time, end_time, project_name, description, \
+             operator, experiment_type, analysis_results_json, program_snapshot_json, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 e.experiment_id,
                 e.experiment_name,
+                e.sample_id,
                 e.sample_name,
                 e.sample_weight,
                 e.start_time,
+                e.experiment_time,
                 e.end_time,
+                e.project_name,
                 e.description,
                 e.operator,
                 e.experiment_type,
@@ -224,6 +232,18 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Most recent experiment metadata row, if any.
+    pub fn latest_experiment(&self) -> Result<Option<ExperimentRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{EXPERIMENT_SELECT} ORDER BY start_time DESC LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map([], experiment_from_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Experiments still open (no `end_time`) — used for crash recovery on startup.
     pub fn unfinished_experiments(&self) -> Result<Vec<ExperimentRow>> {
         let mut stmt = self.conn.prepare(&format!(
@@ -291,9 +311,20 @@ impl Storage {
 }
 
 /// Column list shared by every `experiments` SELECT (keeps `experiment_from_row` in sync).
-const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_name, \
-     sample_weight, start_time, end_time, description, operator, experiment_type, \
-     analysis_results_json, program_snapshot_json, created_at FROM experiments";
+const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_id, sample_name, \
+     sample_weight, start_time, experiment_time, end_time, project_name, description, operator, \
+     experiment_type, analysis_results_json, program_snapshot_json, created_at FROM experiments";
+
+fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> rusqlite::Result<()> {
+    let column = definition
+        .split_whitespace()
+        .next()
+        .expect("column definition must include a name");
+    if !column_exists(conn, table, column)? {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+    }
+    Ok(())
+}
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -311,16 +342,19 @@ fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
     Ok(ExperimentRow {
         experiment_id: r.get(0)?,
         experiment_name: r.get(1)?,
-        sample_name: r.get(2)?,
-        sample_weight: r.get(3)?,
-        start_time: r.get(4)?,
-        end_time: r.get(5)?,
-        description: r.get(6)?,
-        operator: r.get(7)?,
-        experiment_type: r.get(8)?,
-        analysis_results_json: r.get(9)?,
-        program_snapshot_json: r.get(10)?,
-        created_at: r.get(11)?,
+        sample_id: r.get(2)?,
+        sample_name: r.get(3)?,
+        sample_weight: r.get(4)?,
+        start_time: r.get(5)?,
+        experiment_time: r.get(6)?,
+        end_time: r.get(7)?,
+        project_name: r.get(8)?,
+        description: r.get(9)?,
+        operator: r.get(10)?,
+        experiment_type: r.get(11)?,
+        analysis_results_json: r.get(12)?,
+        program_snapshot_json: r.get(13)?,
+        created_at: r.get(14)?,
     })
 }
 
@@ -349,10 +383,13 @@ mod tests {
         ExperimentRow {
             experiment_id: id.into(),
             experiment_name: "exp".into(),
+            sample_id: Some(format!("{id}-001")),
             sample_name: "s1".into(),
             sample_weight: 100.0,
             start_time: "2026-07-05T10:00:00".into(),
+            experiment_time: Some("2026-07-05T09:58:00".into()),
             end_time: None,
+            project_name: Some("proj".into()),
             description: None,
             operator: Some("op".into()),
             experiment_type: Some("REDUCIBILITY".into()),
@@ -380,9 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_inits_at_version_2() {
+    fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 3);
     }
 
     #[test]
@@ -421,7 +458,21 @@ mod tests {
         assert_eq!(all.len(), 2);
         let e1 = s.get_experiment("e1").unwrap().unwrap();
         assert_eq!(e1.end_time.as_deref(), Some("2026-07-05T11:00:00"));
+        assert_eq!(e1.sample_id.as_deref(), Some("e1-001"));
+        assert_eq!(e1.project_name.as_deref(), Some("proj"));
         assert!(s.get_experiment("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_experiment_returns_newest_row() {
+        let s = Storage::open_in_memory().unwrap();
+        let mut old = experiment("old");
+        old.start_time = "2026-07-05T09:00:00".into();
+        let mut new = experiment("new");
+        new.start_time = "2026-07-05T11:00:00".into();
+        s.insert_experiment(&old).unwrap();
+        s.insert_experiment(&new).unwrap();
+        assert_eq!(s.latest_experiment().unwrap().unwrap().experiment_id, "new");
     }
 
     #[test]
@@ -491,7 +542,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 3);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -539,8 +590,11 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 3);
         assert!(column_exists(&s.conn, "experiments", "program_snapshot_json").unwrap());
+        assert!(column_exists(&s.conn, "experiments", "sample_id").unwrap());
+        assert!(column_exists(&s.conn, "experiments", "experiment_time").unwrap());
+        assert!(column_exists(&s.conn, "experiments", "project_name").unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

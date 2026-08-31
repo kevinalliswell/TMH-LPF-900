@@ -63,10 +63,13 @@ fn mock_soak(minutes: u64) {
         .insert_experiment(&ExperimentRow {
             experiment_id: exp_id.clone(),
             experiment_name: "soak".into(),
+            sample_id: None,
             sample_name: "s".into(),
             sample_weight: 100.0,
             start_time: "2026-07-05T00:00:00".into(),
+            experiment_time: None,
             end_time: None,
+            project_name: None,
             description: None,
             operator: None,
             experiment_type: None,

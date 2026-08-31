@@ -238,10 +238,13 @@ pub fn render_report_html(
 ) -> String {
     let meta = [
         meta_row("实验编号", &exp.experiment_id),
+        meta_row("样品编号", exp.sample_id.as_deref().unwrap_or("—")),
+        meta_row("项目名称", exp.project_name.as_deref().unwrap_or("—")),
         meta_row("样品名称", &exp.sample_name),
         meta_row("实验类型", exp.experiment_type.as_deref().unwrap_or("—")),
         meta_row("操作员", exp.operator.as_deref().unwrap_or("—")),
         meta_row("样品重量", &format!("{:.3} g", exp.sample_weight)),
+        meta_row("实验时间", exp.experiment_time.as_deref().unwrap_or("—")),
         meta_row("开始时间", &exp.start_time),
         meta_row("结束时间", exp.end_time.as_deref().unwrap_or("—")),
         meta_row("采样点数", &samples.len().to_string()),
@@ -291,12 +294,15 @@ fn build_xlsx(exp: &ExperimentRow, rows: &[SampleRow]) -> Result<Vec<u8>, XlsxEr
     // Standalone worksheets avoid two simultaneous &mut borrows of the workbook.
     let mut info = Worksheet::new();
     info.set_name("实验信息")?;
-    let meta: [(&str, String); 7] = [
+    let meta: [(&str, String); 10] = [
         ("实验编号", exp.experiment_id.clone()),
+        ("样品编号", exp.sample_id.clone().unwrap_or_default()),
+        ("项目名称", exp.project_name.clone().unwrap_or_default()),
         ("样品名称", exp.sample_name.clone()),
         ("实验类型", exp.experiment_type.clone().unwrap_or_default()),
         ("操作员", exp.operator.clone().unwrap_or_default()),
         ("样品重量(g)", format!("{:.3}", exp.sample_weight)),
+        ("实验时间", exp.experiment_time.clone().unwrap_or_default()),
         ("开始时间", exp.start_time.clone()),
         ("结束时间", exp.end_time.clone().unwrap_or_default()),
     ];
@@ -350,10 +356,13 @@ mod tests {
         ExperimentRow {
             experiment_id: "e1".into(),
             experiment_name: "s".into(),
+            sample_id: Some("RED-20260705-001".into()),
             sample_name: "鞍钢球团".into(),
             sample_weight: 100.0,
             start_time: "2026-07-05T10:00:00".into(),
+            experiment_time: Some("2026-07-05T09:58:00".into()),
             end_time: Some("2026-07-05T14:00:00".into()),
+            project_name: Some("proj".into()),
             description: None,
             operator: Some("张工".into()),
             experiment_type: Some("REDUCIBILITY".into()),
