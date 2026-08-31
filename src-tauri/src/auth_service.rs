@@ -193,6 +193,10 @@ impl AuthService {
         self.session().touch(now_epoch_s).map_err(map_session_error)
     }
 
+    pub fn has_active_session(&self, now_epoch_s: i64) -> bool {
+        matches!(self.session().state(now_epoch_s), SessionState::Active(_))
+    }
+
     pub fn snapshot(&self, storage: &Storage, now_epoch_s: i64) -> Result<AuthSnapshot, AuthCode> {
         if storage.user_count().map_err(|_| AuthCode::Storage)? == 0 {
             return Ok(AuthSnapshot {

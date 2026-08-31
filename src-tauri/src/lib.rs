@@ -7,7 +7,7 @@
 mod auth_service;
 mod auth_session;
 
-use auth_service::{AuthCode, AuthService, AuthSnapshot, PublicUser};
+use auth_service::{AuthCode, AuthService, AuthSnapshot, AuthStatus, PublicUser};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -198,11 +198,15 @@ fn authorize_experiment(
         .get_experiment(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "实验不存在".to_string())?;
-    if user.role.is_admin() || row.owner_user_id.as_deref() == Some(user.user_id.as_str()) {
+    if may_access_experiment(user.role, &user.user_id, row.owner_user_id.as_deref()) {
         Ok(row)
     } else {
         Err(AuthCode::Forbidden.to_string())
     }
+}
+
+fn may_access_experiment(role: UserRole, user_id: &str, owner_user_id: Option<&str>) -> bool {
+    role.is_admin() || owner_user_id == Some(user_id)
 }
 
 fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
@@ -215,6 +219,37 @@ fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
         Ok(user)
     } else {
         Err(AuthCode::Forbidden.to_string())
+    }
+}
+
+fn redact_experiment_status(
+    mut status: ExperimentStatus,
+    role: UserRole,
+    user_id: &str,
+) -> ExperimentStatus {
+    let owns = status.owner_user_id.as_deref() == Some(user_id);
+    status.can_control = role.is_admin() || owns;
+    status.occupied_by_other = status.running && !status.can_control;
+    if status.occupied_by_other {
+        status.sample_name = None;
+        status.owner_user_id = None;
+        status.owner_display_name = None;
+    }
+    status
+}
+
+/// Emit only a view authorized for the session that is active at emission time. Snapshotting
+/// does not touch the idle deadline, so a running experiment cannot keep a user logged in.
+fn emit_experiment_status(app: &AppHandle, status: &ExperimentStatus) {
+    let state = app.state::<AppState>();
+    let snapshot = state.auth.snapshot(&lock(&state.storage), epoch_now()).ok();
+    if let Some(snapshot) = snapshot {
+        if matches!(snapshot.status, AuthStatus::Authenticated) {
+            if let Some(user) = snapshot.user {
+                let visible = redact_experiment_status(status.clone(), user.role, &user.user_id);
+                let _ = app.emit("experiment-state-changed", visible);
+            }
+        }
     }
 }
 
@@ -412,7 +447,7 @@ fn publish_running(
         owner_display_name,
     );
     exp.set_status(status.clone());
-    let _ = app.emit("experiment-state-changed", status);
+    emit_experiment_status(app, &status);
 }
 
 /// End-of-run bookkeeping shared by completion and stop: safety atmosphere, final flush,
@@ -470,7 +505,7 @@ fn finalize(
         ExperimentStatus::safety_error(id, total_s)
     };
     exp.set_status(final_status.clone());
-    let _ = app.emit("experiment-state-changed", final_status);
+    emit_experiment_status(app, &final_status);
 }
 
 /// Spawn the per-run control loop: tick the engine once per real second (advancing
@@ -941,18 +976,15 @@ fn set_experiment_owner(
     experiment_id: String,
     owner_user_id: Option<String>,
 ) -> Result<(), String> {
-    current_admin(&state)?;
+    let actor = current_admin(&state)?;
     if state.exp.snapshot().experiment_id.as_deref() == Some(experiment_id.as_str()) {
         return Err("无法变更正在运行实验的归属".into());
     }
     let storage = lock(&state.storage);
-    if storage
+    let experiment = storage
         .get_experiment(&experiment_id)
         .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        return Err("实验不存在".into());
-    }
+        .ok_or_else(|| "实验不存在".to_string())?;
     if let Some(owner_id) = owner_user_id.as_deref() {
         let owner = storage
             .get_user(owner_id)
@@ -964,7 +996,21 @@ fn set_experiment_owner(
     }
     storage
         .set_experiment_owner(&experiment_id, owner_user_id.as_deref())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "set_experiment_owner",
+            AuditResult::Success,
+        )
+        .operator(actor.display_name)
+        .detail(serde_json::json!({
+            "id": experiment_id,
+            "old_owner_user_id": experiment.owner_user_id,
+            "new_owner_user_id": owner_user_id
+        })),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -976,24 +1022,27 @@ fn get_app_info() -> AppInfo {
 }
 
 #[tauri::command]
-fn get_runtime_mode(state: State<AppState>) -> String {
-    state.mode.clone()
+fn get_runtime_mode(state: State<AppState>) -> Result<String, String> {
+    current_user(&state)?;
+    Ok(state.mode.clone())
 }
 
 #[tauri::command]
-fn get_gas_safety_limits(state: State<AppState>) -> GasLimits {
-    GasLimits {
+fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
+    current_user(&state)?;
+    Ok(GasLimits {
         h2: state.limit_h2,
         co: state.limit_co,
-    }
+    })
 }
 
 #[tauri::command]
-fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
+fn get_device_health(state: State<AppState>) -> Result<DeviceHealthDto, String> {
+    current_user(&state)?;
     let t = state.hub.temp_rx().borrow().clone();
     let m = state.hub.mfc_rx().borrow().clone();
     let b = state.hub.balance_rx().borrow().clone();
-    DeviceHealthDto {
+    Ok(DeviceHealthDto {
         temp: HealthDot {
             connected: t.connected,
             consecutive_errors: t.consecutive_errors,
@@ -1006,7 +1055,7 @@ fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
             connected: b.connected,
             consecutive_errors: b.consecutive_errors,
         },
-    }
+    })
 }
 
 #[tauri::command]
@@ -1152,11 +1201,13 @@ async fn open_all_valves(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn close_all_valves(app: AppHandle) -> Result<(), String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     set_all_valves(&app, false, "close_all").await
 }
 
 #[tauri::command]
 async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
+    require_experiment_controller(&app.state::<AppState>())?;
     let hub = app.state::<AppState>().hub.clone();
     let result = match hub.request_shutoff_flammable().await {
         Ok(Ok(())) => Ok(()),
@@ -1209,12 +1260,13 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> R
     // (a re-subscribe or unsubscribe_telemetry) or the channel drops — so stale pumps from
     // StrictMode double-invokes / HMR never accumulate (issue #8).
     let gen = st.telemetry_gen.clone();
+    let auth = st.auth.clone();
     let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let mut seq = 0u64;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            if gen.load(Ordering::SeqCst) != my_gen {
+            if gen.load(Ordering::SeqCst) != my_gen || !auth.has_active_session(epoch_now()) {
                 break;
             }
             seq += 1;
@@ -1242,16 +1294,11 @@ fn unsubscribe_telemetry(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 fn get_experiment_state(state: State<AppState>) -> Result<ExperimentStatus, String> {
     let user = current_user(&state)?;
-    let mut status = state.exp.snapshot();
-    let owns = status.owner_user_id.as_deref() == Some(user.user_id.as_str());
-    status.can_control = user.role.is_admin() || owns;
-    status.occupied_by_other = status.running && !status.can_control;
-    if status.occupied_by_other {
-        status.sample_name = None;
-        status.owner_user_id = None;
-        status.owner_display_name = None;
-    }
-    Ok(status)
+    Ok(redact_experiment_status(
+        state.exp.snapshot(),
+        user.role,
+        &user.user_id,
+    ))
 }
 
 /// Validate experiment start parameters (docs/05 §5.2). Pure so it is unit-testable.
@@ -1334,7 +1381,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
                 "id": id, "mode": params.experiment_type, "project": params.project_name
             })),
     );
-    let _ = app.emit("experiment-state-changed", initial);
+    emit_experiment_status(&app, &initial);
 
     spawn_experiment_task(
         app.clone(),
@@ -1394,7 +1441,7 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
             ExperimentStatus::safety_error("manual-stop", 0.0)
         };
         exp.set_status(status.clone());
-        let _ = app.emit("experiment-state-changed", status);
+        emit_experiment_status(&app, &status);
     }
     safety_result
 }
@@ -1617,6 +1664,7 @@ fn analyze_gb13241(
     id: String,
     o2_pct: f64,
 ) -> Result<serde_json::Value, String> {
+    require_experiment(&state, &id)?;
     let (w0, samples) = {
         let s = lock(&state.storage);
         let row = s
@@ -1820,15 +1868,20 @@ impl UpdateCheck {
 }
 
 #[tauri::command]
-fn get_updater_status(app: AppHandle) -> UpdateCheck {
+fn get_updater_status(app: AppHandle) -> Result<UpdateCheck, String> {
+    current_user(&app.state::<AppState>())?;
     let enabled = app.state::<AppState>().updater_enabled;
-    UpdateCheck::base(enabled, app.package_info().version.to_string())
+    Ok(UpdateCheck::base(
+        enabled,
+        app.package_info().version.to_string(),
+    ))
 }
 
 /// Check the manifest endpoint for a newer version. Gated; never errors into the UI —
 /// an unreachable endpoint yields a friendly `error` string (offline is normal here).
 #[tauri::command]
-async fn check_for_update(app: AppHandle) -> UpdateCheck {
+async fn check_for_update(app: AppHandle) -> Result<UpdateCheck, String> {
+    current_user(&app.state::<AppState>())?;
     let current = app.package_info().version.to_string();
     let (enabled, audit) = {
         let st = app.state::<AppState>();
@@ -1836,7 +1889,7 @@ async fn check_for_update(app: AppHandle) -> UpdateCheck {
     };
     let mut check = UpdateCheck::base(enabled, current);
     if !enabled {
-        return check;
+        return Ok(check);
     }
     match app.updater() {
         Ok(updater) => match updater.check().await {
@@ -1867,12 +1920,13 @@ async fn check_for_update(app: AppHandle) -> UpdateCheck {
         ),
     );
     let _ = app.emit("update-status", &check);
-    check
+    Ok(check)
 }
 
 /// Download + verify (minisign) + install the update, then restart. Gated.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
+    current_admin(&app.state::<AppState>())?;
     if !app.state::<AppState>().updater_enabled {
         return Err("更新功能未启用".into());
     }
@@ -2082,6 +2136,39 @@ mod tests {
         assert_eq!(reducing_target(Some("REDUCIBILITY")), Some(900.0));
         assert_eq!(reducing_target(Some("LOW_TEMP_DEGRADATION")), Some(500.0));
         assert_eq!(reducing_target(Some("bogus")), None);
+    }
+
+    #[test]
+    fn experiment_access_is_owner_or_admin_only() {
+        assert!(may_access_experiment(
+            UserRole::User,
+            "alice",
+            Some("alice")
+        ));
+        assert!(!may_access_experiment(UserRole::User, "alice", Some("bob")));
+        assert!(!may_access_experiment(UserRole::User, "alice", None));
+        assert!(may_access_experiment(UserRole::Admin, "admin", Some("bob")));
+        assert!(may_access_experiment(UserRole::Admin, "admin", None));
+    }
+
+    #[test]
+    fn running_status_hides_owner_metadata_from_other_users() {
+        let mut raw = ExperimentStatus::idle();
+        raw.running = true;
+        raw.sample_name = Some("秘密样品".into());
+        raw.owner_user_id = Some("alice".into());
+        raw.owner_display_name = Some("Alice".into());
+
+        let hidden = redact_experiment_status(raw.clone(), UserRole::User, "bob");
+        assert!(hidden.occupied_by_other);
+        assert!(!hidden.can_control);
+        assert!(hidden.sample_name.is_none());
+        assert!(hidden.owner_user_id.is_none());
+        assert!(hidden.owner_display_name.is_none());
+
+        let admin = redact_experiment_status(raw, UserRole::Admin, "admin");
+        assert!(admin.can_control);
+        assert_eq!(admin.sample_name.as_deref(), Some("秘密样品"));
     }
 
     #[test]

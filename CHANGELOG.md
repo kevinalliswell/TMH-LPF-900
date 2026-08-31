@@ -6,6 +6,14 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- 首次启动创建管理员、用户名/密码登录、临时密码强制修改、15 分钟空闲锁定和管理员用户管理。
+- SQLite schema v2 用户表与实验 owner；普通用户实验数据隔离，管理员可管理全部数据及旧数据归属。
+
+### Security
+- 密码采用 Argon2id 随机盐哈希；连续 5 次失败锁定 15 分钟，账户仅软停用且最后一个管理员受保护。
+- Rust IPC 对实验查询、采样、分析、报告、导出、删除和运行控制实施会话、角色与 owner 校验；未登录仅保留公开安全状态和紧急安全停机。
+
 ## [0.2.0] - 2026-08-31
 
 ### Security
