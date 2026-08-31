@@ -13,10 +13,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "sync-version": "node scripts/sync-version.mjs"
+    "sync-version": "node scripts/sync-version.mjs",
+    "check:tauri-security": "node scripts/check-tauri-security.mjs"
   },
   "dependencies": {
-    "echarts": "^5",
+    "echarts": "^6.1.0",
     "react": "^19",
     "react-dom": "^19",
     "zustand": "^5"

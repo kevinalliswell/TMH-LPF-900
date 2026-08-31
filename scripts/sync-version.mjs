@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Single-source version sync: package.json.version -> the 3 display points
-// (tauri.conf.json version + window title, index.html <title>, App.tsx splash).
+// Single-source version sync: package.json.version -> runtime/package display points.
 //   node scripts/sync-version.mjs           write mode (updates files)
 //   node scripts/sync-version.mjs --check    verify mode (exit 1 on drift)
 import { readFileSync, writeFileSync } from "node:fs";
@@ -14,6 +13,14 @@ const version = pkg.version;
 const title = `TMH-LPF-900 v${version}`;
 
 const targets = [
+  {
+    file: "Cargo.toml",
+    transform: (s) =>
+      s.replace(
+        /(\[workspace\.package\][\s\S]*?^version\s*=\s*")[^"]+("\s*$)/m,
+        `$1${version}$2`,
+      ),
+  },
   {
     file: "src-tauri/tauri.conf.json",
     transform: (s) => {
