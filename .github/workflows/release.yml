@@ -70,7 +70,7 @@ jobs:
       # provide the cert to the runner. Without it the NSIS installer is unsigned
       # (SmartScreen shows "unknown publisher"); everything else still works.
       - name: Build bundles, sign updater artifacts & draft release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater minisign signing (docs/09 §9.2). Required by
