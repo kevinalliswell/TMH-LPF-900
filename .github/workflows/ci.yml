@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not just those targeting main: PRs into feature/ and
+  # integration/ branches were merging with no CI at all, which is how a whole class
+  # of runtime-only breakage reached main unnoticed (#40).
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
