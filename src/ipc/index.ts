@@ -11,6 +11,7 @@ import type {
   ExperimentState,
   ExperimentSummary,
   GasLimits,
+  RuntimeSettings,
   ProgramDto,
   SampleDto,
   TareResult,
@@ -177,6 +178,18 @@ export async function getRuntimeMode(): Promise<RuntimeMode> {
 
 export async function getGasSafetyLimits(): Promise<GasLimits> {
   return isTauri() ? invoke("get_gas_safety_limits") : { h2: 5, co: 5 };
+}
+
+/** Cadences from the backend's loaded config; the browser mock mirrors docs/06 §6.3. */
+export async function getRuntimeSettings(): Promise<RuntimeSettings> {
+  return isTauri()
+    ? invoke("get_runtime_settings")
+    : {
+        sampling_interval_s: 1,
+        telemetry_interval_s: 0.2,
+        heartbeat_timeout_s: 5,
+        idle_timeout_s: 900,
+      };
 }
 
 export async function setGasFlow(gas: number, value: number): Promise<ClampResult> {

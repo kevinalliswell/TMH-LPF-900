@@ -40,6 +40,15 @@ export interface GasLimits {
   co: number;
 }
 
+/** Cadences the backend loaded from `comm_config.json` (docs/06 §6.3). The UI mirrors
+ *  them instead of duplicating the numbers as constants (#44). */
+export interface RuntimeSettings {
+  sampling_interval_s: number;
+  telemetry_interval_s: number;
+  heartbeat_timeout_s: number;
+  idle_timeout_s: number;
+}
+
 /** Gas channel indices, matching the Rust actor ordering. */
 export const GAS = { H2: 0, N2: 1, CO2: 2, CO: 3 } as const;
 export const GAS_NAMES = ["H₂", "N₂", "CO₂", "CO"] as const;

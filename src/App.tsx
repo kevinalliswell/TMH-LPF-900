@@ -1,5 +1,5 @@
 import { useEffect, type FC } from "react";
-import { subscribeExperimentState, subscribeTelemetry } from "./ipc";
+import { getRuntimeSettings, subscribeExperimentState, subscribeTelemetry } from "./ipc";
 import { useExperiment } from "./stores/experiment";
 import { useNav, type View } from "./stores/nav";
 import { useTelemetry } from "./stores/telemetry";
@@ -46,6 +46,7 @@ export default function App() {
 
 function AuthenticatedApp() {
   const setSnapshot = useTelemetry((s) => s.setSnapshot);
+  const setStaleMs = useTelemetry((s) => s.setStaleMs);
   const setExperiment = useExperiment((s) => s.setState);
   const view = useNav((s) => s.view);
   const setView = useNav((s) => s.setView);
@@ -53,6 +54,12 @@ function AuthenticatedApp() {
   const refreshAuth = useAuth((s) => s.refresh);
   useEffect(() => subscribeTelemetry(setSnapshot), [setSnapshot]);
   useEffect(() => subscribeExperimentState(setExperiment), [setExperiment]);
+  // Mirror the backend's configured heartbeat timeout rather than hardcoding 5 s (#44).
+  useEffect(() => {
+    void getRuntimeSettings()
+      .then((settings) => setStaleMs(settings.heartbeat_timeout_s * 1000))
+      .catch(() => {});
+  }, [setStaleMs]);
 
   const visibleNav = NAV.filter((item) => item.view !== "users" || auth?.user?.role === "ADMIN");
   const title = visibleNav.find((n) => n.view === view)?.label ?? "";

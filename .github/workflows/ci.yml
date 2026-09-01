@@ -63,6 +63,11 @@ jobs:
       - name: Tauri security configuration
         run: pnpm check:tauri-security
 
+      # Catches Rust/TS drift in IPC argument names, which is invisible to both test
+      # suites (frontend tests run against the browser mock) but fails at runtime (#40).
+      - name: IPC argument-name contract
+        run: pnpm check:ipc-contract
+
       - name: Production dependency audit
         run: pnpm audit --prod --audit-level moderate
 
