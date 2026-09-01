@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
-use tmh_core::auth::{hash_password, validate_display_name, UserRole};
+use tmh_core::auth::{hash_password, validate_display_name, warm_password_hashing, UserRole};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
@@ -42,8 +42,13 @@ const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING
 const GAS_COUNT: usize = 4;
 /// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
 const MOCK_REDUCTION_LOSS: f64 = 0.12;
-/// Flush buffered samples to SQLite every N ticks.
-const FLUSH_EVERY_TICKS: u32 = 5;
+/// Flush buffered samples to SQLite every N samples.
+const FLUSH_EVERY_SAMPLES: u32 = 5;
+/// Upper bound on one control-loop tick, independent of the configured sampling interval.
+/// The loop that evaluates the stop flag, the bus-offline abort and stage transitions must
+/// stay responsive: a site that configures a slow `SAMPLING.interval_s` may space out its
+/// data rows, but must never delay cutting the gas when a safety-critical bus drops.
+const CONTROL_TICK_MAX: Duration = Duration::from_secs(1);
 /// Cap on buffered-but-unwritten sample rows (~33 min at 1 Hz). If SQLite keeps rejecting
 /// writes, the buffer must not grow without bound for the length of a multi-hour run (#47).
 const MAX_BUFFERED_SAMPLES: usize = 2000;
@@ -569,6 +574,14 @@ fn flush(
 /// the previous one, which keeps the cadence free of drift; if the thread was starved for
 /// longer than a whole period (suspend/resume, a very slow write) we resynchronise rather
 /// than firing a burst of back-to-back ticks to catch up (#43).
+/// Control-loop period for a configured sampling interval: never slower than
+/// [`CONTROL_TICK_MAX`], so the stop flag, the bus-offline abort and stage advancement stay
+/// responsive no matter what cadence `SAMPLING.interval_s` asks for. A faster configured
+/// cadence is honoured as-is and samples every tick.
+fn control_period(sample_period: Duration) -> Duration {
+    sample_period.min(CONTROL_TICK_MAX)
+}
+
 fn next_deadline(previous: Instant, period: Duration, now: Instant) -> Instant {
     let next = previous + period;
     if next > now {
@@ -686,7 +699,7 @@ fn spawn_experiment_task(
     owner_user_id: String,
     owner_display_name: String,
     sim_speed: f64,
-    tick_period: Duration,
+    sample_period: Duration,
 ) {
     std::thread::spawn(move || {
         let mut engine = ExperimentEngine::start(program);
@@ -729,20 +742,29 @@ fn spawn_experiment_task(
             &owner_display_name,
         );
 
-        let mut ticks_since_flush = 0u32;
-        // Wall-clock driven (#43): the engine is advanced by the time that ACTUALLY passed
-        // and the next wake-up is a fixed deadline, not "one second after this tick's work
-        // finished". Counting ticks made every hold stage run long by however much the
-        // tick's own work (sampling, SQLite, waiting for MFC acknowledgements) cost, which
-        // for GB/T 13241's 180 min reduction hold is neither accurate nor reproducible.
+        let mut samples_since_flush = 0u32;
+        // The control tick is capped independently of the sampling interval: safety checks
+        // and stage advancement run at least once a second even when a site configures a
+        // slower sampling cadence. A faster configured cadence still samples every tick.
+        let control_period = control_period(sample_period);
+        let sample_period_s = sample_period.as_secs_f64();
+        let mut since_sample = f64::INFINITY; // sample on the very first tick
+                                              // Wall-clock driven (#43): the engine is advanced by the time that ACTUALLY
+                                              // passed and the next wake-up is a fixed deadline, not "one second after this
+                                              // tick's work finished". Counting ticks made every hold stage run long by
+                                              // however much the tick's own work (sampling, SQLite, waiting for MFC
+                                              // acknowledgements) cost — for GB/T 13241's 180 min reduction hold that is
+                                              // neither accurate nor reproducible.
         let mut previous = Instant::now();
-        let mut deadline = previous + tick_period;
+        let mut deadline = previous + control_period;
 
         loop {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
             let now = Instant::now();
-            deadline = next_deadline(deadline, tick_period, now);
-            let dt = now.duration_since(previous).as_secs_f64() * sim_speed;
+            deadline = next_deadline(deadline, control_period, now);
+            let real_dt = now.duration_since(previous).as_secs_f64();
+            let dt = real_dt * sim_speed;
+            since_sample += real_dt;
             previous = now;
 
             if exp.stop.load(Ordering::Relaxed) {
@@ -855,17 +877,22 @@ fn spawn_experiment_task(
                 .current_stage()
                 .map(|s| kind_str(s.kind))
                 .unwrap_or_else(|| phase_str(engine.phase()));
-            buffer.push(build_sample(
-                &hub,
-                &id,
-                w0,
-                engine.total_elapsed_s(),
-                status,
-            ));
-            ticks_since_flush += 1;
-            if ticks_since_flush >= FLUSH_EVERY_TICKS {
+            // Sample on the configured cadence, and always once more on completion so the
+            // final weighing the GB analysis and the chart depend on is never dropped.
+            if since_sample >= sample_period_s || result.completed {
+                buffer.push(build_sample(
+                    &hub,
+                    &id,
+                    w0,
+                    engine.total_elapsed_s(),
+                    status,
+                ));
+                since_sample = 0.0;
+                samples_since_flush += 1;
+            }
+            if samples_since_flush >= FLUSH_EVERY_SAMPLES {
                 flush(&storage, &audit, &mut buffer, &id, &owner_display_name);
-                ticks_since_flush = 0;
+                samples_since_flush = 0;
             }
 
             if result.completed {
@@ -1019,9 +1046,15 @@ fn login(
     let outcome = state
         .auth
         .login(&lock(&state.storage), &username, &password, epoch_now());
-    // The attempted username is the operator here: a failed login has no session yet, and
-    // "who tried" is exactly what the trail needs. Passwords never reach the log.
+    // A rejected login has no session, so "who tried" — the attempted username — is the
+    // only attribution available. A successful one uses the authenticated display name, so
+    // it matches every other entry in the trail even when the account's display name
+    // differs from its username or the operator typed odd casing. Passwords never appear.
     let code = outcome.as_ref().err().map(|error| error.as_str());
+    let operator = match outcome.as_ref() {
+        Ok(user) => user.display_name.clone(),
+        Err(_) => username.clone(),
+    };
     state.audit.write(
         &AuditEntry::new(
             Category::Auth,
@@ -1032,7 +1065,7 @@ fn login(
                 AuditResult::Rejected
             },
         )
-        .operator(username.clone())
+        .operator(operator)
         .detail(serde_json::json!({ "username": username, "code": code })),
     );
     outcome.map_err(auth_error)?;
@@ -2320,6 +2353,8 @@ pub fn run() {
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
     let _ = std::fs::create_dir_all(&exports_dir);
+    // Pay the Argon2 cost once here, before any login can be attempted.
+    warm_password_hashing();
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let comm_config = load_comm_config();
     let hub = Arc::new(build_mock_hub(&comm_config));
@@ -2817,6 +2852,24 @@ mod tests {
         assert!(
             reducing_samples(&samples).is_empty(),
             "an all-offline reduction stage must yield no result instead of a fabricated one"
+        );
+    }
+
+    #[test]
+    fn a_slow_sampling_interval_never_slows_the_safety_loop() {
+        // The control loop evaluates the stop flag and the MFC/temperature offline abort,
+        // so tying its period to an operator-editable sampling interval would let a
+        // configured `SAMPLING.interval_s` of, say, 30 s delay cutting the gas by 30 s.
+        assert_eq!(
+            control_period(Duration::from_secs(30)),
+            CONTROL_TICK_MAX,
+            "a slow sampling cadence must not slow safety checks"
+        );
+        assert_eq!(control_period(Duration::from_secs(1)), CONTROL_TICK_MAX);
+        // A faster cadence than the cap is honoured as configured.
+        assert_eq!(
+            control_period(Duration::from_millis(200)),
+            Duration::from_millis(200)
         );
     }
 

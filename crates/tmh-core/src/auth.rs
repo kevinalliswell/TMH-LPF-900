@@ -121,6 +121,14 @@ pub fn verify_absent_user(candidate: &str) -> bool {
     verify_password(decoy_hash(), candidate)
 }
 
+/// Build the decoy hash up front. Call once during startup: otherwise the FIRST
+/// unknown-username login of the process pays a hash *and* a verification while a
+/// real account pays only the verification, and someone who can restart the app
+/// between probes could read account existence off that doubled latency.
+pub fn warm_password_hashing() {
+    let _ = decoy_hash();
+}
+
 pub fn new_user_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -164,6 +172,16 @@ mod tests {
             AuthError::InvalidPassword
         );
         validate_password("1234567890").unwrap();
+    }
+
+    #[test]
+    fn warming_makes_the_decoy_ready_before_the_first_login() {
+        warm_password_hashing();
+        assert!(decoy_hash().starts_with("$argon2id$"));
+        // Idempotent: the second call reuses the same hash rather than rebuilding it.
+        let first = decoy_hash();
+        warm_password_hashing();
+        assert_eq!(first, decoy_hash());
     }
 
     #[test]

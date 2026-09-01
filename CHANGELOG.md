@@ -30,7 +30,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - **锁定计数不清零（#46）**：账户锁定期满后失败计数归零，解锁后一次手误不再立即再锁 15 分钟。
 - `comm_config.json` 的 `SAMPLING.interval_s`、`PERFORMANCE_CONFIG.data_collection_interval`
   与 `heartbeat_timeout` 此前被解析后完全忽略，现分别驱动实验采样周期、遥测推送周期与前端
-  陈旧判定阈值；配置校验新增区间为正且有限的检查（#44 的一半）。
+  陈旧判定阈值；配置校验新增区间为正且有限的检查（#44 的一半）。控制回路的周期与采样周期
+  解耦并封顶 1 s：停止标志、总线掉线中断与阶段推进的响应速度不随现场配置的采样间隔变慢，
+  慢采样只是拉开数据行间距；完成时强制补一条采样，保证最后一次称量不丢。
 
 ### Security
 - 密码采用 Argon2id 随机盐哈希；连续 5 次失败锁定 15 分钟，账户仅软停用且最后一个管理员受保护。
