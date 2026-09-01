@@ -44,6 +44,24 @@ tmh-protocols (pure frame codecs, NO I/O — golden-tested against docs/golden_v
 - Audit log writes must never throw into control flow.
 - Zero setpoint always passes the clamp (emergency shutoff must never be blocked).
 
+## Adding or changing a Tauri command
+
+Tauri converts each command's argument key to lowerCamelCase unless the command declares
+`#[tauri::command(rename_all = "snake_case")]`. A mismatch is invisible to both test suites
+(the frontend tests run against the browser mock) and fails only at runtime, so:
+
+- keep multi-word parameters snake_case on both sides via `rename_all`, and
+- run `pnpm check:ipc-contract` (CI does) — it recomputes every expected key from the Rust
+  signatures and compares them with `src/ipc/index.ts`.
+
+Every protected command must also gain an authorization test. Authorization lives in the
+`current_user` / `current_admin` / `authorize_experiment` / `require_experiment_controller`
+helpers in `src-tauri/src/lib.rs`; the tests at the bottom of that file build a real
+`AppState` and assert the anonymous / owner / other-user / admin / locked matrix.
+
+Every audited action must name the operator who performed it (`.operator(...)`) — see
+docs/06 §6.5.
+
 ## Conventions
 
 - Conventional Commits: `feat(core):`, `fix(ui):`, `feat(protocols):`, `chore(release):`.
