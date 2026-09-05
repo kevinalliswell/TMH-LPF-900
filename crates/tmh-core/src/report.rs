@@ -6,19 +6,36 @@ use crate::storage::{ExperimentRow, SampleRow};
 use rust_xlsxwriter::{Format, Workbook, Worksheet, XlsxError};
 
 const COLUMNS:&str="时间,实验时长,温度(℃),质量(g),失重(g),CO(L/min),CO2(L/min),N2(L/min),H2(L/min),状态,数据质量,原始记录JSON,T1,T2,T3,T4,T5,T6,T7,T8,T9,H2_SV,N2_SV,CO2_SV,CO_SV";
+fn measurement_valid(row: &SampleRow, key: &str) -> bool {
+    if let Some(raw) = &row.record_json {
+        return serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|v| v["telemetry"]["health"][key].as_bool())
+            == Some(true);
+    }
+    let Some(message) = row.system_message.as_deref() else {
+        return true;
+    };
+    let balance = message.contains("天平");
+    let temp = message.contains("温度");
+    let mfc = message.contains("MFC") || message.contains("气体");
+    if !balance && !temp && !mfc {
+        return false;
+    }
+    match key {
+        "balance_valid" => !balance,
+        "temp_valid" => !temp,
+        "mfc_valid" => !mfc,
+        _ => false,
+    }
+}
+
 fn sample_fields(r: &SampleRow) -> Vec<String> {
     let record: serde_json::Value =
         serde_json::from_str(r.record_json.as_deref().unwrap_or("{}")).unwrap_or_default();
     let telemetry = &record["telemetry"];
-    let health = &telemetry["health"];
     let legacy = r.record_json.is_none();
-    let good = |k: &str| {
-        if legacy {
-            r.system_message.is_none()
-        } else {
-            health[k].as_bool() == Some(true)
-        }
-    };
+    let good = |k: &str| measurement_valid(r, k);
     let n = |v: f64, d: usize, valid: bool| {
         if valid && v.is_finite() {
             format!("{v:.d$}")
@@ -165,7 +182,12 @@ fn analysis_html(analysis: Option<&serde_json::Value>) -> String {
 
 /// Check each measured reduction point against the actual standard method.
 /// Averages never substitute for point-wise bounds; missing channel mapping is explicit.
-fn conditions_html(exp: &ExperimentRow, samples: &[SampleRow], target: Option<f64>) -> String {
+fn conditions_html(
+    exp: &ExperimentRow,
+    samples: &[SampleRow],
+    target: Option<f64>,
+    analysis: Option<&serde_json::Value>,
+) -> String {
     let red: Vec<_> = samples
         .iter()
         .filter(|r| r.experiment_status.as_deref() == Some("REDUCING"))
@@ -194,6 +216,53 @@ fn conditions_html(exp: &ExperimentRow, samples: &[SampleRow], target: Option<f6
         "FREE_SWELLING" => (900.0, 10.0, 1.0, [0.0, 70.0, 0.0, 30.0]),
         _ => return "<p>未知基础标准，不能自动判定条件。</p>".into(),
     };
+    let actual_minutes = red
+        .iter()
+        .filter_map(|r| {
+            r.record_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|v| v["stage_elapsed_s"].as_f64())
+        })
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .reduce(f64::max)
+        .map(|v| v / 60.0);
+    let expected_minutes = if method == "REDUCIBILITY" {
+        180.0
+    } else {
+        60.0
+    };
+    let runtime = analysis.and_then(|v| v.get("runtime_evidence"));
+    let skip = runtime
+        .and_then(|v| v["skipped"].as_bool())
+        .unwrap_or(false);
+    let duration = meta_row(
+        "还原时长",
+        &format!(
+            "实测 {}；基础国标 {} min{}",
+            actual_minutes
+                .map(|v| format!("{v:.2} min"))
+                .unwrap_or_else(|| "无阶段时间证据".into()),
+            expected_minutes,
+            if method == "FREE_SWELLING" {
+                "（标准允许的较短时长须说明依据）"
+            } else {
+                ""
+            }
+        ),
+    );
+    let skip_detail = meta_row(
+        "跳段及原因",
+        if skip {
+            runtime
+                .and_then(|v| v["skip_reason"].as_str())
+                .unwrap_or("已跳段，原因未记录")
+        } else if runtime.is_none() {
+            "旧记录：未保存跳段信息"
+        } else {
+            "未记录跳段"
+        },
+    );
     let mut bad_temp = 0;
     let mut bad_flow = 0;
     let mut bad_ratio = 0;
@@ -230,7 +299,7 @@ fn conditions_html(exp: &ExperimentRow, samples: &[SampleRow], target: Option<f6
     let custom = program
         .as_ref()
         .is_some_and(|p| p.source == crate::engine::ProgramSource::Custom);
-    format!("<p>{}</p><table class=\"kv\">{}{}{}{}{} </table><p>切换还原气前的基准称量不纳入气氛核查。本表仅核查已记录的 T8 与流量点；料层上、中、下测点对应、标态换算、气体纯度与校准记录须在人工补录及复核中确认。不能由统计结果推定全过程符合国标。</p>",
+    format!("<p>{}</p><table class=\"kv\">{duration}{skip_detail}{}{}{}{}{} </table><p>切换还原气前的基准称量不纳入气氛核查。本表仅核查已记录的 T8 与流量点；料层上、中、下测点对应、标态换算、气体纯度与校准记录须在人工补录及复核中确认。不能由统计结果推定全过程符合国标。</p>",
       if custom{"自定义实验：以下为相对基础国标的偏离核查"}else{"国标模板条件核查"},
       meta_row(&format!("T8 温度（{temperature}±{tolerance}℃）"),&format!("{} / {} 点超差；{}",bad_temp,red.len(),verdict(bad_temp))),
       meta_row(&format!("总流量（15±{flow_tolerance} L/min）"),&format!("{} 点；{}",bad_flow,verdict(bad_flow))),
@@ -287,14 +356,7 @@ fn svg_chart(samples: &[SampleRow]) -> String {
         let mut path = String::new();
         let mut connected = false;
         for (i, s) in samples.iter().enumerate() {
-            let raw: Option<serde_json::Value> = s
-                .record_json
-                .as_deref()
-                .and_then(|r| serde_json::from_str(r).ok());
-            let valid = raw
-                .as_ref()
-                .and_then(|v| v["telemetry"]["health"][field].as_bool())
-                .unwrap_or(s.system_message.is_none());
+            let valid = measurement_valid(s, field);
             if !valid || !f(s).is_finite() {
                 connected = false;
                 continue;
@@ -375,7 +437,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}\
         id = esc(&exp.experiment_id),
         meta = meta,
         analysis = analysis_html(analysis),
-        conditions = conditions_html(exp, samples, reducing_target),
+        conditions = conditions_html(exp, samples, reducing_target, analysis),
         report_details = report_details_html(analysis),
         chart = svg_chart(samples),
     )
@@ -574,5 +636,26 @@ mod tests {
         assert_eq!(fields[10], "天平离线");
         assert_eq!(fields[20], "9");
         assert!(samples_to_csv(&[r]).contains("\"\"telemetry\"\""));
+    }
+    #[test]
+    fn legacy_balance_failure_preserves_temperature_and_flow() {
+        let mut row = sample(900.0, 0.0);
+        row.system_message = Some("天平离线".into());
+        let fields = sample_fields(&row);
+        assert_eq!(fields[2], "900.0");
+        assert_eq!(fields[3], "");
+        assert_eq!(fields[5], "4.50");
+    }
+    #[test]
+    fn report_exposes_short_reduction_and_skip_reason() {
+        let mut row = reducing_sample(900.0, "00:30:00");
+        row.record_json=Some(serde_json::json!({"stage_elapsed_s":1800,"telemetry":{"health":{"temp_valid":true,"mfc_valid":true,"balance_valid":true}}}).to_string());
+        let a =
+            serde_json::json!({"runtime_evidence":{"skipped":true,"skip_reason":"操作员提前取样"}});
+        let html = render_report_html(&exp(), &[row], Some(&a), Some(900.0));
+        assert!(html.contains("还原时长"));
+        assert!(html.contains("30.00 min"));
+        assert!(html.contains("180 min"));
+        assert!(html.contains("操作员提前取样"));
     }
 }

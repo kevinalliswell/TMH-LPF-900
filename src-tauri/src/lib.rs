@@ -997,8 +997,7 @@ fn spawn_experiment_task(
                             *raw = value.to_string();
                         }
                         let saved = lock(&storage).patch_runtime_metadata(&id, &serde_json::json!({
-                            "reduction_m1": if baseline.system_message.is_none() { Some(baseline.weight) } else { None },
-                            "reduction_start_s": engine.total_elapsed_s()
+                            "reduction_m1": if baseline.system_message.is_none() { Some(baseline.weight) } else { None }
                         }).to_string());
                         if saved.is_err() || baseline.system_message.is_some() {
                             exp.stop.store(true, Ordering::Relaxed);
@@ -1032,11 +1031,21 @@ fn spawn_experiment_task(
                         );
                         break;
                     }
+                    let confirmed_at = Instant::now();
+                    let switching_s = confirmed_at.duration_since(now).as_secs_f64() * sim_speed;
+                    let reducing = s.kind == StageKind::Reducing;
+                    let stage_name = s.name.clone();
+                    engine.confirm_stage_started(switching_s);
+                    previous = confirmed_at;
+                    deadline = previous + control_period;
+                    if reducing && lock(&storage).patch_runtime_metadata(&id,&serde_json::json!({"reduction_start_s":engine.total_elapsed_s(),"gas_switch_confirmed_at":iso_now(),"gas_switch_delay_s":switching_s}).to_string()).is_err() {
+                        exp.stop.store(true,Ordering::SeqCst);continue;
+                    }
                     audit.write(
                         &AuditEntry::new(Category::Experiment, "stage_enter", AuditResult::Success)
                             .operator(owner_display_name.clone())
                             .detail(serde_json::json!({
-                                "id": id, "stage": engine.stage_index(), "name": s.name
+                                "id": id, "stage": engine.stage_index(), "name": stage_name
                             })),
                     );
                 }
