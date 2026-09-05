@@ -8,6 +8,9 @@ use serde::Serialize;
 /// Per-device connectivity for the combined snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceHealth {
+    pub temp_valid: bool,
+    pub mfc_valid: bool,
+    pub balance_valid: bool,
     pub temp_connected: bool,
     pub mfc_connected: bool,
     pub balance_connected: bool,
@@ -36,6 +39,9 @@ pub fn aggregate(
         gas: mfc.gas,
         weight: balance.weight,
         health: DeviceHealth {
+            temp_valid: temp.is_fresh(std::time::Instant::now()),
+            mfc_valid: mfc.is_fresh(std::time::Instant::now()),
+            balance_valid: balance.is_fresh(std::time::Instant::now()),
             temp_connected: temp.connected,
             mfc_connected: mfc.connected,
             balance_connected: balance.connected,

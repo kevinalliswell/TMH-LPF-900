@@ -8,14 +8,17 @@ import {
   getExperimentDetail,
   getExperimentSamples,
   listExperiments,
+  listUsers,
+  setExperimentOwner,
 } from "../../ipc";
-import type { ExperimentDetail, ExperimentSummary, SampleDto } from "../../ipc/types";
+import type { ExperimentDetail, ExperimentSummary, PublicUser, SampleDto } from "../../ipc/types";
 import { toastError, useToasts } from "../../stores/toast";
 import { Modal } from "../../components/Modal";
 import { SectionTitle } from "../../components/Page";
 import { ProgramPreview } from "../experiment/ProgramPreview";
 import { AnalyzePanel } from "./AnalyzePanel";
 import { HistoryChart } from "./HistoryChart";
+import { useAuth } from "../../stores/auth";
 
 const modeName = (id?: string | null) =>
   EXPERIMENT_MODES.find((m) => m.id === id)?.name ?? id ?? "—";
@@ -39,7 +42,13 @@ export function HistoryView() {
   const [samples, setSamples] = useState<SampleDto[]>([]);
   const [confirmDel, setConfirmDel] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [users, setUsers] = useState<PublicUser[]>([]);
   const push = useToasts((s) => s.push);
+  const isAdmin = useAuth((s) => s.snapshot?.user?.role === "ADMIN");
+
+  useEffect(() => {
+    if (isAdmin) void listUsers().then(setUsers).catch(toastError);
+  }, [isAdmin]);
 
   useEffect(() => {
     listExperiments()
@@ -160,16 +169,18 @@ export function HistoryView() {
             <div className="panel p-4">
               <div className="flex items-start justify-between">
                 <div className="text-[15px] font-semibold">{detail.sample_name}</div>
-                <button
+                {isAdmin && <button
                   onClick={() => setConfirmDel(true)}
                   className="px-2.5 py-1 rounded text-[12px]"
                   style={{ background: "var(--panel-2)", border: "1px solid var(--danger)", color: "var(--danger)" }}
                 >
                   删除
-                </button>
+                </button>}
               </div>
               <div className="grid grid-cols-4 gap-4 mt-3">
                 <Meta label="实验编号" value={detail.experiment_id} />
+                <Meta label="样品编号" value={detail.sample_id ?? "—"} />
+                <Meta label="项目名称" value={detail.project_name ?? "—"} />
                 <Meta label="模式" value={modeName(detail.experiment_type)} />
                 <Meta label="操作员" value={detail.operator ?? "—"} />
                 <Meta label="样品重量" value={`${detail.sample_weight} g`} />
@@ -177,6 +188,7 @@ export function HistoryView() {
                 <Meta label="结束时间" value={fmtTime(detail.end_time)} />
                 <Meta label="采样点数" value={String(detail.sample_count)} />
                 <Meta label="备注" value={detail.description ?? "—"} />
+                {isAdmin && <label className="flex flex-col gap-0.5 text-[11px]" style={{ color: "var(--fg-faint)" }}>数据归属<select value={detail.owner_user_id ?? ""} onChange={async (event) => { try { await setExperimentOwner(detail.experiment_id, event.target.value || null); loadDetail(detail.experiment_id); void refreshList(); } catch (cause) { toastError(cause); } }} className="mt-0.5 px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--border)" }}><option value="">未归属（仅管理员）</option>{users.filter((user) => user.is_active).map((user) => <option key={user.user_id} value={user.user_id}>{user.display_name}（{user.username}）</option>)}</select></label>}
               </div>
               <div
                 className="flex gap-2 mt-4 pt-3"

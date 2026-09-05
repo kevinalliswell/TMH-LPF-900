@@ -6,40 +6,50 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ClampResult,
-  AdminAuthStatus,
-  CommConfigDto,
   ExperimentDetail,
   ExperimentParams,
-  ExperimentPreflightResult,
-  ExperimentStartDefaults,
   ExperimentState,
   ExperimentSummary,
   GasLimits,
+  RuntimeSettings,
   ProgramDto,
+  ExperimentPreflightResult,
+  ExperimentStartDefaults,
   SampleDto,
   TareResult,
   TelemetrySnapshot,
   UpdateCheck,
+  AuthSnapshot,
+  PublicUser,
+  UserRole,
 } from "./types";
+import {
+  mockAuthState,
+  mockBootstrapAdmin,
+  mockChangePassword,
+  mockCreateUser,
+  mockListUsers,
+  mockLock,
+  mockLogin,
+  mockLogout,
+  mockResetPassword,
+  mockUpdateUser,
+} from "./authMock";
 import {
   mockAnalyze13240,
   mockAnalyze13241,
   mockAnalyze13242,
-  mockChangeAdminPassword,
-  mockGenerateSampleId,
-  mockGetAdminAuthStatus,
-  mockGetCommConfig,
-  mockGetExperimentStartDefaults,
-  mockDeleteCustomProgram,
   mockDeleteExperiment,
   mockExportText,
   mockGetExperimentDetail,
   mockGetExperimentSamples,
   mockListExperiments,
   mockListPrograms,
-  mockPreflightExperiment,
   mockSaveCustomProgram,
-  mockUpdateCommConfig,
+  mockDeleteCustomProgram,
+  mockPreflightExperiment,
+  mockGenerateSampleId,
+  mockGetExperimentStartDefaults,
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
@@ -47,6 +57,7 @@ import {
   mockSkipStage,
   mockStartExperiment,
   mockStopExperiment,
+  mockSetExperimentOwner,
   mockSubscribeExperiment,
   mockTare,
   mockTelemetry,
@@ -56,6 +67,107 @@ export * from "./types";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function getAuthState(): Promise<AuthSnapshot> {
+  return isTauri() ? invoke("get_auth_state") : mockAuthState();
+}
+
+export async function bootstrapAdmin(
+  username: string,
+  displayName: string,
+  password: string,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("bootstrap_admin", { username, display_name: displayName, password })
+    : mockBootstrapAdmin(username, displayName, password);
+}
+
+export async function login(username: string, password: string): Promise<AuthSnapshot> {
+  return isTauri() ? invoke("login", { username, password }) : mockLogin(username, password);
+}
+
+export async function logout(): Promise<void> {
+  if (isTauri()) await invoke("logout");
+  else mockLogout();
+}
+
+export async function lockSession(): Promise<void> {
+  if (isTauri()) await invoke("lock_session");
+  else mockLock();
+}
+
+export async function touchSession(): Promise<void> {
+  if (isTauri()) await invoke("touch_session");
+}
+
+export async function emergencySafeShutdown(): Promise<void> {
+  if (isTauri()) await invoke("emergency_safe_shutdown");
+  else mockShutoff();
+}
+
+export async function changeOwnPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  if (isTauri()) {
+    await invoke("change_own_password", {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  } else mockChangePassword(currentPassword, newPassword);
+}
+
+export async function listUsers(): Promise<PublicUser[]> {
+  return isTauri() ? invoke("list_users") : mockListUsers();
+}
+
+export async function createUser(
+  username: string,
+  displayName: string,
+  temporaryPassword: string,
+  role: UserRole,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("create_user", {
+        username,
+        display_name: displayName,
+        temporary_password: temporaryPassword,
+        role,
+      })
+    : mockCreateUser(username, displayName, temporaryPassword, role);
+}
+
+export async function updateUser(
+  userId: string,
+  displayName: string,
+  role: UserRole,
+  isActive: boolean,
+): Promise<PublicUser> {
+  return isTauri()
+    ? invoke("update_user", {
+        user_id: userId,
+        display_name: displayName,
+        role,
+        is_active: isActive,
+      })
+    : mockUpdateUser(userId, displayName, role, isActive);
+}
+
+export async function resetUserPassword(userId: string, temporaryPassword: string): Promise<void> {
+  if (isTauri()) await invoke("reset_user_password", { user_id: userId, temporary_password: temporaryPassword });
+  else mockResetPassword(userId, temporaryPassword);
+}
+
+export async function setExperimentOwner(
+  experimentId: string,
+  ownerUserId: string | null,
+): Promise<void> {
+  if (!isTauri()) return void mockSetExperimentOwner(experimentId, ownerUserId);
+  await invoke("set_experiment_owner", {
+    experiment_id: experimentId,
+    owner_user_id: ownerUserId,
+  });
 }
 
 export type RuntimeMode = "real" | "mock" | "replay" | "web";
@@ -75,23 +187,16 @@ export async function getGasSafetyLimits(): Promise<GasLimits> {
   return isTauri() ? invoke("get_gas_safety_limits") : { h2: 5, co: 5 };
 }
 
-export async function getCommConfig(): Promise<CommConfigDto> {
-  return isTauri() ? invoke("get_comm_config") : mockGetCommConfig();
-}
-
-export async function getAdminAuthStatus(): Promise<AdminAuthStatus> {
-  return isTauri() ? invoke("get_admin_auth_status") : mockGetAdminAuthStatus();
-}
-
-export async function changeAdminPassword(oldPassword: string, newPassword: string): Promise<void> {
-  if (!isTauri()) return void mockChangeAdminPassword(oldPassword, newPassword);
-  await invoke("change_admin_password", { old_password: oldPassword, new_password: newPassword });
-}
-
-export async function updateCommConfig(config: CommConfigDto, password: string): Promise<CommConfigDto> {
+/** Cadences from the backend's loaded config; the browser mock mirrors docs/06 §6.3. */
+export async function getRuntimeSettings(): Promise<RuntimeSettings> {
   return isTauri()
-    ? invoke("update_comm_config", { config, password })
-    : mockUpdateCommConfig(config, password);
+    ? invoke("get_runtime_settings")
+    : {
+        sampling_interval_s: 1,
+        telemetry_interval_s: 0.2,
+        heartbeat_timeout_s: 5,
+        idle_timeout_s: 900,
+      };
 }
 
 export async function setGasFlow(gas: number, value: number): Promise<ClampResult> {
@@ -126,31 +231,6 @@ export async function startExperiment(params: ExperimentParams): Promise<string>
   return isTauri() ? invoke("start_experiment", { params }) : mockStartExperiment(params);
 }
 
-export async function preflightExperiment(
-  params: ExperimentParams,
-): Promise<ExperimentPreflightResult> {
-  return isTauri()
-    ? invoke("preflight_experiment", { params })
-    : mockPreflightExperiment(params);
-}
-
-export async function generateSampleId(
-  programId: string,
-  experimentTime: string,
-): Promise<string> {
-  return isTauri()
-    ? invoke("generate_sample_id", { program_id: programId, experiment_time: experimentTime })
-    : mockGenerateSampleId(programId, experimentTime);
-}
-
-export async function getExperimentStartDefaults(
-  programId: string,
-): Promise<ExperimentStartDefaults> {
-  return isTauri()
-    ? invoke("get_experiment_start_defaults", { program_id: programId })
-    : mockGetExperimentStartDefaults(programId);
-}
-
 export async function stopExperiment(reason: string): Promise<void> {
   if (!isTauri()) return void mockStopExperiment();
   await invoke("stop_experiment", { reason });
@@ -163,17 +243,6 @@ export async function skipStage(reason: string): Promise<void> {
 
 export async function listPrograms(): Promise<ProgramDto[]> {
   return isTauri() ? invoke("list_programs") : mockListPrograms();
-}
-
-export async function saveCustomProgram(program: ProgramDto): Promise<ProgramDto> {
-  return isTauri()
-    ? invoke("save_custom_program", { program })
-    : mockSaveCustomProgram(program);
-}
-
-export async function deleteCustomProgram(id: string): Promise<void> {
-  if (!isTauri()) return void mockDeleteCustomProgram(id);
-  await invoke("delete_custom_program", { id });
 }
 
 export async function listExperiments(): Promise<ExperimentSummary[]> {
@@ -264,7 +333,7 @@ export async function exportExperiment(id: string, format: ExportFormat): Promis
   downloadBlob(mockExportText(id, sep), `${id}.${ext}`, "text/plain;charset=utf-8");
 }
 
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.2.0";
 
 export async function getUpdaterStatus(): Promise<UpdateCheck> {
   return isTauri()
@@ -322,4 +391,40 @@ export function subscribeTelemetry(cb: (s: TelemetrySnapshot) => void): () => vo
     // Tell the backend to stop the pump thread — nulling onmessage alone leaks it (#8).
     void invoke("unsubscribe_telemetry");
   };
+}
+
+export async function saveCustomProgram(program: ProgramDto): Promise<ProgramDto> {
+  return isTauri()
+    ? invoke("save_custom_program", { program })
+    : mockSaveCustomProgram(program);
+}
+
+export async function deleteCustomProgram(id: string): Promise<void> {
+  if (!isTauri()) return void mockDeleteCustomProgram(id);
+  await invoke("delete_custom_program", { id });
+}
+
+export async function preflightExperiment(
+  params: ExperimentParams,
+): Promise<ExperimentPreflightResult> {
+  return isTauri()
+    ? invoke("preflight_experiment", { params })
+    : mockPreflightExperiment(params);
+}
+
+export async function generateSampleId(
+  programId: string,
+  experimentTime: string,
+): Promise<string> {
+  return isTauri()
+    ? invoke("generate_sample_id", { program_id: programId, experiment_time: experimentTime })
+    : mockGenerateSampleId(programId, experimentTime);
+}
+
+export async function getExperimentStartDefaults(
+  programId: string,
+): Promise<ExperimentStartDefaults> {
+  return isTauri()
+    ? invoke("get_experiment_start_defaults", { program_id: programId })
+    : mockGetExperimentStartDefaults(programId);
 }

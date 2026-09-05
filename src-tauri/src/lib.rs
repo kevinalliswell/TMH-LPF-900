@@ -4,17 +4,20 @@
 //! the furnace through its program stages, applies each stage's atmosphere through the
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
-mod auth;
+mod auth_service;
+mod auth_session;
 
-use std::path::{Path, PathBuf};
+use auth_service::{AuthCode, AuthService, AuthSnapshot, AuthStatus, PublicUser};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
+use tmh_core::auth::{hash_password, validate_display_name, warm_password_hashing, UserRole};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
@@ -24,16 +27,32 @@ use tmh_core::engine::{
 };
 use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
 use tmh_core::sampler::{build_sample_row, SampleContext};
-use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
+use tmh_core::storage::{ExperimentRow, SampleRow, Storage, UserRow};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
 use tmh_core::transport::MockTransport;
+
+// IPC argument names: Tauri derives each command's argument key from the Rust parameter
+// name and converts it to lowerCamelCase unless the command opts out with
+// `rename_all = "snake_case"`. Every command below that takes a multi-word parameter
+// carries that attribute so the key stays snake_case on both sides of the boundary, and
+// `scripts/check-ipc-contract.mjs` fails the build if the two ever drift apart (#40).
 
 /// Number of gas channels (order: H2, N2, CO2, CO).
 const GAS_COUNT: usize = 4;
 /// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
 const MOCK_REDUCTION_LOSS: f64 = 0.12;
-/// Flush buffered samples to SQLite every N ticks.
-const FLUSH_EVERY_TICKS: u32 = 5;
+/// Flush buffered samples to SQLite every N samples.
+const FLUSH_EVERY_SAMPLES: u32 = 5;
+/// Upper bound on one control-loop tick, independent of the configured sampling interval.
+/// The loop that evaluates the stop flag, the bus-offline abort and stage transitions must
+/// stay responsive: a site that configures a slow `SAMPLING.interval_s` may space out its
+/// data rows, but must never delay cutting the gas when a safety-critical bus drops.
+const CONTROL_TICK_MAX: Duration = Duration::from_secs(1);
+/// Cap on buffered-but-unwritten sample rows (~33 min at 1 Hz). If SQLite keeps rejecting
+/// writes, the buffer must not grow without bound for the length of a multi-hour run (#47).
+const MAX_BUFFERED_SAMPLES: usize = 2000;
+/// Re-audit a persistent flush failure every N attempts (the first failure always audits).
+const FLUSH_FAILURE_AUDIT_EVERY: u32 = 12;
 
 /// Lock a mutex tolerating poisoning: a panic while the lock was held must not turn every
 /// later command into a panic (our guarded data stays consistent across such panics) (#14).
@@ -49,21 +68,48 @@ struct AppState {
     limit_co: f64,
     audit: Arc<AuditLog>,
     storage: Arc<Mutex<Storage>>,
+    auth: Arc<AuthService>,
     exp: Arc<ExpControl>,
     /// Simulated-seconds advanced per real second (mock time acceleration; 1.0 = real).
     sim_speed: f64,
     /// Directory reports and data exports are written to.
     exports_dir: PathBuf,
-    /// Operator-defined experiment modes live here as JSON.
-    custom_modes_path: PathBuf,
-    /// Communication config currently loaded at startup and edited by the settings page.
-    comm_config_path: PathBuf,
-    /// Administrator password hash file.
-    auth_path: PathBuf,
     /// Software-update checking (docs/09 §9.3): OFF by default, enabled via config/env.
     updater_enabled: bool,
     /// Bumped on each (un)subscribe so a stale telemetry pump thread exits (issue #8).
     telemetry_gen: Arc<AtomicU64>,
+    /// Cadences from `comm_config.json` (docs/06 §6.3). These used to be hardcoded, so
+    /// edits to the field config were silently ignored (#44).
+    cadence: Cadence,
+    /// Idle lock timeout for the session, in seconds (#46).
+    idle_timeout_s: i64,
+}
+
+/// Configured cadences (docs/06 §6.3 / §6.4).
+#[derive(Clone, Copy)]
+struct Cadence {
+    /// `SAMPLING.interval_s` — one experiment sample row per period.
+    sampling: Duration,
+    /// `PERFORMANCE_CONFIG.data_collection_interval` — telemetry aggregation to the UI.
+    telemetry: Duration,
+    /// `PERFORMANCE_CONFIG.heartbeat_timeout` — the UI greys a snapshot older than this.
+    heartbeat_timeout_s: f64,
+}
+
+impl Cadence {
+    fn from_config(cfg: &CommConfig) -> Self {
+        Self {
+            sampling: seconds(cfg.sampling.interval_s),
+            telemetry: seconds(cfg.performance.data_collection_interval),
+            heartbeat_timeout_s: cfg.performance.heartbeat_timeout,
+        }
+    }
+}
+
+/// Config seconds → `Duration`, floored at 10 ms so a bad value can never spin a loop.
+/// `CommConfig::validate` already rejects non-positive cadences; this is the second line.
+fn seconds(value: f64) -> Duration {
+    Duration::from_secs_f64(value.max(0.01))
 }
 
 /// Shared control block for the single running experiment. `status` is the published
@@ -73,7 +119,6 @@ struct ExpControl {
     status: Mutex<ExperimentStatus>,
     stop: AtomicBool,
     skip: AtomicBool,
-    skip_reason: Mutex<Option<String>>,
 }
 
 impl ExpControl {
@@ -82,7 +127,6 @@ impl ExpControl {
             status: Mutex::new(ExperimentStatus::idle()),
             stop: AtomicBool::new(false),
             skip: AtomicBool::new(false),
-            skip_reason: Mutex::new(None),
         }
     }
     fn snapshot(&self) -> ExperimentStatus {
@@ -114,6 +158,10 @@ struct ExperimentStatus {
     tolerance: f64,
     stage_elapsed_s: f64,
     total_elapsed_s: f64,
+    owner_user_id: Option<String>,
+    owner_display_name: Option<String>,
+    can_control: bool,
+    occupied_by_other: bool,
 }
 
 impl ExperimentStatus {
@@ -133,6 +181,10 @@ impl ExperimentStatus {
             tolerance: 0.0,
             stage_elapsed_s: 0.0,
             total_elapsed_s: 0.0,
+            owner_user_id: None,
+            owner_display_name: None,
+            can_control: false,
+            occupied_by_other: false,
         }
     }
 
@@ -151,9 +203,7 @@ struct ExperimentParams {
     sample_id: String,
     sample_name: String,
     sample_weight: f64,
-    operator: String,
     experiment_type: String,
-    experiment_time: Option<String>,
     project_name: Option<String>,
     notes: Option<String>,
 }
@@ -162,8 +212,112 @@ fn iso_now() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
+fn epoch_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn auth_error(code: AuthCode) -> String {
+    code.to_string()
+}
+
+fn current_user(state: &AppState) -> Result<UserRow, String> {
+    let storage = lock(&state.storage);
+    state
+        .auth
+        .require_user(&storage, epoch_now())
+        .map_err(auth_error)
+}
+
+/// Display name of the session user, for audit attribution. Reads the session WITHOUT
+/// touching its idle deadline, so auditing an action never keeps a session alive, and
+/// falls back to "anonymous" for the unauthenticated safety commands. Every audited action
+/// must name who performed it — on a shared instrument the audit trail is the only record
+/// of who opened the flammable gases (docs/06 §6.5, #41).
+fn audit_operator(state: &AppState) -> String {
+    state
+        .auth
+        .snapshot(&lock(&state.storage), epoch_now())
+        .ok()
+        .and_then(|snapshot| snapshot.user)
+        .map(|user| user.display_name)
+        .unwrap_or_else(|| "anonymous".to_string())
+}
+
+fn current_admin(state: &AppState) -> Result<UserRow, String> {
+    let storage = lock(&state.storage);
+    state
+        .auth
+        .require_admin(&storage, epoch_now())
+        .map_err(auth_error)
+}
+
+fn authorize_experiment(
+    state: &AppState,
+    id: &str,
+    user: &UserRow,
+) -> Result<ExperimentRow, String> {
+    let row = lock(&state.storage)
+        .get_experiment(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "实验不存在".to_string())?;
+    if may_access_experiment(user.role, &user.user_id, row.owner_user_id.as_deref()) {
+        Ok(row)
+    } else {
+        Err(AuthCode::Forbidden.to_string())
+    }
+}
+
+fn may_access_experiment(role: UserRole, user_id: &str, owner_user_id: Option<&str>) -> bool {
+    role.is_admin() || owner_user_id == Some(user_id)
+}
+
+fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
+    let user = current_user(state)?;
+    let status = state.exp.snapshot();
+    if !status.running
+        || user.role.is_admin()
+        || status.owner_user_id.as_deref() == Some(user.user_id.as_str())
+    {
+        Ok(user)
+    } else {
+        Err(AuthCode::Forbidden.to_string())
+    }
+}
+
+fn redact_experiment_status(
+    mut status: ExperimentStatus,
+    role: UserRole,
+    user_id: &str,
+) -> ExperimentStatus {
+    let owns = status.owner_user_id.as_deref() == Some(user_id);
+    status.can_control = role.is_admin() || owns;
+    status.occupied_by_other = status.running && !status.can_control;
+    if status.occupied_by_other {
+        status.sample_name = None;
+        status.owner_user_id = None;
+        status.owner_display_name = None;
+    }
+    status
+}
+
+/// Emit only a view authorized for the session that is active at emission time. Snapshotting
+/// does not touch the idle deadline, so a running experiment cannot keep a user logged in.
+fn emit_experiment_status(app: &AppHandle, status: &ExperimentStatus) {
+    let state = app.state::<AppState>();
+    let snapshot = state.auth.snapshot(&lock(&state.storage), epoch_now()).ok();
+    if let Some(snapshot) = snapshot {
+        if matches!(snapshot.status, AuthStatus::Authenticated) {
+            if let Some(user) = snapshot.user {
+                let visible = redact_experiment_status(status.clone(), user.role, &user.user_id);
+                let _ = app.emit("experiment-state-changed", visible);
+            }
+        }
+    }
+}
+
+/// Phase → stable string for the `experiment_status` sample column.
 fn custom_program_id() -> String {
-    format!("custom-{}", chrono::Local::now().format("%Y%m%d%H%M%S%3f"))
+    format!("custom-{}", tmh_core::auth::new_user_id())
 }
 
 fn clean_opt(value: Option<String>) -> Option<String> {
@@ -213,35 +367,17 @@ fn normalize_custom_program(program: &mut Program) {
     }
 }
 
-fn read_custom_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            if text.trim().is_empty() {
-                return Ok(Vec::new());
-            }
-            let mut programs: Vec<Program> = serde_json::from_str(&text)
-                .map_err(|e| format!("自定义实验模式文件解析失败: {e}"))?;
-            programs.retain(|p| p.source == ProgramSource::Custom);
-            for p in &mut programs {
-                normalize_custom_program(p);
-                validate_program(p)?;
-            }
-            Ok(programs)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("读取自定义实验模式失败: {e}")),
-    }
-}
-
-fn write_custom_programs(path: &PathBuf, programs: &[Program]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建模式配置目录失败: {e}"))?;
-    }
-    let json = serde_json::to_string_pretty(programs).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("写入自定义实验模式失败: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("保存自定义实验模式失败: {e}"))?;
-    Ok(())
+fn read_custom_programs(storage: &Storage) -> Result<Vec<Program>, String> {
+    storage
+        .list_custom_programs()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|json| {
+            let p: Program = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            validate_program(&p)?;
+            Ok(p)
+        })
+        .collect()
 }
 
 fn standard_programs() -> Vec<Program> {
@@ -251,9 +387,9 @@ fn standard_programs() -> Vec<Program> {
         .collect()
 }
 
-fn all_programs(path: &PathBuf) -> Result<Vec<Program>, String> {
+fn all_programs(storage: &Storage) -> Result<Vec<Program>, String> {
     let mut programs = standard_programs();
-    programs.extend(read_custom_programs(path)?);
+    programs.extend(read_custom_programs(storage)?);
     Ok(programs)
 }
 
@@ -261,7 +397,7 @@ fn program_by_id(state: &AppState, id: &str) -> Result<Program, String> {
     if let Some(p) = standard_program(id) {
         return Ok(p);
     }
-    read_custom_programs(&state.custom_modes_path)?
+    read_custom_programs(&lock(&state.storage))?
         .into_iter()
         .find(|p| p.id == id)
         .ok_or_else(|| "未知实验模式".to_string())
@@ -319,13 +455,37 @@ fn kind_str(k: StageKind) -> &'static str {
     }
 }
 
+/// Default session idle-lock timeout (docs/superpowers spec: 15 minutes).
+const DEFAULT_IDLE_TIMEOUT_S: i64 = 15 * 60;
+
+/// Session idle-lock timeout: `TMH_IDLE_TIMEOUT_S` if set, else the 15-minute default.
+/// Clamped to [1 min, 8 h] so neither a typo nor a hostile value disables the lock or
+/// makes the app unusable (#46).
+fn idle_timeout_s() -> i64 {
+    std::env::var("TMH_IDLE_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.clamp(60, 8 * 60 * 60))
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_S)
+}
+
 /// Simulated-time acceleration: `TMH_SIM_SPEED` if set, else fast for mock, real (1.0)
 /// for hardware. Mock runs at 180× so a multi-hour program plays out in a few minutes.
+fn validate_runtime_mode(mode: &str) -> Result<(), String> {
+    if mode == "mock" {
+        Ok(())
+    } else {
+        Err(format!(
+            "当前版本仅支持 mock；{mode:?} 尚未接入，拒绝以模拟设备冒充该模式"
+        ))
+    }
+}
+
 fn sim_speed(mode: &str) -> f64 {
     std::env::var("TMH_SIM_SPEED")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| *v > 0.0)
+        .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
 }
 
@@ -333,18 +493,15 @@ fn sim_speed(mode: &str) -> f64 {
 /// external config file is present or it fails to load. Kept in sync with docs/06 §6.4.
 const DEFAULT_COMM_CONFIG: &str = include_str!("../../config/comm_config.json");
 
-fn comm_config_path() -> PathBuf {
-    std::env::var("TMH_COMM_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"))
-}
-
 /// Load + validate the comm config (docs/06 §6.4) so the safety limits, MFC slave
 /// addresses and flow scaling come from the file (issue #11). Resolution order:
 /// `TMH_COMM_CONFIG` env override, else `config/comm_config.json` in the working dir;
 /// on any failure fall back to the compiled-in default so the app still runs (mock).
-fn load_comm_config_from(path: &Path) -> CommConfig {
-    match CommConfig::load(path) {
+fn load_comm_config() -> CommConfig {
+    let path = std::env::var("TMH_COMM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"));
+    match CommConfig::load(&path) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!(
@@ -431,6 +588,8 @@ fn status_running(
     mode: &str,
     sample: &str,
     started: &str,
+    owner_user_id: &str,
+    owner_display_name: &str,
 ) -> ExperimentStatus {
     let stage = engine.current_stage();
     ExperimentStatus {
@@ -448,23 +607,118 @@ fn status_running(
         tolerance: stage.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: engine.stage_elapsed_s(),
         total_elapsed_s: engine.total_elapsed_s(),
+        owner_user_id: Some(owner_user_id.to_string()),
+        owner_display_name: Some(owner_display_name.to_string()),
+        can_control: true,
+        occupied_by_other: false,
     }
 }
 
-/// Flush buffered samples in one transaction. On error the buffer is retained for retry;
-/// sampling must never take down the control loop.
-fn flush(storage: &Arc<Mutex<Storage>>, buffer: &mut Vec<SampleRow>) {
-    if buffer.is_empty() {
+/// Buffered sample rows plus the bookkeeping needed to report persistent write failures.
+#[derive(Default)]
+struct SampleBuffer {
+    rows: Vec<SampleRow>,
+    consecutive_failures: u32,
+    dropped: u64,
+}
+
+impl SampleBuffer {
+    /// Append a row, discarding the oldest rows once the cap is reached so a run that
+    /// cannot write to SQLite degrades to "loses the oldest samples" instead of growing
+    /// its buffer for hours (#47).
+    fn push(&mut self, row: SampleRow) {
+        if self.rows.len() >= MAX_BUFFERED_SAMPLES {
+            let excess = self.rows.len() + 1 - MAX_BUFFERED_SAMPLES;
+            self.rows.drain(..excess);
+            self.dropped += excess as u64;
+        }
+        self.rows.push(row);
+    }
+}
+
+/// Flush buffered samples in one transaction. On error the rows are retained for retry and
+/// the failure is audited — losing a whole run's samples silently is far worse than a noisy
+/// log. Sampling must never take down the control loop, so nothing here propagates.
+///
+/// Uses the poison-tolerant [`lock`] helper: a panic elsewhere while the storage lock was
+/// held used to stop persistence for the rest of the run without any signal (#47).
+fn flush(
+    storage: &Arc<Mutex<Storage>>,
+    audit: &AuditLog,
+    buffer: &mut SampleBuffer,
+    id: &str,
+    operator: &str,
+) {
+    if buffer.rows.is_empty() {
         return;
     }
-    if let Ok(mut s) = storage.lock() {
-        if s.insert_samples(buffer).is_ok() {
-            buffer.clear();
+    let outcome = lock(storage).insert_samples(&buffer.rows);
+    match outcome {
+        Ok(()) => {
+            if buffer.consecutive_failures > 0 {
+                audit.write(
+                    &AuditEntry::new(
+                        Category::Experiment,
+                        "sample_flush_recovered",
+                        AuditResult::Success,
+                    )
+                    .operator(operator.to_string())
+                    .detail(serde_json::json!({
+                        "id": id, "rows": buffer.rows.len(), "dropped_samples": buffer.dropped
+                    })),
+                );
+            }
+            buffer.rows.clear();
+            buffer.consecutive_failures = 0;
+        }
+        Err(error) => {
+            buffer.consecutive_failures = buffer.consecutive_failures.saturating_add(1);
+            if buffer.consecutive_failures == 1
+                || buffer.consecutive_failures % FLUSH_FAILURE_AUDIT_EVERY == 0
+            {
+                audit.write(
+                    &AuditEntry::new(
+                        Category::Experiment,
+                        "sample_flush_failed",
+                        AuditResult::Failure,
+                    )
+                    .operator(operator.to_string())
+                    .detail(serde_json::json!({
+                        "id": id,
+                        "buffered": buffer.rows.len(),
+                        "dropped_samples": buffer.dropped,
+                        "attempts": buffer.consecutive_failures,
+                        "error": error.to_string(),
+                    })),
+                );
+            }
         }
     }
 }
 
+/// Advance a fixed-period schedule. Normally the next wake-up is exactly one period after
+/// the previous one, which keeps the cadence free of drift; if the thread was starved for
+/// longer than a whole period (suspend/resume, a very slow write) we resynchronise rather
+/// than firing a burst of back-to-back ticks to catch up (#43).
+/// Control-loop period for a configured sampling interval: never slower than
+/// [`CONTROL_TICK_MAX`], so the stop flag, the bus-offline abort and stage advancement stay
+/// responsive no matter what cadence `SAMPLING.interval_s` asks for. A faster configured
+/// cadence is honoured as-is and samples every tick.
+fn control_period(sample_period: Duration) -> Duration {
+    sample_period.min(CONTROL_TICK_MAX)
+}
+
+fn next_deadline(previous: Instant, period: Duration, now: Instant) -> Instant {
+    let next = previous + period;
+    if next > now {
+        next
+    } else {
+        now + period
+    }
+}
+
 /// Publish + emit the current running status.
+#[allow(clippy::too_many_arguments)]
 fn publish_running(
     app: &AppHandle,
     exp: &ExpControl,
@@ -473,10 +727,20 @@ fn publish_running(
     mode: &str,
     sample: &str,
     started: &str,
+    owner_user_id: &str,
+    owner_display_name: &str,
 ) {
-    let status = status_running(engine, id, mode, sample, started);
+    let status = status_running(
+        engine,
+        id,
+        mode,
+        sample,
+        started,
+        owner_user_id,
+        owner_display_name,
+    );
     exp.set_status(status.clone());
-    let _ = app.emit("experiment-state-changed", status);
+    emit_experiment_status(app, &status);
 }
 
 /// End-of-run bookkeeping shared by completion and stop: safety atmosphere, final flush,
@@ -488,17 +752,18 @@ fn finalize(
     storage: &Arc<Mutex<Storage>>,
     audit: &AuditLog,
     exp: &ExpControl,
-    buffer: &mut Vec<SampleRow>,
+    buffer: &mut SampleBuffer,
     id: &str,
+    operator: &str,
     outcome: &str,
     total_s: f64,
 ) {
     let safety_result = apply_safety_atmosphere(hub); // hard invariant — every exit path
-    flush(storage, buffer);
+    flush(storage, audit, buffer, id, operator);
     let end = iso_now();
-    if let Ok(s) = storage.lock() {
-        let _ = s.finish_experiment(id, &end);
-    }
+    // Poison-tolerant: a panic elsewhere must not leave the run permanently "unfinished",
+    // which would make crash recovery re-close it on every later start (#47).
+    let _ = lock(storage).finish_experiment(id, &end);
     let safety_ok = safety_result.is_ok();
     audit.write(
         &AuditEntry::new(
@@ -510,6 +775,7 @@ fn finalize(
                 AuditResult::Failure
             },
         )
+        .operator(operator.to_string())
         .detail(serde_json::json!({ "id": id, "error": safety_result.err() })),
     );
     audit.write(
@@ -522,10 +788,13 @@ fn finalize(
                 AuditResult::Failure
             },
         )
+        .operator(operator.to_string())
         .detail(serde_json::json!({
             "id": id,
             "elapsed_s": total_s,
-            "safety_atmosphere_confirmed": safety_ok
+            "safety_atmosphere_confirmed": safety_ok,
+            "unwritten_samples": buffer.rows.len(),
+            "dropped_samples": buffer.dropped
         })),
     );
     let final_status = if safety_ok {
@@ -534,7 +803,7 @@ fn finalize(
         ExperimentStatus::safety_error(id, total_s)
     };
     exp.set_status(final_status.clone());
-    let _ = app.emit("experiment-state-changed", final_status);
+    emit_experiment_status(app, &final_status);
 }
 
 /// Spawn the per-run control loop: tick the engine once per real second (advancing
@@ -553,11 +822,14 @@ fn spawn_experiment_task(
     sample: String,
     w0: f64,
     started: String,
+    owner_user_id: String,
+    owner_display_name: String,
     sim_speed: f64,
+    sample_period: Duration,
 ) {
     std::thread::spawn(move || {
         let mut engine = ExperimentEngine::start(program);
-        let mut buffer: Vec<SampleRow> = Vec::new();
+        let mut buffer = SampleBuffer::default();
         if let Some(s) = engine.current_stage() {
             if apply_stage_atmosphere(&hub, s, w0).is_err() {
                 audit.write(
@@ -566,6 +838,7 @@ fn spawn_experiment_task(
                         "stage_atmosphere",
                         AuditResult::Failure,
                     )
+                    .operator(owner_display_name.clone())
                     .detail(serde_json::json!({ "id": id, "stage": 0 })),
                 );
                 finalize(
@@ -576,18 +849,49 @@ fn spawn_experiment_task(
                     &exp,
                     &mut buffer,
                     &id,
+                    &owner_display_name,
                     "error",
                     0.0,
                 );
                 return;
             }
         }
-        publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+        publish_running(
+            &app,
+            &exp,
+            &engine,
+            &id,
+            &mode,
+            &sample,
+            &started,
+            &owner_user_id,
+            &owner_display_name,
+        );
 
-        let mut ticks_since_flush = 0u32;
+        let mut samples_since_flush = 0u32;
+        // The control tick is capped independently of the sampling interval: safety checks
+        // and stage advancement run at least once a second even when a site configures a
+        // slower sampling cadence. A faster configured cadence still samples every tick.
+        let control_period = control_period(sample_period);
+        let sample_period_s = sample_period.as_secs_f64();
+        let mut since_sample = f64::INFINITY; // sample on the very first tick
+                                              // Wall-clock driven (#43): the engine is advanced by the time that ACTUALLY
+                                              // passed and the next wake-up is a fixed deadline, not "one second after this
+                                              // tick's work finished". Counting ticks made every hold stage run long by
+                                              // however much the tick's own work (sampling, SQLite, waiting for MFC
+                                              // acknowledgements) cost — for GB/T 13241's 180 min reduction hold that is
+                                              // neither accurate nor reproducible.
+        let mut previous = Instant::now();
+        let mut deadline = previous + control_period;
 
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            let now = Instant::now();
+            deadline = next_deadline(deadline, control_period, now);
+            let real_dt = now.duration_since(previous).as_secs_f64();
+            let dt = real_dt * sim_speed;
+            since_sample += real_dt;
+            previous = now;
 
             if exp.stop.load(Ordering::Relaxed) {
                 finalize(
@@ -598,6 +902,7 @@ fn spawn_experiment_task(
                     &exp,
                     &mut buffer,
                     &id,
+                    &owner_display_name,
                     "stopped",
                     engine.total_elapsed_s(),
                 );
@@ -607,8 +912,8 @@ fn spawn_experiment_task(
             // Safety (issue #3): sustained loss of a safety-critical bus (5 consecutive
             // failures marks it offline) is an error-exit path — force the protective
             // atmosphere instead of running blind with flammable gas open.
-            let mfc_ok = hub.mfc_rx().borrow().connected;
-            let temp_ok = hub.temp_rx().borrow().connected;
+            let mfc_ok = hub.mfc_rx().borrow().is_fresh(Instant::now());
+            let temp_ok = hub.temp_rx().borrow().is_fresh(Instant::now());
             if !mfc_ok || !temp_ok {
                 let device = if !mfc_ok { "mfc" } else { "temp" };
                 audit.write(
@@ -617,6 +922,7 @@ fn spawn_experiment_task(
                         "device_offline_abort",
                         AuditResult::Failure,
                     )
+                    .operator(owner_display_name.clone())
                     .detail(serde_json::json!({ "id": id, "device": device })),
                 );
                 finalize(
@@ -627,31 +933,25 @@ fn spawn_experiment_task(
                     &exp,
                     &mut buffer,
                     &id,
+                    &owner_display_name,
                     "error",
                     engine.total_elapsed_s(),
                 );
                 break;
             }
 
-            let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(25.0);
+            let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(f64::NAN);
             let result = if exp.skip.swap(false, Ordering::Relaxed) {
-                let from_stage = engine.stage_index();
-                let reason = lock(&exp.skip_reason)
-                    .take()
-                    .unwrap_or_else(|| "未填写".to_string());
-                let result = engine.skip_stage();
                 audit.write(
                     &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
-                        .detail(serde_json::json!({
-                            "id": id,
-                            "from_stage": from_stage,
-                            "to_stage": if result.completed { None } else { Some(engine.stage_index()) },
-                            "reason": reason
-                        })),
+                        .operator(owner_display_name.clone())
+                        .detail(
+                            serde_json::json!({ "id": id, "from_stage": engine.stage_index() }),
+                        ),
                 );
-                result
+                engine.skip_stage()
             } else {
-                engine.tick(t8, sim_speed)
+                engine.tick(t8, dt)
             };
 
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
@@ -663,6 +963,7 @@ fn spawn_experiment_task(
                                 "stage_atmosphere",
                                 AuditResult::Failure,
                             )
+                            .operator(owner_display_name.clone())
                             .detail(serde_json::json!({
                                 "id": id, "stage": engine.stage_index(), "name": s.name
                             })),
@@ -675,6 +976,7 @@ fn spawn_experiment_task(
                             &exp,
                             &mut buffer,
                             &id,
+                            &owner_display_name,
                             "error",
                             engine.total_elapsed_s(),
                         );
@@ -682,6 +984,7 @@ fn spawn_experiment_task(
                     }
                     audit.write(
                         &AuditEntry::new(Category::Experiment, "stage_enter", AuditResult::Success)
+                            .operator(owner_display_name.clone())
                             .detail(serde_json::json!({
                                 "id": id, "stage": engine.stage_index(), "name": s.name
                             })),
@@ -700,17 +1003,22 @@ fn spawn_experiment_task(
                 .current_stage()
                 .map(|s| kind_str(s.kind))
                 .unwrap_or_else(|| phase_str(engine.phase()));
-            buffer.push(build_sample(
-                &hub,
-                &id,
-                w0,
-                engine.total_elapsed_s(),
-                status,
-            ));
-            ticks_since_flush += 1;
-            if ticks_since_flush >= FLUSH_EVERY_TICKS {
-                flush(&storage, &mut buffer);
-                ticks_since_flush = 0;
+            // Sample on the configured cadence, and always once more on completion so the
+            // final weighing the GB analysis and the chart depend on is never dropped.
+            if since_sample >= sample_period_s || result.completed {
+                buffer.push(build_sample(
+                    &hub,
+                    &id,
+                    w0,
+                    engine.total_elapsed_s(),
+                    status,
+                ));
+                since_sample = 0.0;
+                samples_since_flush += 1;
+            }
+            if samples_since_flush >= FLUSH_EVERY_SAMPLES {
+                flush(&storage, &audit, &mut buffer, &id, &owner_display_name);
+                samples_since_flush = 0;
             }
 
             if result.completed {
@@ -722,13 +1030,24 @@ fn spawn_experiment_task(
                     &exp,
                     &mut buffer,
                     &id,
+                    &owner_display_name,
                     "completed",
                     engine.total_elapsed_s(),
                 );
                 break;
             }
 
-            publish_running(&app, &exp, &engine, &id, &mode, &sample, &started);
+            publish_running(
+                &app,
+                &exp,
+                &engine,
+                &id,
+                &mode,
+                &sample,
+                &started,
+                &owner_user_id,
+                &owner_display_name,
+            );
         }
     });
 }
@@ -772,6 +1091,16 @@ struct GasLimits {
     co: f64,
 }
 
+/// Cadences the UI needs to mirror the backend (docs/06 §6.3), so the staleness threshold
+/// and refresh rate come from `comm_config.json` instead of duplicated constants (#44).
+#[derive(serde::Serialize)]
+struct RuntimeSettings {
+    sampling_interval_s: f64,
+    telemetry_interval_s: f64,
+    heartbeat_timeout_s: f64,
+    idle_timeout_s: i64,
+}
+
 #[derive(serde::Serialize)]
 struct HealthDot {
     connected: bool,
@@ -792,7 +1121,624 @@ struct TareResultDto {
     weight: Option<f64>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(serde::Serialize)]
+struct PublicSafetyStatus {
+    experiment_running: bool,
+    mfc_connected: bool,
+    temp_connected: bool,
+}
+
+// ---- Commands ---------------------------------------------------------------
+
+#[tauri::command]
+fn get_auth_state(state: State<AppState>) -> Result<AuthSnapshot, String> {
+    state
+        .auth
+        .snapshot(&lock(&state.storage), epoch_now())
+        .map_err(auth_error)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn bootstrap_admin(
+    state: State<AppState>,
+    username: String,
+    display_name: String,
+    password: String,
+) -> Result<PublicUser, String> {
+    let user = state
+        .auth
+        .bootstrap(
+            &lock(&state.storage),
+            &username,
+            &display_name,
+            &password,
+            epoch_now(),
+        )
+        .map_err(auth_error)?;
+    state.audit.write(
+        &AuditEntry::new(Category::Auth, "bootstrap_admin", AuditResult::Success)
+            .operator(user.display_name.clone())
+            .detail(serde_json::json!({ "user_id": user.user_id })),
+    );
+    Ok(PublicUser::from(&user))
+}
+
+#[tauri::command]
+fn login(
+    state: State<AppState>,
+    username: String,
+    password: String,
+) -> Result<AuthSnapshot, String> {
+    let outcome = state
+        .auth
+        .login(&lock(&state.storage), &username, &password, epoch_now());
+    // A rejected login has no session, so "who tried" — the attempted username — is the
+    // only attribution available. A successful one uses the authenticated display name, so
+    // it matches every other entry in the trail even when the account's display name
+    // differs from its username or the operator typed odd casing. Passwords never appear.
+    let code = outcome.as_ref().err().map(|error| error.as_str());
+    let operator = match outcome.as_ref() {
+        Ok(user) => user.display_name.clone(),
+        Err(_) => username.clone(),
+    };
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Auth,
+            "login",
+            if outcome.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .operator(operator)
+        .detail(serde_json::json!({ "username": username, "code": code })),
+    );
+    outcome.map_err(auth_error)?;
+    get_auth_state(state)
+}
+
+#[tauri::command]
+fn logout(state: State<AppState>) {
+    let operator = audit_operator(&state);
+    state.auth.logout();
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+    state
+        .audit
+        .write(&AuditEntry::new(Category::Auth, "logout", AuditResult::Success).operator(operator));
+}
+
+#[tauri::command]
+fn lock_session(state: State<AppState>) {
+    let operator = audit_operator(&state);
+    state.auth.lock();
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+    state.audit.write(
+        &AuditEntry::new(Category::Auth, "lock_session", AuditResult::Success).operator(operator),
+    );
+}
+
+#[tauri::command]
+fn touch_session(state: State<AppState>) -> Result<(), String> {
+    state.auth.touch(epoch_now()).map_err(auth_error)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn change_own_password(
+    state: State<AppState>,
+    current_password: String,
+    new_password: String,
+) -> Result<(), String> {
+    let operator = audit_operator(&state);
+    let outcome = state.auth.change_own_password(
+        &lock(&state.storage),
+        &current_password,
+        &new_password,
+        epoch_now(),
+    );
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Auth,
+            "change_password",
+            if outcome.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .operator(operator),
+    );
+    outcome.map_err(auth_error)
+}
+
+#[tauri::command]
+fn list_users(state: State<AppState>) -> Result<Vec<PublicUser>, String> {
+    current_admin(&state)?;
+    let users = lock(&state.storage)
+        .list_users()
+        .map_err(|e| e.to_string())?;
+    Ok(users.iter().map(PublicUser::from).collect())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn create_user(
+    state: State<AppState>,
+    username: String,
+    display_name: String,
+    temporary_password: String,
+    role: UserRole,
+) -> Result<PublicUser, String> {
+    let actor = current_admin(&state)?;
+    let outcome = state.auth.create_user(
+        &lock(&state.storage),
+        &username,
+        &display_name,
+        &temporary_password,
+        role,
+        epoch_now(),
+    );
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Auth,
+            "create_user",
+            if outcome.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Rejected
+            },
+        )
+        .operator(actor.display_name)
+        .detail(serde_json::json!({
+            "username": username,
+            "role": role,
+            "user_id": outcome.as_ref().ok().map(|user| user.user_id.clone())
+        })),
+    );
+    let user = outcome.map_err(auth_error)?;
+    Ok(PublicUser::from(&user))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn update_user(
+    state: State<AppState>,
+    user_id: String,
+    display_name: String,
+    role: UserRole,
+    is_active: bool,
+) -> Result<PublicUser, String> {
+    let actor = current_admin(&state)?;
+    let display_name =
+        validate_display_name(&display_name).map_err(|_| AuthCode::InvalidInput.to_string())?;
+    let storage = lock(&state.storage);
+    let target = storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+    if target.user_id == actor.user_id && (role != target.role || !is_active) {
+        return Err(AuthCode::Forbidden.to_string());
+    }
+    if target.role.is_admin()
+        && target.is_active
+        && (!role.is_admin() || !is_active)
+        && storage.active_admin_count().map_err(|e| e.to_string())? <= 1
+    {
+        return Err(AuthCode::LastAdmin.to_string());
+    }
+    storage
+        .update_user(&user_id, &display_name, role, is_active, &iso_now())
+        .map_err(|e| e.to_string())?;
+    let updated = storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+    state.audit.write(
+        &AuditEntry::new(Category::Auth, "update_user", AuditResult::Success)
+            .operator(actor.display_name)
+            .detail(serde_json::json!({
+                "user_id": user_id,
+                "username": updated.username,
+                "role_from": target.role,
+                "role_to": updated.role,
+                "active_from": target.is_active,
+                "active_to": updated.is_active
+            })),
+    );
+    Ok(PublicUser::from(&updated))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn reset_user_password(
+    state: State<AppState>,
+    user_id: String,
+    temporary_password: String,
+) -> Result<(), String> {
+    let actor = current_admin(&state)?;
+    if actor.user_id == user_id {
+        return Err(AuthCode::Forbidden.to_string());
+    }
+    let hash =
+        hash_password(&temporary_password).map_err(|_| AuthCode::InvalidInput.to_string())?;
+    let storage = lock(&state.storage);
+    if storage
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("USER_NOT_FOUND".into());
+    }
+    let outcome = storage.set_user_password(&user_id, &hash, true, &iso_now());
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Auth,
+            "reset_password",
+            if outcome.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(actor.display_name)
+        .detail(serde_json::json!({ "user_id": user_id })),
+    );
+    outcome.map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn set_experiment_owner(
+    state: State<AppState>,
+    experiment_id: String,
+    owner_user_id: Option<String>,
+) -> Result<(), String> {
+    let actor = current_admin(&state)?;
+    if state.exp.snapshot().experiment_id.as_deref() == Some(experiment_id.as_str()) {
+        return Err("无法变更正在运行实验的归属".into());
+    }
+    let storage = lock(&state.storage);
+    let experiment = storage
+        .get_experiment(&experiment_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "实验不存在".to_string())?;
+    if let Some(owner_id) = owner_user_id.as_deref() {
+        let owner = storage
+            .get_user(owner_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
+        if !owner.is_active {
+            return Err(AuthCode::AccountDisabled.to_string());
+        }
+    }
+    storage
+        .set_experiment_owner(&experiment_id, owner_user_id.as_deref())
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "set_experiment_owner",
+            AuditResult::Success,
+        )
+        .operator(actor.display_name)
+        .detail(serde_json::json!({
+            "id": experiment_id,
+            "old_owner_user_id": experiment.owner_user_id,
+            "new_owner_user_id": owner_user_id
+        })),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn get_app_info() -> AppInfo {
+    AppInfo {
+        name: "TMH-LPF-900".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    }
+}
+
+#[tauri::command]
+fn get_runtime_mode(state: State<AppState>) -> Result<String, String> {
+    current_user(&state)?;
+    Ok(state.mode.clone())
+}
+
+#[tauri::command]
+fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
+    current_user(&state)?;
+    Ok(GasLimits {
+        h2: state.limit_h2,
+        co: state.limit_co,
+    })
+}
+
+#[tauri::command]
+fn get_runtime_settings(state: State<AppState>) -> Result<RuntimeSettings, String> {
+    current_user(&state)?;
+    Ok(RuntimeSettings {
+        sampling_interval_s: state.cadence.sampling.as_secs_f64(),
+        telemetry_interval_s: state.cadence.telemetry.as_secs_f64(),
+        heartbeat_timeout_s: state.cadence.heartbeat_timeout_s,
+        idle_timeout_s: state.idle_timeout_s,
+    })
+}
+
+#[tauri::command]
+fn get_device_health(state: State<AppState>) -> Result<DeviceHealthDto, String> {
+    current_user(&state)?;
+    let t = state.hub.temp_rx().borrow().clone();
+    let m = state.hub.mfc_rx().borrow().clone();
+    let b = state.hub.balance_rx().borrow().clone();
+    Ok(DeviceHealthDto {
+        temp: HealthDot {
+            connected: t.connected,
+            consecutive_errors: t.consecutive_errors,
+        },
+        mfc: HealthDot {
+            connected: m.connected,
+            consecutive_errors: m.consecutive_errors,
+        },
+        balance: HealthDot {
+            connected: b.connected,
+            consecutive_errors: b.consecutive_errors,
+        },
+    })
+}
+
+#[tauri::command]
+fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
+    PublicSafetyStatus {
+        experiment_running: state.exp.is_running(),
+        mfc_connected: state.hub.mfc_rx().borrow().is_fresh(Instant::now()),
+        temp_connected: state.hub.temp_rx().borrow().is_fresh(Instant::now()),
+    }
+}
+
+#[tauri::command]
+async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    // Deliberately callable without a session; still attributed, so the trail shows whether
+    // a logged-in operator or someone at a locked screen triggered it (#41).
+    let operator = audit_operator(&st);
+    let authenticated = st.auth.has_active_session(epoch_now());
+    st.exp.stop.store(true, Ordering::Relaxed);
+    let result = match st.hub.request_set_atmosphere(SAFETY_ATMOSPHERE).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    st.hub.set_temp_target_c(25.0);
+    st.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "emergency_safe_shutdown",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(operator)
+        .detail(serde_json::json!({ "authenticated": authenticated })),
+    );
+    result
+}
+
+#[tauri::command]
+async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
+    // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
+    if gas >= GAS_COUNT {
+        return Err("无效的气体通道".into());
+    }
+    let hub = app.state::<AppState>().hub.clone();
+    let result = match hub.request_set_flow(gas, value).await {
+        Ok(result) => result,
+        Err(_) => {
+            app.state::<AppState>().audit.write(
+                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure)
+                    .operator(operator.clone())
+                    .detail(
+                    serde_json::json!({ "gas": gas, "requested": value, "error": "actor_unavailable" }),
+                ),
+            );
+            return Err("DEVICE_OFFLINE".into());
+        }
+    };
+    let st = app.state::<AppState>();
+    let clamp = match result {
+        Ok(clamp) => clamp,
+        Err(error) => {
+            st.audit.write(
+                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure)
+                    .operator(operator.clone())
+                    .detail(
+                    serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
+                ),
+            );
+            return Err("DEVICE_OFFLINE".into());
+        }
+    };
+    st.audit.write(
+        &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Success)
+            .operator(operator)
+            .detail(serde_json::json!({
+                "gas": gas, "requested": value, "applied": clamp.applied, "clamped": clamp.clamped
+            })),
+    );
+    if clamp.clamped {
+        let _ = app.emit(
+            "safety-clamp-triggered",
+            serde_json::json!({ "gas": gas, "requested": value, "applied": clamp.applied, "limit": clamp.limit }),
+        );
+    }
+    Ok(clamp)
+}
+
+#[tauri::command]
+async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    if gas >= GAS_COUNT {
+        return Err("INVALID_PARAMS".into());
+    }
+    let hub = app.state::<AppState>().hub.clone();
+    let result = match hub.request_set_on_off(gas, on).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(
+            Category::Gas,
+            "on_off",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(operator)
+        .detail(serde_json::json!({ "gas": gas, "on": on })),
+    );
+    result
+}
+
+async fn set_all_valves(
+    app: &AppHandle,
+    on: bool,
+    action: &str,
+    operator: String,
+) -> Result<(), String> {
+    let hub = app.state::<AppState>().hub.clone();
+    let mut replies = Vec::with_capacity(GAS_COUNT);
+    for g in 0..GAS_COUNT {
+        replies.push(hub.request_set_on_off(g, on));
+    }
+    let mut failed = false;
+    for reply in replies {
+        if !matches!(reply.await, Ok(Ok(()))) {
+            failed = true;
+        }
+    }
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(
+            Category::Gas,
+            action,
+            if failed {
+                AuditResult::Failure
+            } else {
+                AuditResult::Success
+            },
+        )
+        .operator(operator),
+    );
+    if failed {
+        Err("DEVICE_OFFLINE".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn open_all_valves(app: AppHandle) -> Result<(), String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    set_all_valves(&app, true, "open_all", operator).await
+}
+
+#[tauri::command]
+async fn close_all_valves(app: AppHandle) -> Result<(), String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    set_all_valves(&app, false, "close_all", operator).await
+}
+
+#[tauri::command]
+async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    let hub = app.state::<AppState>().hub.clone();
+    let result = match hub.request_shutoff_flammable().await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+    };
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(
+            Category::Gas,
+            "shutoff",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(operator),
+    );
+    result
+}
+
+#[tauri::command]
+async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    let hub = app.state::<AppState>().hub.clone();
+    let r = hub
+        .request_tare()
+        .await
+        .map_err(|_| "天平不可用".to_string())?;
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(
+            Category::Balance,
+            "tare",
+            if r.success {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(operator),
+    );
+    Ok(TareResultDto {
+        success: r.success,
+        a00_found: r.a00_found,
+        weight: r.weight,
+    })
+}
+
+#[tauri::command]
+fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    current_user(&st)?;
+    let temp_rx = st.hub.temp_rx();
+    let mfc_rx = st.hub.mfc_rx();
+    let bal_rx = st.hub.balance_rx();
+    // Each subscribe claims a new generation; the pump exits when the generation moves on
+    // (a re-subscribe or unsubscribe_telemetry) or the channel drops — so stale pumps from
+    // StrictMode double-invokes / HMR never accumulate (issue #8).
+    let gen = st.telemetry_gen.clone();
+    let auth = st.auth.clone();
+    let period = st.cadence.telemetry;
+    let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let mut seq = 0u64;
+        loop {
+            std::thread::sleep(period);
+            if gen.load(Ordering::SeqCst) != my_gen || !auth.has_active_session(epoch_now()) {
+                break;
+            }
+            seq += 1;
+            let t = temp_rx.borrow().clone();
+            let m = mfc_rx.borrow().clone();
+            let b = bal_rx.borrow().clone();
+            if channel.send(aggregate(seq, &t, &m, &b)).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Stop the current telemetry pump thread (issue #8). The frontend calls this on unsubscribe.
+#[tauri::command]
+fn unsubscribe_telemetry(state: State<AppState>) -> Result<(), String> {
+    current_user(&state)?;
+    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
 struct PreflightIssue {
     code: String,
     message_zh: String,
@@ -856,342 +1802,42 @@ fn next_sample_id(program: &Program, experiment_time: &str, rows: &[ExperimentRo
     format!("{stem}{:03}", max_seq + 1)
 }
 
-// ---- Commands ---------------------------------------------------------------
-
-#[tauri::command]
-fn get_app_info() -> AppInfo {
-    AppInfo {
-        name: "TMH-LPF-900".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-    }
-}
-
-#[tauri::command]
-fn get_runtime_mode(state: State<AppState>) -> String {
-    state.mode.clone()
-}
-
-#[tauri::command]
-fn get_gas_safety_limits(state: State<AppState>) -> GasLimits {
-    GasLimits {
-        h2: state.limit_h2,
-        co: state.limit_co,
-    }
-}
-
-#[tauri::command]
-fn get_comm_config(state: State<AppState>) -> Result<CommConfig, String> {
-    Ok(load_comm_config_from(&state.comm_config_path))
-}
-
-#[tauri::command]
-fn get_admin_auth_status(state: State<AppState>) -> Result<auth::AdminAuthStatus, String> {
-    auth::status(&state.auth_path)
-}
-
-#[tauri::command]
-fn change_admin_password(
-    state: State<AppState>,
-    old_password: String,
-    new_password: String,
-) -> Result<(), String> {
-    let result = auth::change_password(&state.auth_path, &old_password, &new_password);
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Config,
-            "change_admin_password",
-            if result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .detail(serde_json::json!({ "error": result.as_ref().err() })),
-    );
-    result
-}
-
-#[tauri::command]
-fn update_comm_config(
-    state: State<AppState>,
-    config: CommConfig,
-    password: String,
-) -> Result<CommConfig, String> {
-    let result = (|| {
-        if state.exp.is_running() {
-            return Err("实验运行中不可修改通讯设置".to_string());
-        }
-        let auth_status = auth::status(&state.auth_path)?;
-        if auth_status.must_change {
-            return Err("请先修改默认管理员口令".to_string());
-        }
-        auth::verify(&state.auth_path, &password)?;
-        config.validate().map_err(|e| e.to_string())?;
-        if let Some(parent) = state.comm_config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建通讯配置目录失败: {e}"))?;
-        }
-        config
-            .save(&state.comm_config_path)
-            .map_err(|e| e.to_string())?;
-        Ok(config)
-    })();
-
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Config,
-            "update_comm_config",
-            if result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .detail(serde_json::json!({
-            "path": state.comm_config_path.to_string_lossy(),
-            "error": result.as_ref().err()
-        })),
-    );
-    result
-}
-
-#[tauri::command]
-fn get_device_health(state: State<AppState>) -> DeviceHealthDto {
-    let t = state.hub.temp_rx().borrow().clone();
-    let m = state.hub.mfc_rx().borrow().clone();
-    let b = state.hub.balance_rx().borrow().clone();
-    DeviceHealthDto {
-        temp: HealthDot {
-            connected: t.connected,
-            consecutive_errors: t.consecutive_errors,
-        },
-        mfc: HealthDot {
-            connected: m.connected,
-            consecutive_errors: m.consecutive_errors,
-        },
-        balance: HealthDot {
-            connected: b.connected,
-            consecutive_errors: b.consecutive_errors,
-        },
-    }
-}
-
-#[tauri::command]
-async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
-    // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
-    // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
-    if gas >= GAS_COUNT {
-        return Err("无效的气体通道".into());
-    }
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_set_flow(gas, value).await {
-        Ok(result) => result,
-        Err(_) => {
-            app.state::<AppState>().audit.write(
-                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure).detail(
-                    serde_json::json!({ "gas": gas, "requested": value, "error": "actor_unavailable" }),
-                ),
-            );
-            return Err("DEVICE_OFFLINE".into());
-        }
-    };
-    let st = app.state::<AppState>();
-    let clamp = match result {
-        Ok(clamp) => clamp,
-        Err(error) => {
-            st.audit.write(
-                &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Failure).detail(
-                    serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
-                ),
-            );
-            return Err("DEVICE_OFFLINE".into());
-        }
-    };
-    st.audit.write(
-        &AuditEntry::new(Category::Gas, "set_flow", AuditResult::Success).detail(
-            serde_json::json!({
-                "gas": gas, "requested": value, "applied": clamp.applied, "clamped": clamp.clamped
-            }),
-        ),
-    );
-    if clamp.clamped {
-        let _ = app.emit(
-            "safety-clamp-triggered",
-            serde_json::json!({ "gas": gas, "requested": value, "applied": clamp.applied, "limit": clamp.limit }),
-        );
-    }
-    Ok(clamp)
-}
-
-#[tauri::command]
-async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
-    if gas >= GAS_COUNT {
-        return Err("INVALID_PARAMS".into());
-    }
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_set_on_off(gas, on).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
-    };
-    app.state::<AppState>().audit.write(
-        &AuditEntry::new(
-            Category::Gas,
-            "on_off",
-            if result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
-        )
-        .detail(serde_json::json!({ "gas": gas, "on": on })),
-    );
-    result
-}
-
-async fn set_all_valves(app: &AppHandle, on: bool, action: &str) -> Result<(), String> {
-    let hub = app.state::<AppState>().hub.clone();
-    let mut replies = Vec::with_capacity(GAS_COUNT);
-    for g in 0..GAS_COUNT {
-        replies.push(hub.request_set_on_off(g, on));
-    }
-    let mut failed = false;
-    for reply in replies {
-        if !matches!(reply.await, Ok(Ok(()))) {
-            failed = true;
-        }
-    }
-    app.state::<AppState>().audit.write(&AuditEntry::new(
-        Category::Gas,
-        action,
-        if failed {
-            AuditResult::Failure
-        } else {
-            AuditResult::Success
-        },
-    ));
-    if failed {
-        Err("DEVICE_OFFLINE".into())
-    } else {
-        Ok(())
-    }
-}
-
-#[tauri::command]
-async fn open_all_valves(app: AppHandle) -> Result<(), String> {
-    set_all_valves(&app, true, "open_all").await
-}
-
-#[tauri::command]
-async fn close_all_valves(app: AppHandle) -> Result<(), String> {
-    set_all_valves(&app, false, "close_all").await
-}
-
-#[tauri::command]
-async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_shutoff_flammable().await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
-    };
-    app.state::<AppState>().audit.write(&AuditEntry::new(
-        Category::Gas,
-        "shutoff",
-        if result.is_ok() {
-            AuditResult::Success
-        } else {
-            AuditResult::Failure
-        },
-    ));
-    result
-}
-
-#[tauri::command]
-async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
-    let hub = app.state::<AppState>().hub.clone();
-    let r = hub
-        .request_tare()
-        .await
-        .map_err(|_| "天平不可用".to_string())?;
-    app.state::<AppState>().audit.write(&AuditEntry::new(
-        Category::Balance,
-        "tare",
-        if r.success {
-            AuditResult::Success
-        } else {
-            AuditResult::Failure
-        },
-    ));
-    Ok(TareResultDto {
-        success: r.success,
-        a00_found: r.a00_found,
-        weight: r.weight,
-    })
-}
-
-#[tauri::command]
-fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) {
-    let st = app.state::<AppState>();
-    let temp_rx = st.hub.temp_rx();
-    let mfc_rx = st.hub.mfc_rx();
-    let bal_rx = st.hub.balance_rx();
-    // Each subscribe claims a new generation; the pump exits when the generation moves on
-    // (a re-subscribe or unsubscribe_telemetry) or the channel drops — so stale pumps from
-    // StrictMode double-invokes / HMR never accumulate (issue #8).
-    let gen = st.telemetry_gen.clone();
-    let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
-    std::thread::spawn(move || {
-        let mut seq = 0u64;
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            if gen.load(Ordering::SeqCst) != my_gen {
-                break;
-            }
-            seq += 1;
-            let t = temp_rx.borrow().clone();
-            let m = mfc_rx.borrow().clone();
-            let b = bal_rx.borrow().clone();
-            if channel.send(aggregate(seq, &t, &m, &b)).is_err() {
-                break;
-            }
-        }
-    });
-}
-
-/// Stop the current telemetry pump thread (issue #8). The frontend calls this on unsubscribe.
-#[tauri::command]
-fn unsubscribe_telemetry(state: State<AppState>) {
-    state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
-}
-
 // ---- Experiment -------------------------------------------------------------
 
 #[tauri::command]
-fn get_experiment_state(state: State<AppState>) -> ExperimentStatus {
-    state.exp.snapshot()
+fn get_experiment_state(state: State<AppState>) -> Result<ExperimentStatus, String> {
+    let user = current_user(&state)?;
+    Ok(redact_experiment_status(
+        state.exp.snapshot(),
+        user.role,
+        &user.user_id,
+    ))
 }
 
 /// Validate experiment start parameters (docs/05 §5.2). Pure so it is unit-testable.
-fn validate_experiment_params(params: &ExperimentParams) -> Vec<PreflightIssue> {
-    let mut issues = Vec::new();
+fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
     if params.sample_id.trim().is_empty() {
-        issues.push(PreflightIssue::blocking("SAMPLE_ID", "样品编号必填"));
+        return Err("样品编号必填".into());
     }
     if params.sample_name.trim().is_empty() {
-        issues.push(PreflightIssue::blocking("SAMPLE_NAME", "样品名称必填"));
+        return Err("样品名称必填".into());
     }
-    if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
-        issues.push(PreflightIssue::blocking(
-            "SAMPLE_WEIGHT",
-            "样品重量必须大于 0",
-        ));
+    if !params.sample_weight.is_finite() || params.sample_weight <= 0.0 {
+        return Err("样品重量必须大于 0".into());
     }
-    if params.operator.trim().is_empty() {
-        issues.push(PreflightIssue::blocking("OPERATOR", "操作员必填"));
+    if !STANDARD_MODES.contains(&params.experiment_type.as_str())
+        && !params.experiment_type.starts_with("custom-")
+    {
+        return Err("未知实验模式".into());
     }
-    issues
+    Ok(())
 }
 
 fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
-    let mut blocking = validate_experiment_params(params);
+    let mut blocking = Vec::new();
+    if let Err(message) = validate_experiment_params(params) {
+        blocking.push(PreflightIssue::blocking("PARAMS", message));
+    }
     let mut warnings = Vec::new();
 
     if state.exp.is_running() {
@@ -1221,19 +1867,19 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
     let temp = state.hub.temp_rx().borrow().clone();
     let mfc = state.hub.mfc_rx().borrow().clone();
     let balance = state.hub.balance_rx().borrow().clone();
-    if !temp.connected {
+    if !temp.is_fresh(Instant::now()) || !temp.temps[7].is_some_and(|v| v.is_finite()) {
         blocking.push(PreflightIssue::blocking(
             "TEMP_OFFLINE",
             "温度总线离线，无法启动实验",
         ));
     }
-    if !mfc.connected {
+    if !mfc.is_fresh(Instant::now()) {
         blocking.push(PreflightIssue::blocking(
             "MFC_OFFLINE",
             "气体流量 MFC 离线，无法启动实验",
         ));
     }
-    if !balance.connected {
+    if !balance.is_fresh(Instant::now()) || !balance.weight.is_some_and(|v| v.is_finite()) {
         blocking.push(PreflightIssue::blocking(
             "BALANCE_OFFLINE",
             "电子天平离线，无法启动实验",
@@ -1272,37 +1918,33 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
 fn preflight_experiment(
     state: State<AppState>,
     params: ExperimentParams,
-) -> ExperimentPreflightResult {
-    build_preflight(&state, &params)
+) -> Result<ExperimentPreflightResult, String> {
+    current_user(&state)?;
+    Ok(build_preflight(&state, &params))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn generate_sample_id(
     state: State<AppState>,
     program_id: String,
     experiment_time: String,
 ) -> Result<String, String> {
     let program = program_by_id(&state, &program_id)?;
-    let rows = lock(&state.storage)
-        .list_experiments()
-        .map_err(|e| e.to_string())?;
+    let user = current_user(&state)?;
+    let rows = visible_rows(&lock(&state.storage), &user)?;
     Ok(next_sample_id(&program, &experiment_time, &rows))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn get_experiment_start_defaults(
     state: State<AppState>,
     program_id: String,
 ) -> Result<ExperimentStartDefaults, String> {
     let program = program_by_id(&state, &program_id)?;
     let now = iso_now();
-    let (latest, rows) = {
-        let storage = lock(&state.storage);
-        (
-            storage.latest_experiment().map_err(|e| e.to_string())?,
-            storage.list_experiments().map_err(|e| e.to_string())?,
-        )
-    };
+    let user = current_user(&state)?;
+    let rows = visible_rows(&lock(&state.storage), &user)?;
+    let latest = rows.first().cloned();
     let balance = state.hub.balance_rx().borrow().clone();
     Ok(ExperimentStartDefaults {
         sample_id: next_sample_id(&program, &now, &rows),
@@ -1312,11 +1954,8 @@ fn get_experiment_start_defaults(
             .unwrap_or_default(),
         sample_weight: balance
             .weight
-            .filter(|w| balance.connected && w.is_finite() && *w > 0.0),
-        operator: latest
-            .as_ref()
-            .and_then(|r| r.operator.clone())
-            .unwrap_or_default(),
+            .filter(|w| balance.is_fresh(Instant::now()) && w.is_finite() && *w > 0.0),
+        operator: user.display_name,
         experiment_type: program_id,
         project_name: latest.and_then(|r| r.project_name),
         experiment_time: now,
@@ -1324,41 +1963,50 @@ fn get_experiment_start_defaults(
     })
 }
 
+fn visible_rows(storage: &Storage, user: &UserRow) -> Result<Vec<ExperimentRow>, String> {
+    if user.role == UserRole::Admin {
+        storage.list_experiments()
+    } else {
+        storage.list_experiments_for_owner(&user.user_id)
+    }
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
+    validate_experiment_params(&params)?;
+
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    if st.exp.is_running() {
+        return Err("实验已在运行".into());
+    }
     let preflight = build_preflight(&st, &params);
     if let Some(issue) = preflight.blocking.first() {
         return Err(issue.message_zh.clone());
     }
     let program = preflight.program.ok_or("未知实验模式")?;
     validate_program(&program)?;
-    let program_snapshot_json = serde_json::to_string(&program).map_err(|e| e.to_string())?;
 
     let now = iso_now();
-    let project_name = clean_opt(params.project_name.clone());
-    let notes = clean_opt(params.notes.clone());
-    let experiment_time = clean_opt(params.experiment_time.clone()).unwrap_or_else(|| now.clone());
-    let experiment_name = project_name
-        .clone()
-        .unwrap_or_else(|| params.sample_name.clone());
-    let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let id = format!("exp-{}", tmh_core::auth::new_user_id());
     let row = ExperimentRow {
         experiment_id: id.clone(),
-        experiment_name,
-        sample_id: clean_opt(Some(params.sample_id.clone())),
+        experiment_name: params.sample_name.clone(),
+        sample_id: Some(params.sample_id.trim().to_string()),
+        project_name: clean_opt(params.project_name.clone()),
+        experiment_time: Some(now.clone()),
+        program_snapshot_json: Some(serde_json::to_string(&program).map_err(|e| e.to_string())?),
         sample_name: params.sample_name.clone(),
         sample_weight: params.sample_weight,
         start_time: now.clone(),
-        experiment_time: Some(experiment_time.clone()),
         end_time: None,
-        project_name: project_name.clone(),
-        description: notes,
-        operator: Some(params.operator.clone()),
+        description: clean_opt(params.notes.clone()),
+        operator: Some(user.display_name.clone()),
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
-        program_snapshot_json: Some(program_snapshot_json),
         created_at: now.clone(),
+        owner_user_id: Some(user.user_id.clone()),
     };
     lock(&st.storage)
         .insert_experiment(&row)
@@ -1367,7 +2015,6 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     // Reset signals and publish the initial running status before the task spins up.
     st.exp.stop.store(false, Ordering::Relaxed);
     st.exp.skip.store(false, Ordering::Relaxed);
-    *lock(&st.exp.skip_reason) = None;
     let first = program.stages.first();
     let initial = ExperimentStatus {
         running: true,
@@ -1384,20 +2031,20 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: 0.0,
         total_elapsed_s: 0.0,
+        owner_user_id: Some(user.user_id.clone()),
+        owner_display_name: Some(user.display_name.clone()),
+        can_control: true,
+        occupied_by_other: false,
     };
     st.exp.set_status(initial.clone());
     st.audit.write(
         &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
-            .operator(params.operator.clone())
+            .operator(user.display_name.clone())
             .detail(serde_json::json!({
-                "id": id,
-                "mode": params.experiment_type.clone(),
-                "project": project_name,
-                "sample_id": params.sample_id,
-                "experiment_time": experiment_time
+                "id": id, "mode": params.experiment_type, "project": params.project_name
             })),
     );
-    let _ = app.emit("experiment-state-changed", initial);
+    emit_experiment_status(&app, &initial);
 
     spawn_experiment_task(
         app.clone(),
@@ -1411,13 +2058,17 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         params.sample_name.clone(),
         params.sample_weight,
         now,
+        user.user_id,
+        user.display_name,
         st.sim_speed,
+        st.cadence.sampling,
     );
     Ok(id)
 }
 
 #[tauri::command]
 async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
+    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
     let (hub, audit, exp) = {
         let st = app.state::<AppState>();
         (st.hub.clone(), st.audit.clone(), st.exp.clone())
@@ -1441,6 +2092,7 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
                 AuditResult::Failure
             },
         )
+        .operator(operator)
         .detail(serde_json::json!({
             "reason": reason,
             "safety_atmosphere_confirmed": safety_result.is_ok()
@@ -1454,33 +2106,52 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
             ExperimentStatus::safety_error("manual-stop", 0.0)
         };
         exp.set_status(status.clone());
-        let _ = app.emit("experiment-state-changed", status);
+        emit_experiment_status(&app, &status);
     }
     safety_result
 }
 
 #[tauri::command]
 fn skip_stage(state: State<AppState>, reason: String) -> Result<(), String> {
-    if !state.exp.is_running() {
+    let user = require_experiment_controller(&state)?;
+    let status = state.exp.snapshot();
+    if !status.running {
         return Err("没有正在运行的实验".into());
     }
-    let reason = reason.trim();
-    if reason.is_empty() {
-        return Err("跳过阶段原因必填".into());
+    if reason.trim().is_empty() {
+        return Err("跳段原因必填".into());
     }
-    *lock(&state.exp.skip_reason) = Some(reason.to_string());
     state.exp.skip.store(true, Ordering::Relaxed);
+    // The requester is not always the run's owner (an admin may take over), so record who
+    // asked here; the tick task audits the skip it actually performs.
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "skip_stage_requested",
+            AuditResult::Success,
+        )
+        .operator(user.display_name)
+        .detail(serde_json::json!({
+            "id": status.experiment_id, "from_stage": status.stage_index, "reason": reason
+        })),
+    );
     Ok(())
 }
 
 /// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
 #[tauri::command]
 fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
-    all_programs(&state.custom_modes_path)
+    current_user(&state)?;
+    all_programs(&lock(&state.storage))
 }
 
 #[tauri::command]
-fn save_custom_program(state: State<AppState>, mut program: Program) -> Result<Program, String> {
+fn save_custom_program(state: State<AppState>, program: Program) -> Result<Program, String> {
+    let user = current_admin(&state)?;
+    if state.exp.is_running() {
+        return Err("实验运行中不可修改模式".into());
+    }
+    let mut program = program;
     let replacing_existing = !program.id.trim().is_empty();
     if program.id.trim().is_empty() {
         program.id = custom_program_id();
@@ -1493,19 +2164,19 @@ fn save_custom_program(state: State<AppState>, mut program: Program) -> Result<P
     }
     validate_program(&program)?;
 
-    let mut programs = read_custom_programs(&state.custom_modes_path)?;
-    if let Some(existing) = programs.iter_mut().find(|p| p.id == program.id) {
-        *existing = program.clone();
-    } else {
-        programs.push(program.clone());
-    }
-    write_custom_programs(&state.custom_modes_path, &programs)?;
+    lock(&state.storage)
+        .save_custom_program(
+            &program.id,
+            &serde_json::to_string(&program).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
     state.audit.write(
         &AuditEntry::new(
             Category::Config,
             "save_custom_program",
             AuditResult::Success,
         )
+        .operator(user.display_name)
         .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
     );
     Ok(program)
@@ -1516,19 +2187,23 @@ fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), Strin
     if STANDARD_MODES.contains(&id.as_str()) {
         return Err("标准模式不可删除".into());
     }
-    let mut programs = read_custom_programs(&state.custom_modes_path)?;
-    let before = programs.len();
-    programs.retain(|p| p.id != id);
-    if programs.len() == before {
+    let user = current_admin(&state)?;
+    if state.exp.is_running() {
+        return Err("实验运行中不可删除模式".into());
+    }
+    if !lock(&state.storage)
+        .delete_custom_program(&id)
+        .map_err(|e| e.to_string())?
+    {
         return Err("自定义模式不存在".into());
     }
-    write_custom_programs(&state.custom_modes_path, &programs)?;
     state.audit.write(
         &AuditEntry::new(
             Category::Config,
             "delete_custom_program",
             AuditResult::Success,
         )
+        .operator(user.display_name)
         .detail(serde_json::json!({ "id": id })),
     );
     Ok(())
@@ -1538,18 +2213,19 @@ fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), Strin
 
 #[derive(serde::Serialize)]
 struct ExperimentSummary {
+    sample_id: Option<String>,
+    project_name: Option<String>,
+    experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
-    sample_id: Option<String>,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
-    experiment_time: Option<String>,
     end_time: Option<String>,
-    project_name: Option<String>,
     operator: Option<String>,
     experiment_type: Option<String>,
     has_analysis: bool,
+    owner_user_id: Option<String>,
 }
 
 fn summary_of(r: ExperimentRow) -> ExperimentSummary {
@@ -1558,35 +2234,37 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
         sample_id: r.sample_id,
+        project_name: r.project_name,
+        experiment_time: r.experiment_time,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
-        experiment_time: r.experiment_time,
         end_time: r.end_time,
-        project_name: r.project_name,
         operator: r.operator,
         experiment_type: r.experiment_type,
+        owner_user_id: r.owner_user_id,
     }
 }
 
 #[derive(serde::Serialize)]
 struct ExperimentDetail {
+    program_snapshot: Option<Program>,
+    sample_id: Option<String>,
+    project_name: Option<String>,
+    experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
-    sample_id: Option<String>,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
-    experiment_time: Option<String>,
     end_time: Option<String>,
-    project_name: Option<String>,
     description: Option<String>,
     operator: Option<String>,
     experiment_type: Option<String>,
     analysis: Option<serde_json::Value>,
-    program_snapshot: Option<Program>,
     created_at: String,
     sample_count: i64,
+    owner_user_id: Option<String>,
 }
 
 fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
@@ -1594,27 +2272,27 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
         .analysis_results_json
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
-    let program_snapshot = r
-        .program_snapshot_json
-        .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
     ExperimentDetail {
+        program_snapshot: r
+            .program_snapshot_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok()),
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
         sample_id: r.sample_id,
+        project_name: r.project_name,
+        experiment_time: r.experiment_time,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
-        experiment_time: r.experiment_time,
         end_time: r.end_time,
-        project_name: r.project_name,
         description: r.description,
         operator: r.operator,
         experiment_type: r.experiment_type,
         analysis,
-        program_snapshot,
         created_at: r.created_at,
         sample_count,
+        owner_user_id: r.owner_user_id,
     }
 }
 
@@ -1649,14 +2327,21 @@ fn sample_dto(r: SampleRow) -> SampleDto {
 
 #[tauri::command]
 fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, String> {
-    let rows = lock(&state.storage)
-        .list_experiments()
-        .map_err(|e| e.to_string())?;
+    let user = current_user(&state)?;
+    let storage = lock(&state.storage);
+    let rows = if user.role.is_admin() {
+        storage.list_experiments()
+    } else {
+        storage.list_experiments_for_owner(&user.user_id)
+    }
+    .map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(summary_of).collect())
 }
 
 #[tauri::command]
 fn get_experiment_detail(state: State<AppState>, id: String) -> Result<ExperimentDetail, String> {
+    let user = current_user(&state)?;
+    authorize_experiment(&state, &id, &user)?;
     let s = lock(&state.storage);
     let row = s
         .get_experiment(&id)
@@ -1666,12 +2351,14 @@ fn get_experiment_detail(state: State<AppState>, id: String) -> Result<Experimen
     Ok(detail_of(row, count))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn get_experiment_samples(
     state: State<AppState>,
     id: String,
     max_points: Option<usize>,
 ) -> Result<Vec<SampleDto>, String> {
+    let user = current_user(&state)?;
+    authorize_experiment(&state, &id, &user)?;
     let rows = lock(&state.storage)
         .get_samples(&id, max_points.unwrap_or(2000))
         .map_err(|e| e.to_string())?;
@@ -1680,6 +2367,7 @@ fn get_experiment_samples(
 
 #[tauri::command]
 fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
+    let actor = current_admin(&state)?;
     // Never delete the run currently in progress.
     if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
         return Err("无法删除正在运行的实验".into());
@@ -1689,6 +2377,7 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     state.audit.write(
         &AuditEntry::new(Category::Experiment, "delete", AuditResult::Success)
+            .operator(actor.display_name)
             .detail(serde_json::json!({ "id": id })),
     );
     Ok(())
@@ -1705,11 +2394,46 @@ fn parse_hms_min(s: &str) -> Option<f64> {
     Some(h * 60.0 + m + sec / 60.0)
 }
 
+/// Sample rows GB analysis may use: inside the reduction stage AND actually weighed.
+///
+/// The sampler deliberately writes balance-offline rows with `weight = 0.0` and a
+/// "天平离线" annotation so the series stays gap-free (docs/06 §6.3) — but feeding those
+/// zeros to the Rt formula turns ΔW into the entire sample mass. Rows from heating,
+/// stabilising and cooling are excluded too: no reduction happens there, so including them
+/// dilutes the reduction-rate slope (#42). `report.rs` already scopes its condition checks
+/// the same way.
+fn reducing_samples(samples: &[SampleRow]) -> Vec<&SampleRow> {
+    let reducing = kind_str(StageKind::Reducing);
+    samples
+        .iter()
+        .filter(|r| r.experiment_status.as_deref() == Some(reducing))
+        .filter(|r| r.system_message.is_none() && r.weight > 0.0)
+        .collect()
+}
+
+/// `(minutes since the reduction stage began, Rt)` pairs for the rate-index fit. The time
+/// base is the first reduction sample rather than the start of the run (#42).
+fn reduction_curve(samples: &[&SampleRow], w0: f64, o2_pct: f64) -> Vec<(f64, f64)> {
+    let t0 = samples
+        .first()
+        .and_then(|r| r.experiment_duration.as_deref())
+        .and_then(parse_hms_min)
+        .unwrap_or(0.0);
+    samples
+        .iter()
+        .filter_map(|r| {
+            let m = parse_hms_min(r.experiment_duration.as_deref()?)?;
+            Some((m - t0, reducibility(w0, r.weight, o2_pct)?.rt))
+        })
+        .collect()
+}
+
 /// Persist an analysis-result JSON onto the experiment row and audit it.
 fn persist_analysis(
     state: &AppState,
     id: &str,
     standard: &str,
+    operator: &str,
     value: &serde_json::Value,
 ) -> Result<(), String> {
     let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
@@ -1718,31 +2442,29 @@ fn persist_analysis(
         .map_err(|e| e.to_string())?;
     state.audit.write(
         &AuditEntry::new(Category::Experiment, "analyze", AuditResult::Success)
+            .operator(operator.to_string())
             .detail(serde_json::json!({ "id": id, "standard": standard })),
     );
     Ok(())
 }
 
-fn require_experiment(state: &AppState, id: &str) -> Result<(), String> {
-    let exists = lock(&state.storage)
-        .get_experiment(id)
-        .map_err(|e| e.to_string())?
-        .is_some();
-    if exists {
-        Ok(())
-    } else {
-        Err("实验不存在".into())
-    }
+/// Authorise access to one experiment and return the session user (needed for audit
+/// attribution at the call site).
+fn require_experiment(state: &AppState, id: &str) -> Result<UserRow, String> {
+    let user = current_user(state)?;
+    authorize_experiment(state, id, &user)?;
+    Ok(user)
 }
 
 /// GB/T 13241 reducibility: Rt from W0 (sample weight) and Wt (final sample weight),
 /// plus the reduction-rate index over the recorded curve. `o2_pct` is operator-entered.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn analyze_gb13241(
     state: State<AppState>,
     id: String,
     o2_pct: f64,
 ) -> Result<serde_json::Value, String> {
+    let user = require_experiment(&state, &id)?;
     let (w0, samples) = {
         let s = lock(&state.storage);
         let row = s
@@ -1752,15 +2474,15 @@ fn analyze_gb13241(
         let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
         (row.sample_weight, samples)
     };
-    let wt = samples.last().map(|r| r.weight).unwrap_or(w0);
+    // Wt is the last VALID reduction-stage weighing, not simply the last row in the run —
+    // that one is recorded after cooling and may be a balance-offline zero (#42).
+    let usable = reducing_samples(&samples);
+    let wt = usable
+        .last()
+        .map(|r| r.weight)
+        .ok_or("还原段没有有效采样(天平离线或数据不足),无法计算还原度")?;
     let red = reducibility(w0, wt, o2_pct).ok_or("W0 或 O2% 无效")?;
-    let points: Vec<(f64, f64)> = samples
-        .iter()
-        .filter_map(|r| {
-            let m = parse_hms_min(r.experiment_duration.as_deref()?)?;
-            Some((m, reducibility(w0, r.weight, o2_pct)?.rt))
-        })
-        .collect();
+    let points = reduction_curve(&usable, w0, o2_pct);
     let value = serde_json::json!({
         "standard": "GB/T 13241",
         "w0": w0,
@@ -1769,14 +2491,16 @@ fn analyze_gb13241(
         "rt": red.rt,
         "delta_w": red.delta_w,
         "reduction_rate_index": reduction_rate_index(&points),
+        "valid_sample_count": usable.len(),
+        "excluded_sample_count": samples.len() - usable.len(),
         "computed_at": iso_now(),
     });
-    persist_analysis(&state, &id, "GB/T 13241", &value)?;
+    persist_analysis(&state, &id, "GB/T 13241", &user.display_name, &value)?;
     Ok(value)
 }
 
 /// GB/T 13242 low-temperature degradation RDI from operator-entered sieve masses (g).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn analyze_gb13242(
     state: State<AppState>,
     id: String,
@@ -1786,7 +2510,7 @@ fn analyze_gb13242(
     m_05_315: f64,
     m_lt05: f64,
 ) -> Result<serde_json::Value, String> {
-    require_experiment(&state, &id)?;
+    let user = require_experiment(&state, &id)?;
     let r = rdi(m0, m_gt63, m_315_63, m_05_315, m_lt05).ok_or("m0 无效")?;
     let value = serde_json::json!({
         "standard": "GB/T 13242",
@@ -1801,7 +2525,7 @@ fn analyze_gb13242(
         "sieve_warning": r.sieve_warning,
         "computed_at": iso_now(),
     });
-    persist_analysis(&state, &id, "GB/T 13242", &value)?;
+    persist_analysis(&state, &id, "GB/T 13242", &user.display_name, &value)?;
     Ok(value)
 }
 
@@ -1812,7 +2536,7 @@ fn analyze_gb13240(
     id: String,
     volumes: Vec<(f64, f64)>,
 ) -> Result<serde_json::Value, String> {
-    require_experiment(&state, &id)?;
+    let user = require_experiment(&state, &id)?;
     let r = free_swelling(&volumes).ok_or("无有效试样体积")?;
     let value = serde_json::json!({
         "standard": "GB/T 13240",
@@ -1820,41 +2544,28 @@ fn analyze_gb13240(
         "average": r.average,
         "computed_at": iso_now(),
     });
-    persist_analysis(&state, &id, "GB/T 13240", &value)?;
+    persist_analysis(&state, &id, "GB/T 13240", &user.display_name, &value)?;
     Ok(value)
 }
 
 // ---- Report & export --------------------------------------------------------
 
-fn reducing_target_from_program(program: &Program) -> Option<f64> {
-    program
-        .stages
-        .iter()
-        .find(|s| s.kind == StageKind::Reducing)
-        .map(|s| s.target_temp)
-}
-
-/// The reducing-stage target temperature for condition checks. Prefer the stored
-/// per-run program snapshot; old records fall back to the current standard table.
-fn reducing_target(exp: &ExperimentRow) -> Option<f64> {
-    exp.program_snapshot_json
-        .as_deref()
-        .and_then(|j| serde_json::from_str::<Program>(j).ok())
-        .as_ref()
-        .and_then(reducing_target_from_program)
-        .or_else(|| {
-            exp.experiment_type
-                .as_deref()
-                .and_then(standard_program)
-                .as_ref()
-                .and_then(reducing_target_from_program)
-        })
+/// The reducing-stage target temperature for a mode (for report condition checks).
+fn reducing_target(mode: Option<&str>) -> Option<f64> {
+    mode.and_then(standard_program).and_then(|p| {
+        p.stages
+            .into_iter()
+            .find(|s| s.kind == StageKind::Reducing)
+            .map(|s| s.target_temp)
+    })
 }
 
 /// Generate a self-contained HTML report to the exports dir and open it. Returns the path.
 #[tauri::command]
 fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    authorize_experiment(&st, &id, &user)?;
     let (exp, samples) = {
         let s = lock(&st.storage);
         let exp = s
@@ -1872,19 +2583,18 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
         &exp,
         &samples,
         analysis.as_ref(),
-        reducing_target(&exp),
+        reducing_target(exp.experiment_type.as_deref()),
     );
-    let path = st.exports_dir.join(format!("report-{id}.html"));
+    let user_dir = st.exports_dir.join(&user.user_id);
+    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
+    let path = user_dir.join(format!("report-{id}.html"));
     std::fs::write(&path, html).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().to_string();
     let _ = app.opener().open_path(p.clone(), None::<&str>);
     st.audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "generate_report",
-            AuditResult::Success,
-        )
-        .detail(serde_json::json!({ "id": id, "path": p })),
+        &AuditEntry::new(Category::Export, "generate_report", AuditResult::Success)
+            .operator(user.display_name)
+            .detail(serde_json::json!({ "id": id, "path": p })),
     );
     Ok(p)
 }
@@ -1893,6 +2603,8 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
 #[tauri::command]
 fn export_experiment(app: AppHandle, id: String, format: String) -> Result<String, String> {
     let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    authorize_experiment(&st, &id, &user)?;
     let (exp, samples) = {
         let s = lock(&st.storage);
         let exp = s
@@ -1914,12 +2626,15 @@ fn export_experiment(app: AppHandle, id: String, format: String) -> Result<Strin
         "xlsx" => (tmh_core::report::samples_to_xlsx(&exp, &samples)?, "xlsx"),
         _ => return Err("未知导出格式".into()),
     };
-    let path = st.exports_dir.join(format!("{id}.{ext}"));
+    let user_dir = st.exports_dir.join(&user.user_id);
+    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
+    let path = user_dir.join(format!("{id}.{ext}"));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().to_string();
     let _ = app.opener().open_path(p.clone(), None::<&str>);
     st.audit.write(
-        &AuditEntry::new(Category::Experiment, "export", AuditResult::Success)
+        &AuditEntry::new(Category::Export, "export_data", AuditResult::Success)
+            .operator(user.display_name)
             .detail(serde_json::json!({ "id": id, "format": format, "path": p })),
     );
     Ok(p)
@@ -1953,15 +2668,20 @@ impl UpdateCheck {
 }
 
 #[tauri::command]
-fn get_updater_status(app: AppHandle) -> UpdateCheck {
+fn get_updater_status(app: AppHandle) -> Result<UpdateCheck, String> {
+    current_user(&app.state::<AppState>())?;
     let enabled = app.state::<AppState>().updater_enabled;
-    UpdateCheck::base(enabled, app.package_info().version.to_string())
+    Ok(UpdateCheck::base(
+        enabled,
+        app.package_info().version.to_string(),
+    ))
 }
 
 /// Check the manifest endpoint for a newer version. Gated; never errors into the UI —
 /// an unreachable endpoint yields a friendly `error` string (offline is normal here).
 #[tauri::command]
-async fn check_for_update(app: AppHandle) -> UpdateCheck {
+async fn check_for_update(app: AppHandle) -> Result<UpdateCheck, String> {
+    let operator = current_user(&app.state::<AppState>())?.display_name;
     let current = app.package_info().version.to_string();
     let (enabled, audit) = {
         let st = app.state::<AppState>();
@@ -1969,7 +2689,7 @@ async fn check_for_update(app: AppHandle) -> UpdateCheck {
     };
     let mut check = UpdateCheck::base(enabled, current);
     if !enabled {
-        return check;
+        return Ok(check);
     }
     match app.updater() {
         Ok(updater) => match updater.check().await {
@@ -1995,17 +2715,19 @@ async fn check_for_update(app: AppHandle) -> UpdateCheck {
                 AuditResult::Success
             },
         )
+        .operator(operator)
         .detail(
             serde_json::json!({ "available": check.available, "new_version": check.new_version }),
         ),
     );
     let _ = app.emit("update-status", &check);
-    check
+    Ok(check)
 }
 
 /// Download + verify (minisign) + install the update, then restart. Gated.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
+    let operator = current_admin(&app.state::<AppState>())?.display_name;
     if !app.state::<AppState>().updater_enabled {
         return Err("更新功能未启用".into());
     }
@@ -2019,11 +2741,9 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .download_and_install(|_chunk, _total| {}, || {})
         .await
         .map_err(|e| e.to_string())?;
-    app.state::<AppState>().audit.write(&AuditEntry::new(
-        Category::App,
-        "install_update",
-        AuditResult::Success,
-    ));
+    app.state::<AppState>().audit.write(
+        &AuditEntry::new(Category::App, "install_update", AuditResult::Success).operator(operator),
+    );
     app.restart();
 }
 
@@ -2032,6 +2752,10 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 /// Build and run the Tauri application.
 pub fn run() {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
+    if let Err(message) = validate_runtime_mode(&mode) {
+        eprintln!("TMH 启动失败: {message}");
+        std::process::exit(1);
+    }
     let sim_speed = sim_speed(&mode);
     // Software update checking is OFF by default (docs/09 §9.3); config/env enables it.
     let updater_enabled = matches!(
@@ -2051,14 +2775,13 @@ pub fn run() {
     let audit_dir = data_root.join("logs");
     let db_dir = data_root.join("data");
     let exports_dir = data_root.join("exports");
-    let config_dir = data_root.join("config");
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
     let _ = std::fs::create_dir_all(&exports_dir);
-    let _ = std::fs::create_dir_all(&config_dir);
+    // Pay the Argon2 cost once here, before any login can be attempted.
+    warm_password_hashing();
     let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let comm_config_path = comm_config_path();
-    let comm_config = load_comm_config_from(&comm_config_path);
+    let comm_config = load_comm_config();
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
     // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
@@ -2067,6 +2790,7 @@ pub fn run() {
     // Crash recovery before the UI comes up (safety atmosphere for any open run).
     recover_unfinished(&hub, &storage, &audit);
 
+    let idle_timeout_s = idle_timeout_s();
     let state = AppState {
         hub,
         mode,
@@ -2074,14 +2798,14 @@ pub fn run() {
         limit_co: comm_config.gas_safety_limits.co,
         audit,
         storage: Arc::new(Mutex::new(storage)),
+        auth: Arc::new(AuthService::new(idle_timeout_s)),
         exp: Arc::new(ExpControl::new()),
         sim_speed,
         exports_dir,
-        custom_modes_path: config_dir.join("experiment_modes.json"),
-        comm_config_path,
-        auth_path: config_dir.join("auth.json"),
         updater_enabled,
         telemetry_gen: Arc::new(AtomicU64::new(0)),
+        cadence: Cadence::from_config(&comm_config),
+        idle_timeout_s,
     };
 
     tauri::Builder::default()
@@ -2102,13 +2826,24 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            get_auth_state,
+            bootstrap_admin,
+            login,
+            logout,
+            lock_session,
+            touch_session,
+            change_own_password,
+            list_users,
+            create_user,
+            update_user,
+            reset_user_password,
+            set_experiment_owner,
+            get_public_safety_status,
+            emergency_safe_shutdown,
             get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,
-            get_comm_config,
-            get_admin_auth_status,
-            change_admin_password,
-            update_comm_config,
+            get_runtime_settings,
             get_device_health,
             set_gas_flow,
             set_gas_on_off,
@@ -2119,13 +2854,13 @@ pub fn run() {
             subscribe_telemetry,
             unsubscribe_telemetry,
             get_experiment_state,
-            preflight_experiment,
-            generate_sample_id,
-            get_experiment_start_defaults,
             start_experiment,
             stop_experiment,
             skip_stage,
             list_programs,
+            preflight_experiment,
+            generate_sample_id,
+            get_experiment_start_defaults,
             save_custom_program,
             delete_custom_program,
             list_experiments,
@@ -2173,15 +2908,258 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tmh_core::auth::UserRole;
+
+    /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
+    /// below (`current_user`, `current_admin`, `authorize_experiment`,
+    /// `require_experiment_controller`) are the single enforcement point every protected
+    /// command funnels through, so exercising them here covers the matrix the spec promises
+    /// even though the `#[tauri::command]` wrappers themselves need a running app (#45).
+    fn test_state() -> AppState {
+        let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("built-in config");
+        let dir = std::env::temp_dir().join(format!("tmh_state_{}", tmh_core::auth::new_user_id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        AppState {
+            hub: Arc::new(build_mock_hub(&cfg)),
+            mode: "mock".into(),
+            limit_h2: cfg.gas_safety_limits.h2,
+            limit_co: cfg.gas_safety_limits.co,
+            audit: Arc::new(AuditLog::new(dir.join("logs"))),
+            storage: Arc::new(Mutex::new(Storage::open_in_memory().expect("db"))),
+            auth: Arc::new(AuthService::new(900)),
+            exp: Arc::new(ExpControl::new()),
+            sim_speed: 180.0,
+            exports_dir: dir.join("exports"),
+            updater_enabled: false,
+            telemetry_gen: Arc::new(AtomicU64::new(0)),
+            cadence: Cadence::from_config(&cfg),
+            idle_timeout_s: 900,
+        }
+    }
+
+    /// Bootstrap an admin plus two ordinary users, each owning one experiment.
+    /// Returns (admin_id, alice_id, bob_id); the session is left logged out.
+    fn seed_users_and_experiments(state: &AppState) -> (String, String, String) {
+        let now = epoch_now();
+        let admin = state
+            .auth
+            .bootstrap(
+                &lock(&state.storage),
+                "admin",
+                "管理员",
+                "admin-password",
+                now,
+            )
+            .expect("bootstrap");
+        let mut ids = Vec::new();
+        for (username, display) in [("alice", "爱丽丝"), ("bob", "鲍勃")] {
+            let user = state
+                .auth
+                .create_user(
+                    &lock(&state.storage),
+                    username,
+                    display,
+                    "temp-password",
+                    UserRole::User,
+                    now,
+                )
+                .expect("create user");
+            // Clear the forced first-login password change so these accounts can be used.
+            lock(&state.storage)
+                .set_user_password(
+                    &user.user_id,
+                    &user.password_hash,
+                    false,
+                    "2026-09-01T00:00:00",
+                )
+                .expect("clear must_change_password");
+            ids.push(user.user_id);
+        }
+        state.auth.logout();
+        let owners = [
+            ("exp-admin", None),
+            ("exp-alice", Some(ids[0].clone())),
+            ("exp-bob", Some(ids[1].clone())),
+        ];
+        for (id, owner) in owners {
+            lock(&state.storage)
+                .insert_experiment(&ExperimentRow {
+                    experiment_id: id.into(),
+                    experiment_name: id.into(),
+                    sample_id: Some(format!("{id}-sample")),
+                    project_name: Some("project".into()),
+                    experiment_time: None,
+                    program_snapshot_json: None,
+                    sample_name: "样品".into(),
+                    sample_weight: 100.0,
+                    start_time: "2026-09-01T08:00:00".into(),
+                    end_time: None,
+                    description: None,
+                    operator: None,
+                    experiment_type: Some("REDUCIBILITY".into()),
+                    analysis_results_json: None,
+                    created_at: "2026-09-01T08:00:00".into(),
+                    owner_user_id: owner,
+                })
+                .expect("insert experiment");
+        }
+        (admin.user_id, ids[0].clone(), ids[1].clone())
+    }
+
+    fn login(state: &AppState, username: &str, password: &str) {
+        state
+            .auth
+            .login(&lock(&state.storage), username, password, epoch_now())
+            .expect("login");
+    }
+
+    #[test]
+    fn anonymous_session_is_refused_by_every_guard() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        assert_eq!(current_user(&state).unwrap_err(), "AUTH_REQUIRED");
+        assert_eq!(current_admin(&state).unwrap_err(), "AUTH_REQUIRED");
+        assert_eq!(
+            require_experiment(&state, "exp-alice").unwrap_err(),
+            "AUTH_REQUIRED"
+        );
+        assert_eq!(
+            require_experiment_controller(&state).unwrap_err(),
+            "AUTH_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn a_user_cannot_reach_another_users_experiment() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "alice", "temp-password");
+        assert!(require_experiment(&state, "exp-alice").is_ok());
+        assert_eq!(
+            require_experiment(&state, "exp-bob").unwrap_err(),
+            "FORBIDDEN"
+        );
+        // Legacy rows with no owner stay admin-only after the v1 -> v2 migration.
+        assert_eq!(
+            require_experiment(&state, "exp-admin").unwrap_err(),
+            "FORBIDDEN"
+        );
+        // A non-admin is refused admin-only commands (delete, user management, ownership).
+        assert_eq!(current_admin(&state).unwrap_err(), "FORBIDDEN");
+        // An id that does not exist must not leak as FORBIDDEN vs 不存在 either way round.
+        assert!(require_experiment(&state, "exp-nope").is_err());
+    }
+
+    #[test]
+    fn an_admin_reaches_every_experiment_including_unowned() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+        for id in ["exp-admin", "exp-alice", "exp-bob"] {
+            assert!(require_experiment(&state, id).is_ok(), "admin denied {id}");
+        }
+        assert!(current_admin(&state).is_ok());
+    }
+
+    #[test]
+    fn locking_the_session_revokes_access_until_the_next_login() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "alice", "temp-password");
+        assert!(require_experiment(&state, "exp-alice").is_ok());
+        state.auth.lock();
+        assert_eq!(current_user(&state).unwrap_err(), "AUTH_REQUIRED");
+        assert_eq!(
+            require_experiment(&state, "exp-alice").unwrap_err(),
+            "AUTH_REQUIRED"
+        );
+        login(&state, "alice", "temp-password");
+        assert!(require_experiment(&state, "exp-alice").is_ok());
+    }
+
+    #[test]
+    fn a_running_experiment_is_controlled_by_its_owner_or_an_admin_only() {
+        let state = test_state();
+        let (_admin_id, alice_id, _bob_id) = seed_users_and_experiments(&state);
+        let mut running = ExperimentStatus::idle();
+        running.running = true;
+        running.experiment_id = Some("exp-alice".into());
+        running.owner_user_id = Some(alice_id);
+        state.exp.set_status(running);
+
+        login(&state, "bob", "temp-password");
+        assert_eq!(
+            require_experiment_controller(&state).unwrap_err(),
+            "FORBIDDEN",
+            "another operator must not steer a run they do not own"
+        );
+        login(&state, "alice", "temp-password");
+        assert!(require_experiment_controller(&state).is_ok());
+        login(&state, "admin", "admin-password");
+        assert!(
+            require_experiment_controller(&state).is_ok(),
+            "an admin can take over"
+        );
+
+        // With nothing running, any authenticated operator may drive the gas panel.
+        state.exp.set_status(ExperimentStatus::idle());
+        login(&state, "bob", "temp-password");
+        assert!(require_experiment_controller(&state).is_ok());
+    }
+
+    #[test]
+    fn a_temporary_password_blocks_everything_but_changing_it() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        // create_user leaves must_change_password set; make a third account that keeps it.
+        login(&state, "admin", "admin-password");
+        state
+            .auth
+            .create_user(
+                &lock(&state.storage),
+                "carol",
+                "卡罗尔",
+                "temp-password",
+                UserRole::User,
+                epoch_now(),
+            )
+            .expect("create carol");
+        state.auth.logout();
+        login(&state, "carol", "temp-password");
+        assert_eq!(
+            current_user(&state).unwrap_err(),
+            "PASSWORD_CHANGE_REQUIRED"
+        );
+        assert_eq!(
+            require_experiment_controller(&state).unwrap_err(),
+            "PASSWORD_CHANGE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn a_deactivated_account_loses_its_live_session() {
+        let state = test_state();
+        let (_admin_id, alice_id, _bob) = seed_users_and_experiments(&state);
+        login(&state, "alice", "temp-password");
+        assert!(current_user(&state).is_ok());
+        lock(&state.storage)
+            .update_user(
+                &alice_id,
+                "爱丽丝",
+                UserRole::User,
+                false,
+                "2026-09-01T09:00:00",
+            )
+            .expect("deactivate");
+        assert_eq!(current_user(&state).unwrap_err(), "ACCOUNT_DISABLED");
+    }
 
     fn params(edit: impl FnOnce(&mut ExperimentParams)) -> ExperimentParams {
         let mut p = ExperimentParams {
             sample_id: "S1".into(),
             sample_name: "样品".into(),
             sample_weight: 100.0,
-            operator: "张三".into(),
             experiment_type: "REDUCIBILITY".into(),
-            experiment_time: None,
             project_name: None,
             notes: None,
         };
@@ -2190,17 +3168,27 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_modes_cannot_label_mock_devices_as_real() {
+        assert!(validate_runtime_mode("mock").is_ok());
+        for mode in ["real", "replay", "", "MOCK", "typo"] {
+            assert!(validate_runtime_mode(mode).is_err(), "{mode}");
+        }
+    }
+
+    #[test]
     fn valid_experiment_params_pass() {
-        assert!(validate_experiment_params(&params(|_| {})).is_empty());
+        assert!(validate_experiment_params(&params(|_| {})).is_ok());
     }
 
     #[test]
     fn blank_or_bad_experiment_params_are_rejected() {
-        assert!(!validate_experiment_params(&params(|p| p.sample_id = "  ".into())).is_empty());
-        assert!(!validate_experiment_params(&params(|p| p.sample_name = "".into())).is_empty());
-        assert!(!validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_empty());
-        assert!(!validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_empty());
-        assert!(!validate_experiment_params(&params(|p| p.operator = "".into())).is_empty());
+        assert!(validate_experiment_params(&params(|p| p.sample_id = "  ".into())).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_name = "".into())).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_weight = 0.0)).is_err());
+        assert!(validate_experiment_params(&params(|p| p.sample_weight = f64::NAN)).is_err());
+        assert!(
+            validate_experiment_params(&params(|p| p.experiment_type = "NOPE".into())).is_err()
+        );
     }
 
     #[test]
@@ -2212,76 +3200,160 @@ mod tests {
 
     #[test]
     fn reducing_target_matches_program() {
-        let mut exp = ExperimentRow {
-            experiment_id: "e1".into(),
-            experiment_name: "e".into(),
-            sample_id: None,
-            sample_name: "s".into(),
-            sample_weight: 100.0,
-            start_time: "t0".into(),
-            experiment_time: None,
-            end_time: None,
-            project_name: None,
-            description: None,
-            operator: None,
-            experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
-            analysis_results_json: None,
-            program_snapshot_json: None,
-            created_at: "t0".into(),
-        };
-        assert_eq!(reducing_target(&exp), Some(500.0));
-
-        let mut snapshot = standard_program("REDUCIBILITY").unwrap();
-        snapshot.id = "custom-rt".into();
-        snapshot.name = "快照".into();
-        snapshot.source = ProgramSource::Custom;
-        snapshot.stages[2].target_temp = 720.0;
-        exp.program_snapshot_json = Some(serde_json::to_string(&snapshot).unwrap());
-        assert_eq!(reducing_target(&exp), Some(720.0));
+        assert_eq!(reducing_target(Some("REDUCIBILITY")), Some(900.0));
+        assert_eq!(reducing_target(Some("LOW_TEMP_DEGRADATION")), Some(500.0));
+        assert_eq!(reducing_target(Some("bogus")), None);
     }
 
     #[test]
-    fn sample_id_uses_program_prefix_date_and_next_sequence() {
-        let program = standard_program("LOW_TEMP_DEGRADATION").unwrap();
-        let rows = vec![
-            ExperimentRow {
-                experiment_id: "e1".into(),
-                experiment_name: "e".into(),
-                sample_id: Some("RDI-20260831-001".into()),
-                sample_name: "s".into(),
-                sample_weight: 100.0,
-                start_time: "t0".into(),
-                experiment_time: None,
-                end_time: None,
-                project_name: None,
-                description: None,
-                operator: None,
-                experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
-                analysis_results_json: None,
-                program_snapshot_json: None,
-                created_at: "t0".into(),
-            },
-            ExperimentRow {
-                experiment_id: "e2".into(),
-                experiment_name: "e".into(),
-                sample_id: Some("RDI-20260831-009".into()),
-                sample_name: "s".into(),
-                sample_weight: 100.0,
-                start_time: "t1".into(),
-                experiment_time: None,
-                end_time: None,
-                project_name: None,
-                description: None,
-                operator: None,
-                experiment_type: Some("LOW_TEMP_DEGRADATION".into()),
-                analysis_results_json: None,
-                program_snapshot_json: None,
-                created_at: "t1".into(),
-            },
+    fn experiment_access_is_owner_or_admin_only() {
+        assert!(may_access_experiment(
+            UserRole::User,
+            "alice",
+            Some("alice")
+        ));
+        assert!(!may_access_experiment(UserRole::User, "alice", Some("bob")));
+        assert!(!may_access_experiment(UserRole::User, "alice", None));
+        assert!(may_access_experiment(UserRole::Admin, "admin", Some("bob")));
+        assert!(may_access_experiment(UserRole::Admin, "admin", None));
+    }
+
+    #[test]
+    fn running_status_hides_owner_metadata_from_other_users() {
+        let mut raw = ExperimentStatus::idle();
+        raw.running = true;
+        raw.sample_name = Some("秘密样品".into());
+        raw.owner_user_id = Some("alice".into());
+        raw.owner_display_name = Some("Alice".into());
+
+        let hidden = redact_experiment_status(raw.clone(), UserRole::User, "bob");
+        assert!(hidden.occupied_by_other);
+        assert!(!hidden.can_control);
+        assert!(hidden.sample_name.is_none());
+        assert!(hidden.owner_user_id.is_none());
+        assert!(hidden.owner_display_name.is_none());
+
+        let admin = redact_experiment_status(raw, UserRole::Admin, "admin");
+        assert!(admin.can_control);
+        assert_eq!(admin.sample_name.as_deref(), Some("秘密样品"));
+    }
+
+    fn row(status: &str, minutes: u64, weight: f64, offline: bool) -> SampleRow {
+        SampleRow {
+            experiment_id: "e1".into(),
+            timestamp: "2026-09-01T08:00:00".into(),
+            experiment_duration: Some(format!("{:02}:{:02}:00", minutes / 60, minutes % 60)),
+            temperature: 900.0,
+            weight,
+            weight_loss: 100.0 - weight,
+            co_flow: 4.5,
+            co2_flow: 0.0,
+            n2_flow: 10.5,
+            h2_flow: 0.0,
+            experiment_status: Some(status.into()),
+            system_message: offline.then(|| "天平离线".to_string()),
+        }
+    }
+
+    #[test]
+    fn gb_analysis_ignores_non_reduction_and_balance_offline_rows() {
+        // Regression for #42: the run ends with cooling rows, and any balance-offline row
+        // carries weight = 0.0 by design. Taking "the last sample" made Wt = 0, so
+        // ΔW became the whole sample and Rt came out at 333% for a 30% O2 run.
+        let samples = vec![
+            row("HEATING", 0, 100.0, false),
+            row("REDUCING", 10, 95.0, false),
+            row("REDUCING", 20, 0.0, true), // balance dropped out mid-stage
+            row("REDUCING", 30, 85.0, false),
+            row("COOLING", 40, 84.0, false),
+            row("COOLING", 50, 0.0, true), // and again after the run
         ];
+        let usable = reducing_samples(&samples);
+        assert_eq!(usable.len(), 2, "only weighed reduction rows survive");
         assert_eq!(
-            next_sample_id(&program, "2026-08-31T22:16", &rows),
-            "RDI-20260831-010"
+            usable.last().unwrap().weight,
+            85.0,
+            "Wt is the last valid weighing"
+        );
+
+        // The curve is rebased on the reduction stage, not the start of the run.
+        let curve = reduction_curve(&usable, 100.0, 30.0);
+        assert_eq!(curve.len(), 2);
+        assert_eq!(curve[0].0, 0.0, "time base is the first reduction sample");
+        assert_eq!(curve[1].0, 20.0);
+        assert!((curve[0].1 - (5.0 / 30.0 * 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gb_analysis_has_no_usable_rows_when_the_balance_was_never_online() {
+        let samples = vec![
+            row("HEATING", 0, 100.0, false),
+            row("REDUCING", 10, 0.0, true),
+            row("COOLING", 20, 0.0, true),
+        ];
+        assert!(
+            reducing_samples(&samples).is_empty(),
+            "an all-offline reduction stage must yield no result instead of a fabricated one"
+        );
+    }
+
+    #[test]
+    fn a_slow_sampling_interval_never_slows_the_safety_loop() {
+        // The control loop evaluates the stop flag and the MFC/temperature offline abort,
+        // so tying its period to an operator-editable sampling interval would let a
+        // configured `SAMPLING.interval_s` of, say, 30 s delay cutting the gas by 30 s.
+        assert_eq!(
+            control_period(Duration::from_secs(30)),
+            CONTROL_TICK_MAX,
+            "a slow sampling cadence must not slow safety checks"
+        );
+        assert_eq!(control_period(Duration::from_secs(1)), CONTROL_TICK_MAX);
+        // A faster cadence than the cap is honoured as configured.
+        assert_eq!(
+            control_period(Duration::from_millis(200)),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn tick_deadlines_do_not_drift_but_resync_after_a_stall() {
+        // #43: a fixed period measured from the previous DEADLINE (not from "now") keeps a
+        // 180 min hold at 180 min however long each tick's own work takes.
+        let period = Duration::from_secs(1);
+        let start = Instant::now();
+        let mut deadline = start + period;
+        // Each tick's work overruns by 300 ms; the schedule must not slip.
+        for n in 2..=10 {
+            let now = deadline + Duration::from_millis(300);
+            deadline = next_deadline(deadline, period, now);
+            assert_eq!(deadline, start + period * n, "tick {n} drifted");
+        }
+        // A stall longer than a whole period resyncs instead of firing a catch-up burst.
+        let stalled = deadline + Duration::from_secs(30);
+        assert_eq!(
+            next_deadline(deadline, period, stalled),
+            stalled + period,
+            "a long stall resynchronises"
+        );
+    }
+
+    #[test]
+    fn the_sample_buffer_is_capped_and_counts_what_it_drops() {
+        // #47: a run whose writes keep failing must not grow its buffer without bound.
+        let mut buffer = SampleBuffer::default();
+        for i in 0..(MAX_BUFFERED_SAMPLES + 25) {
+            buffer.push(row("REDUCING", i as u64, 90.0, false));
+        }
+        assert_eq!(buffer.rows.len(), MAX_BUFFERED_SAMPLES);
+        assert_eq!(buffer.dropped, 25);
+        // The rows kept are the newest ones: the 25 oldest were evicted.
+        let minutes = |r: &SampleRow| {
+            parse_hms_min(r.experiment_duration.as_deref().unwrap()).unwrap() as usize
+        };
+        assert_eq!(minutes(buffer.rows.first().unwrap()), 25);
+        assert_eq!(
+            minutes(buffer.rows.last().unwrap()),
+            MAX_BUFFERED_SAMPLES + 24
         );
     }
 
@@ -2301,7 +3373,7 @@ mod tests {
     fn load_comm_config_returns_a_valid_config() {
         // The test working dir has no config/comm_config.json, so this exercises the
         // compiled-in default fallback path (#11).
-        load_comm_config_from(&comm_config_path())
+        load_comm_config()
             .validate()
             .expect("fallback config valid");
     }

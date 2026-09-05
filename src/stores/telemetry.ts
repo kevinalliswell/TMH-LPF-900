@@ -10,26 +10,33 @@ interface TelemetryState {
   snapshot: TelemetrySnapshot | null;
   /** Wall-clock ms when the last frame arrived (for staleness detection). */
   lastAt: number | null;
+  /** Staleness window, hydrated from the backend's `heartbeat_timeout` (#44). */
+  staleMs: number;
   setSnapshot: (s: TelemetrySnapshot) => void;
+  setStaleMs: (ms: number) => void;
 }
+
+/** Fallback staleness window (docs/06 §6.3) used until the backend reports its config. */
+export const DEFAULT_STALE_MS = 5000;
 
 export const useTelemetry = create<TelemetryState>((set) => ({
   snapshot: null,
   lastAt: null,
+  staleMs: DEFAULT_STALE_MS,
   setSnapshot: (s) => set({ snapshot: s, lastAt: Date.now() }),
+  // Ignore nonsense from a corrupt config: a zero window would grey the whole UI forever.
+  setStaleMs: (ms) => set({ staleMs: Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_STALE_MS }),
 }));
 
-/** Telemetry is stale when no frame has arrived within this window (docs/06 §6.3, docs/07). */
-export const STALE_MS = 5000;
-
-/** Reactive staleness: true when the stream has frozen (>5s since the last frame), so tiles
- *  and status dots can grey out instead of showing frozen values as live. */
+/** Reactive staleness: true when the stream has frozen, so tiles and status dots can grey
+ *  out instead of showing frozen values as live. */
 export function useTelemetryStale(): boolean {
   const lastAt = useTelemetry((s) => s.lastAt);
+  const staleMs = useTelemetry((s) => s.staleMs);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
-  return lastAt == null || now - lastAt > STALE_MS;
+  return lastAt == null || now - lastAt > staleMs;
 }

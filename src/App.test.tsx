@@ -3,8 +3,8 @@ import { describe, it, expect } from "vitest";
 import App from "./App";
 
 describe("App", () => {
-  it("renders the product splash heading", () => {
+  it("renders the product identity while authentication loads", async () => {
     render(<App />);
-    expect(screen.getByRole("heading").textContent).toContain("TMH-LPF-900");
+    expect(await screen.findByText("TMH-LPF-900")).toBeTruthy();
   });
 });

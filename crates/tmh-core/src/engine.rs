@@ -525,6 +525,46 @@ mod tests {
     }
 
     #[test]
+    fn hold_stages_measure_real_elapsed_time_not_tick_count() {
+        // The orchestration layer now feeds the engine the time that actually passed rather
+        // than a fixed constant per loop iteration (#43). Uneven dt must therefore land the
+        // 30 min hold at 30 min of accumulated time, no earlier and no later.
+        let mut e = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
+        // Stage 0 is a dynamic heat to 900 °C: hold at 800 °C so nothing advances yet.
+        let uneven = [0.7_f64, 1.4, 0.9, 1.0, 2.0];
+        let mut elapsed = 0.0;
+        for (i, dt) in uneven.iter().cycle().take(50).enumerate() {
+            let r = e.tick(800.0, *dt);
+            elapsed += dt;
+            assert!(
+                r.apply_stage.is_none(),
+                "heating must not advance at 800°C ({i})"
+            );
+        }
+        assert!((e.total_elapsed_s() - elapsed).abs() < 1e-9);
+
+        // Reach the target: the heating stage completes and stage 1 (900 °C, 30 min) begins.
+        assert_eq!(e.tick(900.0, 1.0).apply_stage, Some(1));
+        let mut held = 0.0;
+        for dt in uneven.iter().cycle() {
+            if held + dt >= 30.0 * 60.0 {
+                break;
+            }
+            assert!(
+                e.tick(900.0, *dt).apply_stage.is_none(),
+                "hold released early at {held}s"
+            );
+            held += dt;
+        }
+        // One more tick crosses 30 min and releases the hold.
+        assert_eq!(e.tick(900.0, 2.0).apply_stage, Some(2));
+        assert!(
+            e.total_elapsed_s() >= elapsed + 1.0 + 30.0 * 60.0,
+            "total elapsed tracks the summed dt"
+        );
+    }
+
+    #[test]
     fn fast_forward_runs_13240_to_completion() {
         // Simulate a full FREE_SWELLING run: temperatures snap to each stage's target,
         // and we tick with dt large enough to satisfy holds.

@@ -34,7 +34,11 @@ const empty: Form = {
 };
 
 function toDatetimeInput(value: string): string {
-  return value ? value.slice(0, 16) : "";
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 function formFromDefaults(defaults: ExperimentStartDefaults): Form {
@@ -162,6 +166,7 @@ export function StartExperimentDialog({ onClose }: { onClose: () => void }) {
   const input = (k: keyof Form, type = "text") => (
     <input
       type={type}
+      readOnly={k === "operator" || k === "experiment_time"}
       value={f[k]}
       onChange={(e) => upd(k, e.target.value)}
       className="w-full rounded px-3 py-2 text-[13px]"
@@ -272,8 +277,8 @@ export function StartExperimentDialog({ onClose }: { onClose: () => void }) {
                 </select>
               </Field>
               <Field label="初重(g)">{input("sample_weight", "number")}</Field>
-              <Field label="操作人员">{input("operator")}</Field>
-              <Field label="实验时间">{input("experiment_time", "datetime-local")}</Field>
+              <Field label="当前操作人员">{input("operator")}</Field>
+              <Field label="启动时间（以实际开始为准）">{input("experiment_time", "datetime-local")}</Field>
             </div>
           </section>
 

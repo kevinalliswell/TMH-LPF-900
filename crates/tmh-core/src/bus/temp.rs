@@ -1,7 +1,7 @@
 //! Temperature bus actor — polls all 9 registers each cycle (docs/04 §4.1).
 
 use crate::config::CommConfig;
-use crate::health::Health;
+use crate::health::{Health, ReadFreshness};
 use crate::transport::Transport;
 use std::time::{Duration, Instant};
 use tmh_protocols::modbus;
@@ -12,6 +12,8 @@ pub struct TempSnapshot {
     pub temps: [Option<f64>; 9],
     pub connected: bool,
     pub consecutive_errors: u32,
+    #[serde(skip)]
+    pub freshness: ReadFreshness,
 }
 
 /// Owns the temperature transport + health.
@@ -22,6 +24,7 @@ pub struct TempActor {
     signed: bool,
     temps: [Option<f64>; 9],
     pub health: Health,
+    freshness: ReadFreshness,
 }
 
 impl TempActor {
@@ -33,6 +36,7 @@ impl TempActor {
             signed,
             temps: [None; 9],
             health: Health::new(),
+            freshness: ReadFreshness::default(),
         }
     }
 
@@ -48,6 +52,7 @@ impl TempActor {
     /// One poll cycle: read all 9 registers, updating temps + health. A read failure
     /// keeps the last values (stale) and advances the health state machine.
     pub fn poll_once(&mut self, now: Instant, deadline: Duration) {
+        self.freshness.fail();
         let req = modbus::build_read_all(self.addr);
         match self.transport.transact(&req, deadline) {
             Ok(buf) => match modbus::extract_read_all(&buf, self.addr)
@@ -55,6 +60,7 @@ impl TempActor {
             {
                 Some(temps) => {
                     self.temps = temps.map(Some);
+                    self.freshness.success(now);
                     self.health.on_success(now);
                 }
                 None => self.health.on_error(),
@@ -79,7 +85,14 @@ impl TempActor {
             temps: self.temps,
             connected: self.health.connected,
             consecutive_errors: self.health.consecutive_errors,
+            freshness: self.freshness,
         }
+    }
+}
+
+impl TempSnapshot {
+    pub fn is_fresh(&self, now: Instant) -> bool {
+        self.connected && self.freshness.is_fresh(now)
     }
 }
 

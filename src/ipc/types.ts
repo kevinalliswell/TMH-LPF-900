@@ -40,6 +40,15 @@ export interface GasLimits {
   co: number;
 }
 
+/** Cadences the backend loaded from `comm_config.json` (docs/06 §6.3). The UI mirrors
+ *  them instead of duplicating the numbers as constants (#44). */
+export interface RuntimeSettings {
+  sampling_interval_s: number;
+  telemetry_interval_s: number;
+  heartbeat_timeout_s: number;
+  idle_timeout_s: number;
+}
+
 /** Gas channel indices, matching the Rust actor ordering. */
 export const GAS = { H2: 0, N2: 1, CO2: 2, CO: 3 } as const;
 export const GAS_NAMES = ["H₂", "N₂", "CO₂", "CO"] as const;
@@ -72,6 +81,35 @@ export interface ExperimentState {
   tolerance?: number;
   stage_elapsed_s?: number;
   total_elapsed_s?: number;
+  owner_user_id?: string | null;
+  owner_display_name?: string | null;
+  can_control?: boolean;
+  occupied_by_other?: boolean;
+}
+
+export type UserRole = "ADMIN" | "USER";
+export type AuthStatus =
+  | "SETUP_REQUIRED"
+  | "ANONYMOUS"
+  | "AUTHENTICATED"
+  | "PASSWORD_CHANGE_REQUIRED"
+  | "LOCKED";
+
+export interface PublicUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at?: string | null;
+}
+
+export interface AuthSnapshot {
+  status: AuthStatus;
+  user?: PublicUser | null;
+  idle_timeout_s: number;
 }
 
 /** One program stage (mirrors tmh_core::engine::Stage). */
@@ -89,61 +127,51 @@ export interface StageDto {
 export type ProgramSource = "standard" | "custom";
 
 export interface ProgramDto {
-  id: string;
-  name: string;
   description: string;
   category: string;
   enabled: boolean;
   sample_prefix: string;
   source: ProgramSource;
+  id: string;
+  name: string;
   stages: StageDto[];
-}
-
-export interface PreflightIssue {
-  code: string;
-  message_zh: string;
-}
-
-export interface ExperimentPreflightResult {
-  ok: boolean;
-  blocking: PreflightIssue[];
-  warnings: PreflightIssue[];
-  program?: ProgramDto | null;
 }
 
 /** History list row. */
 export interface ExperimentSummary {
+  sample_id?: string | null;
+  project_name?: string | null;
+  experiment_time?: string | null;
   experiment_id: string;
   experiment_name: string;
-  sample_id?: string | null;
   sample_name: string;
   sample_weight: number;
   start_time: string;
-  experiment_time?: string | null;
   end_time?: string | null;
-  project_name?: string | null;
   operator?: string | null;
   experiment_type?: string | null;
   has_analysis: boolean;
+  owner_user_id?: string | null;
 }
 
 export interface ExperimentDetail {
+  program_snapshot?: ProgramDto | null;
+  sample_id?: string | null;
+  project_name?: string | null;
+  experiment_time?: string | null;
   experiment_id: string;
   experiment_name: string;
-  sample_id?: string | null;
   sample_name: string;
   sample_weight: number;
   start_time: string;
-  experiment_time?: string | null;
   end_time?: string | null;
-  project_name?: string | null;
   description?: string | null;
   operator?: string | null;
   experiment_type?: string | null;
   analysis?: Record<string, unknown> | null;
-  program_snapshot?: ProgramDto | null;
   created_at: string;
   sample_count: number;
+  owner_user_id?: string | null;
 }
 
 export interface SampleDto {
@@ -160,63 +188,14 @@ export interface SampleDto {
 }
 
 export interface ExperimentParams {
+  operator?: string;
+  experiment_time?: string | null;
   sample_id: string;
   sample_name: string;
   sample_weight: number;
-  operator: string;
-  experiment_type: string;
-  experiment_time?: string | null;
-  project_name?: string | null;
-  notes?: string | null;
-}
-
-export interface ExperimentStartDefaults {
-  sample_id: string;
-  sample_name: string;
-  sample_weight?: number | null;
-  operator: string;
   experiment_type: string;
   project_name?: string | null;
-  experiment_time: string;
   notes?: string | null;
-}
-
-export interface SerialParamsDto {
-  port: string;
-  baudrate: number;
-  bytesize: number;
-  parity: string;
-  stopbits: number;
-  timeout: number;
-}
-
-export interface TempParamsDto extends SerialParamsDto {
-  slave_address: number;
-  start_reg: number;
-  reg_count: number;
-  TEMP_CHANNELS: string[];
-  scale: number;
-  signed_registers?: boolean;
-}
-
-export interface CommConfigDto {
-  COM_RS485_MFC: SerialParamsDto;
-  COM_RS485_TEMP: TempParamsDto;
-  COM_RS232_Balance: SerialParamsDto;
-  SAMPLING: { interval_s: number };
-  PERFORMANCE_CONFIG: {
-    data_collection_interval: number;
-    experiment_data_interval: number;
-    heartbeat_timeout: number;
-  };
-  SLAVE_ADDRESS_MFC: { H2: number; N2: number; CO2: number; CO: number };
-  FLOW_SCALING: { H2: number; N2: number; CO2: number; CO: number };
-  GAS_SAFETY_LIMITS: { H2: number; CO: number };
-}
-
-export interface AdminAuthStatus {
-  initialized: boolean;
-  must_change: boolean;
 }
 
 /** Software-update check result (docs/09 §9.3). */
@@ -234,3 +213,26 @@ export const EXPERIMENT_MODES = [
   { id: "LOW_TEMP_DEGRADATION", name: "GB/T 13242 低温粉化" },
   { id: "FREE_SWELLING", name: "GB/T 13240 自由膨胀" },
 ] as const;
+
+export interface PreflightIssue {
+  code: string;
+  message_zh: string;
+}
+
+export interface ExperimentPreflightResult {
+  ok: boolean;
+  blocking: PreflightIssue[];
+  warnings: PreflightIssue[];
+  program?: ProgramDto | null;
+}
+
+export interface ExperimentStartDefaults {
+  sample_id: string;
+  sample_name: string;
+  sample_weight?: number | null;
+  operator: string;
+  experiment_type: string;
+  project_name?: string | null;
+  experiment_time: string;
+  notes?: string | null;
+}

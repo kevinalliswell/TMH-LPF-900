@@ -1,14 +1,7 @@
+import { useAuth } from "../../stores/auth";
+import { useExperiment } from "../../stores/experiment";
 import { useEffect, useMemo, useState } from "react";
-import {
-  ArrowDown,
-  ArrowUp,
-  Copy,
-  Plus,
-  Play,
-  RotateCcw,
-  Save,
-  Trash2,
-} from "lucide-react";
+
 import {
   deleteCustomProgram,
   getGasSafetyLimits,
@@ -197,6 +190,8 @@ function DryRunModal({ program, onClose }: { program: ProgramDto; onClose: () =>
 }
 
 export function ModeView() {
+  const admin = useAuth(s => s.snapshot?.user?.role === "ADMIN");
+  const running = useExperiment(s => s.state.running);
   const [programs, setPrograms] = useState<ProgramDto[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProgramDto | null>(null);
@@ -232,7 +227,7 @@ export function ModeView() {
   const active = draft ?? selected;
   const standard = programs.filter((p) => p.source === "standard");
   const custom = programs.filter((p) => p.source === "custom");
-  const canEdit = active?.source === "custom";
+  const canEdit = admin && !running && active?.source === "custom";
   const validation = useMemo(
     () => (active ? validateProgramDraft(active, limits) : { errors: [], warnings: [] }),
     [active, limits],
@@ -390,18 +385,18 @@ export function ModeView() {
           </div>
 
           <div className="grid grid-cols-3 gap-2 border-t p-3" style={{ borderColor: "var(--border)" }}>
-            <ActionButton onClick={copySelected} disabled={!active}>
-              <Copy size={14} /> 复制
+            <ActionButton onClick={copySelected} disabled={!active || !admin || running}>
+              <span aria-hidden="true">⧉</span> 复制
             </ActionButton>
-            <ActionButton onClick={addCustom} primary>
-              <Plus size={14} /> 添加
+            <ActionButton onClick={addCustom} disabled={!admin || running} primary>
+              <span aria-hidden="true">＋</span> 添加
             </ActionButton>
             <ActionButton
               onClick={() => active && active.source === "custom" && active.id ? setDeleteTarget(active) : undefined}
-              disabled={!active || active.source !== "custom" || !active.id}
+              disabled={!admin || running || !active || active.source !== "custom" || !active.id}
               danger
             >
-              <Trash2 size={14} /> 删除
+              <span aria-hidden="true">×</span> 删除
             </ActionButton>
           </div>
         </aside>
@@ -419,22 +414,22 @@ export function ModeView() {
                   <div className="flex items-center gap-2">
                     {canSimulate && (
                       <ActionButton onClick={() => setDryRun(active)}>
-                        <Play size={14} /> 模拟快跑
+                        <span aria-hidden="true">▷</span> 模拟快跑
                       </ActionButton>
                     )}
                     {active.source === "standard" && (
-                      <ActionButton onClick={copySelected}>
-                        <Copy size={14} /> 复制为自定义
+                      <ActionButton onClick={copySelected} disabled={!admin || running}>
+                        <span aria-hidden="true">⧉</span> 复制为自定义
                       </ActionButton>
                     )}
                     {canEdit && selected && (
                       <ActionButton onClick={() => setDraft(cloneProgram(selected))} disabled={!dirty}>
-                        <RotateCcw size={14} /> 重置
+                        <span aria-hidden="true">↶</span> 重置
                       </ActionButton>
                     )}
                     {canEdit && (
                       <ActionButton onClick={save} disabled={!dirty || validation.errors.length > 0} primary>
-                        <Save size={14} /> 保存修改
+                        <span aria-hidden="true">保存</span> 保存修改
                       </ActionButton>
                     )}
                   </div>
@@ -618,20 +613,20 @@ export function ModeView() {
                           <td className="py-2">
                             <div className="flex gap-1">
                               <IconButton title="上移" onClick={() => moveStage(i, -1)} disabled={!canEdit || i === 0}>
-                                <ArrowUp size={14} />
+                                <span aria-hidden="true">↑</span>
                               </IconButton>
                               <IconButton
                                 title="下移"
                                 onClick={() => moveStage(i, 1)}
                                 disabled={!canEdit || i === active.stages.length - 1}
                               >
-                                <ArrowDown size={14} />
+                                <span aria-hidden="true">↓</span>
                               </IconButton>
                               <IconButton title="复制阶段" onClick={() => duplicateStage(i)} disabled={!canEdit}>
-                                <Copy size={14} />
+                                <span aria-hidden="true">⧉</span>
                               </IconButton>
                               <IconButton title="删除阶段" onClick={() => removeStage(i)} disabled={!canEdit} danger>
-                                <Trash2 size={14} />
+                                <span aria-hidden="true">×</span>
                               </IconButton>
                             </div>
                           </td>
@@ -644,10 +639,10 @@ export function ModeView() {
                 {canEdit && (
                   <div className="mt-3 flex justify-end gap-2">
                     <ActionButton onClick={addStage}>
-                      <Plus size={14} /> 添加阶段
+                      <span aria-hidden="true">＋</span> 添加阶段
                     </ActionButton>
                     <ActionButton onClick={save} disabled={!dirty || validation.errors.length > 0} primary>
-                      <Save size={14} /> 保存修改
+                      <span aria-hidden="true">保存</span> 保存修改
                     </ActionButton>
                   </div>
                 )}
@@ -665,7 +660,7 @@ export function ModeView() {
           <div className="flex justify-end gap-2">
             <ActionButton onClick={() => setDeleteTarget(null)}>取消</ActionButton>
             <ActionButton onClick={deleteProgram} danger>
-              <Trash2 size={14} /> 确认删除
+              <span aria-hidden="true">×</span> 确认删除
             </ActionButton>
           </div>
         </Modal>

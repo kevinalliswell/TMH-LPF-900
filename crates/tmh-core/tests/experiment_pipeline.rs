@@ -66,6 +66,7 @@ fn reducibility_run_drives_devices_and_persists() {
             analysis_results_json: None,
             program_snapshot_json: None,
             created_at: "t0".into(),
+            owner_user_id: None,
         })
         .unwrap();
 

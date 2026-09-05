@@ -4,7 +4,7 @@
 
 use crate::clamp::{clamp_setpoint, ClampResult, Gas};
 use crate::config::CommConfig;
-use crate::health::Health;
+use crate::health::{Health, ReadFreshness};
 use crate::transport::{BusError, Transport};
 use std::time::{Duration, Instant};
 use tmh_protocols::cpl;
@@ -32,6 +32,8 @@ pub struct MfcSnapshot {
     pub gas: [GasReading; 4],
     pub connected: bool,
     pub consecutive_errors: u32,
+    #[serde(skip)]
+    pub freshness: [ReadFreshness; 4],
 }
 
 /// A HIGH-priority command (preempts polling at the next transaction boundary).
@@ -61,6 +63,7 @@ pub struct MfcActor {
     gas: [GasReading; 4],
     poll_cursor: usize,
     pub health: Health,
+    freshness: [ReadFreshness; 4],
 }
 
 fn gas_enum(idx: usize) -> Gas {
@@ -93,6 +96,7 @@ impl MfcActor {
             }; 4],
             poll_cursor: 0,
             health: Health::new(),
+            freshness: [ReadFreshness::default(); 4],
         }
     }
 
@@ -208,14 +212,16 @@ impl MfcActor {
     pub fn poll_next(&mut self, now: Instant) {
         let idx = self.poll_cursor;
         self.poll_cursor = (self.poll_cursor + 1) % 4;
+        self.freshness[idx].fail();
         let frame = cpl::build_read(self.addr[idx], REG_PV, 2);
         match self.transport.transact(&frame, TXN_TIMEOUT) {
             Ok(buf) => match cpl::parse_response(&buf) {
-                Some(v) => {
+                Some(v) if v.is_finite() => {
+                    self.freshness[idx].success(now);
                     self.gas[idx].pv = v * self.scaling[idx];
                     self.health.on_success(now);
                 }
-                None => self.health.on_error(),
+                _ => self.health.on_error(),
             },
             Err(_) => self.health.on_error(),
         }
@@ -230,7 +236,14 @@ impl MfcActor {
             gas: self.gas,
             connected: self.health.connected,
             consecutive_errors: self.health.consecutive_errors,
+            freshness: self.freshness,
         }
+    }
+}
+
+impl MfcSnapshot {
+    pub fn is_fresh(&self, now: Instant) -> bool {
+        self.connected && self.freshness.iter().all(|f| f.is_fresh(now))
     }
 }
 

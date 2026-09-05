@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { EXPERIMENT_MODES, listPrograms, skipStage, stopExperiment } from "../../ipc";
+import { EXPERIMENT_MODES, getExperimentDetail, skipStage, stopExperiment } from "../../ipc";
 import type { ProgramDto } from "../../ipc/types";
 import { Modal } from "../../components/Modal";
 import { useExperiment } from "../../stores/experiment";
@@ -20,18 +20,20 @@ export function ExperimentBar() {
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
   const [skipReason, setSkipReason] = useState("");
-  const [programs, setPrograms] = useState<ProgramDto[]>([]);
+  const [program, setProgram] = useState<ProgramDto | null>(null);
   const push = useToasts((s) => s.push);
 
   useEffect(() => {
-    listPrograms()
-      .then(setPrograms)
-      .catch(() => {});
-  }, []);
+    let cancelled = false;
+    setProgram(null);
+    if (ex.experiment_id) getExperimentDetail(ex.experiment_id).then(detail => {
+      if (!cancelled) setProgram(detail.program_snapshot ?? null);
+    }).catch(toastError);
+    return () => { cancelled = true; };
+  }, [ex.experiment_id]);
 
   const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? ex.mode ?? "";
   const stageNo = (ex.stage_index ?? 0) + 1;
-  const program = programs.find((p) => p.id === ex.mode);
   const curStage = program?.stages[ex.stage_index ?? 0];
   const nextStage = program?.stages[(ex.stage_index ?? 0) + 1];
 
@@ -140,7 +142,7 @@ export function ExperimentBar() {
               <div className="mt-1">
                 {nextStage
                   ? `${nextStage.name} · ${stageCondition(nextStage)} · ${gasSummary(nextStage.gas)}`
-                  : "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）"}
+                  : program ? "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）" : "程序快照未取得，暂不可跳段"}
               </div>
             </div>
             <label className="flex flex-col gap-1 text-[12px]" style={{ color: "var(--fg-dim)" }}>
@@ -163,7 +165,7 @@ export function ExperimentBar() {
             </button>
             <button
               onClick={doSkip}
-              disabled={!skipReason.trim()}
+              disabled={!skipReason.trim() || !program || ex.can_control === false}
               className="px-3 py-1.5 rounded text-[13px]"
               style={{ background: "var(--warn)", color: "#1a1204", opacity: skipReason.trim() ? 1 : 0.6 }}
             >

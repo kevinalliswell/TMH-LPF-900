@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type View = "home" | "control" | "mode" | "history" | "settings" | "help" | "about";
+export type View = "home" | "control" | "mode" | "history" | "users" | "settings" | "help" | "about";
 
 interface NavState {
   view: View;

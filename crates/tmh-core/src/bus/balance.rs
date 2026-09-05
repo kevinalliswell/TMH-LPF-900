@@ -2,7 +2,7 @@
 //! (docs/04 §4.3). The actor is single-threaded, so `tare()` runs to completion with
 //! no poll frames interleaved (the "去皮期间无轮询" invariant is structural).
 
-use crate::health::Health;
+use crate::health::{Health, ReadFreshness};
 use crate::transport::Transport;
 use std::time::{Duration, Instant};
 use tmh_protocols::balance::{self, TareResult, TARE_CMD};
@@ -13,6 +13,8 @@ pub struct BalanceSnapshot {
     pub weight: Option<f64>,
     pub connected: bool,
     pub consecutive_errors: u32,
+    #[serde(skip)]
+    pub freshness: ReadFreshness,
 }
 
 /// Owns the balance transport + health.
@@ -20,6 +22,7 @@ pub struct BalanceActor {
     transport: Box<dyn Transport>,
     weight: Option<f64>,
     pub health: Health,
+    freshness: ReadFreshness,
 }
 
 impl BalanceActor {
@@ -28,12 +31,14 @@ impl BalanceActor {
             transport,
             weight: None,
             health: Health::new(),
+            freshness: ReadFreshness::default(),
         }
     }
 
     /// Read one line. A stable ("G S") reading updates weight + health; a non-stable
     /// line is ignored (not an error). A transport error advances the health machine.
     pub fn poll_once(&mut self, now: Instant, deadline: Duration) {
+        self.freshness.fail();
         match self.transport.read_line(deadline) {
             Ok(bytes) => {
                 if let Some(w) = std::str::from_utf8(&bytes)
@@ -41,6 +46,7 @@ impl BalanceActor {
                     .and_then(balance::parse_line)
                 {
                     self.weight = Some(w);
+                    self.freshness.success(now);
                     self.health.on_success(now);
                 }
             }
@@ -68,6 +74,7 @@ impl BalanceActor {
         }
         let res = balance::parse_tare_response(&acc);
         if res.success {
+            self.freshness.fail(); // wait for a new measurement after tare
             self.weight = res.weight;
         }
         res
@@ -88,7 +95,14 @@ impl BalanceActor {
             weight: self.weight,
             connected: self.health.connected,
             consecutive_errors: self.health.consecutive_errors,
+            freshness: self.freshness,
         }
+    }
+}
+
+impl BalanceSnapshot {
+    pub fn is_fresh(&self, now: Instant) -> bool {
+        self.connected && self.freshness.is_fresh(now)
     }
 }
 
