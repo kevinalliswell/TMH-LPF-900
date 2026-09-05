@@ -1,3 +1,4 @@
+import { ReportDetailsPanel } from "./ReportDetailsPanel";
 import { useCallback, useEffect, useState } from "react";
 import {
   deleteExperiment,
@@ -22,7 +23,12 @@ import { useAuth } from "../../stores/auth";
 
 const modeName = (id?: string | null) =>
   EXPERIMENT_MODES.find((m) => m.id === id)?.name ?? id ?? "—";
-const fmtTime = (s?: string | null) => (s ? s.replace("T", " ").slice(0, 19) : "—");
+const fmtTime = (s?: string | null) => {
+  if (!s) return "—";
+  const date = new Date(s);
+  if (!Number.isFinite(date.getTime())) return s;
+  return date.toLocaleString("zh-CN", {hour12:false});
+};
 
 function Meta({ label, value }: { label: string; value: string }) {
   return (
@@ -241,7 +247,8 @@ export function HistoryView() {
               )}
             </div>
 
-            <AnalyzePanel
+            <ReportDetailsPanel key={`report-${detail.experiment_id}`} detail={detail} onSaved={()=>{if(selId)loadDetail(selId);}} />
+            <AnalyzePanel key={detail.experiment_id}
               detail={detail}
               onAnalyzed={() => {
                 if (selId) loadDetail(selId);

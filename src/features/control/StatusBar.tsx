@@ -32,9 +32,9 @@ export function StatusBar() {
       className="flex items-center gap-5 px-4 h-9 border-t text-[12px]"
       style={{ borderColor: "var(--border)", background: "var(--panel)" }}
     >
-      <Dot ok={h?.temp_connected} label="温度总线" />
-      <Dot ok={h?.mfc_connected} label="气体总线" />
-      <Dot ok={h?.balance_connected} label="天平" />
+      <Dot ok={h?.temp_valid} label="温度总线" />
+      <Dot ok={h?.mfc_valid} label="气体总线" />
+      <Dot ok={h?.balance_valid} label="天平" />
       {stale && snap && (
         <span className="text-[11px]" style={{ color: "var(--warn)" }}>
           数据陈旧（&gt;5s）

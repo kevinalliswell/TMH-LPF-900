@@ -4,6 +4,10 @@
 // cool → complete + safety), an in-memory experiment history, and the GB analyses.
 
 import type {
+  ReductionInput,
+  RdiInput,
+  SwellingInput,
+  ReportDetails,
   ClampResult,
   ExperimentDetail,
   ExperimentParams,
@@ -32,7 +36,8 @@ let weight = 100;
 let weightTarget = 100;
 let seq = 0;
 
-const approach = (cur: number, tgt: number, frac: number) => cur + (tgt - cur) * frac;
+const approach = (cur: number, tgt: number, frac: number) =>
+  cur + (tgt - cur) * frac;
 
 function clampGas(gas: number, value: number): number {
   if (!Number.isFinite(value) || value < 0) return 0; // mirror the backend clamp (#4)
@@ -44,7 +49,9 @@ function clampGas(gas: number, value: number): number {
 
 export function tick(): TelemetrySnapshot {
   seq += 1;
-  temps = temps.map((t) => approach(t, furnaceTarget, 0.08) + (Math.random() - 0.5) * 0.6);
+  temps = temps.map(
+    (t) => approach(t, furnaceTarget, 0.08) + (Math.random() - 0.5) * 0.6,
+  );
   weight = approach(weight, weightTarget, 0.08);
   pv = pv.map((p, i) => {
     const s = sv[i] ?? 0;
@@ -58,13 +65,25 @@ export function tick(): TelemetrySnapshot {
       return { pv: Math.max(0, Number(p.toFixed(2))), sv: s, on: s > 0 };
     }),
     weight: Number(weight.toFixed(3)),
-    health: { temp_connected: true, mfc_connected: true, balance_connected: true },
+    health: {
+      temp_valid: true,
+      mfc_valid: true,
+      balance_valid: true,
+      temp_connected: true,
+      mfc_connected: true,
+      balance_connected: true,
+    },
   };
 }
 
 export function mockSetFlow(gas: number, value: number): ClampResult {
   const applied = clampGas(gas, value);
-  const limit = gas === 0 ? Math.min(limits.h2, H2_ABS) : gas === 3 ? Math.min(limits.co, CO_ABS) : Infinity;
+  const limit =
+    gas === 0
+      ? Math.min(limits.h2, H2_ABS)
+      : gas === 3
+        ? Math.min(limits.co, CO_ABS)
+        : Infinity;
   sv[gas] = applied;
   return { applied, clamped: applied < value, limit };
 }
@@ -102,41 +121,116 @@ function st(
   ramp_rate: number,
   description: string,
 ): StageDto {
-  return { name, kind, gas, target_temp, tolerance, duration_min, ramp_rate, description };
+  return {
+    name,
+    kind,
+    gas,
+    target_temp,
+    tolerance,
+    duration_min,
+    ramp_rate,
+    description,
+  };
 }
 
 const customPrograms: ProgramDto[] = [];
 const PROGRAMS: ProgramDto[] = [
   {
     id: "REDUCIBILITY",
-    description: "", category: "standard", enabled: true, sample_prefix: "RED", source: "standard",
+    description: "",
+    category: "standard",
+    enabled: true,
+    sample_prefix: "RED",
+    source: "standard",
     name: "GB/T 13241 还原性",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
-      st("恒温", "STABILIZING", [0, 15, 0, 0], 900, 5, 30, 0, "900℃恒温30min,N₂气氛"),
-      st("还原", "REDUCING", [0, 10.5, 0, 4.5], 900, 5, 180, 0, "还原180min,30%CO+70%N₂"),
+      st(
+        "恒温",
+        "STABILIZING",
+        [0, 15, 0, 0],
+        900,
+        5,
+        30,
+        0,
+        "900℃恒温30min,N₂气氛",
+      ),
+      st(
+        "还原",
+        "REDUCING",
+        [0, 10.5, 0, 4.5],
+        900,
+        5,
+        180,
+        0,
+        "还原180min,30%CO+70%N₂",
+      ),
       st("冷却", "COOLING", [0, 5, 0, 0], 25, 0, 0, -10, "N₂保护冷却至室温"),
     ],
   },
   {
     id: "LOW_TEMP_DEGRADATION",
-    description: "", category: "standard", enabled: true, sample_prefix: "RDI", source: "standard",
+    description: "",
+    category: "standard",
+    enabled: true,
+    sample_prefix: "RDI",
+    source: "standard",
     name: "GB/T 13242 低温粉化",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 500, 5, 0, 10, "升温至500℃,N₂保护"),
-      st("恒温", "STABILIZING", [0, 15, 0, 0], 500, 5, 30, 0, "500℃恒温30min,N₂气氛"),
-      st("还原", "REDUCING", [0, 9, 3, 3], 500, 5, 60, 0, "还原60min,20%CO+20%CO₂+60%N₂"),
+      st(
+        "恒温",
+        "STABILIZING",
+        [0, 15, 0, 0],
+        500,
+        5,
+        30,
+        0,
+        "500℃恒温30min,N₂气氛",
+      ),
+      st(
+        "还原",
+        "REDUCING",
+        [0, 9, 3, 3],
+        500,
+        5,
+        60,
+        0,
+        "还原60min,20%CO+20%CO₂+60%N₂",
+      ),
       st("冷却", "COOLING", [0, 5, 0, 0], 25, 0, 0, -10, "N₂保护冷却至室温"),
     ],
   },
   {
     id: "FREE_SWELLING",
-    description: "", category: "standard", enabled: true, sample_prefix: "FSI", source: "standard",
+    description: "",
+    category: "standard",
+    enabled: true,
+    sample_prefix: "FSI",
+    source: "standard",
     name: "GB/T 13240 自由膨胀",
     stages: [
       st("升温", "HEATING", [0, 10, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
-      st("恒温", "STABILIZING", [0, 15, 0, 0], 900, 5, 15, 0, "900℃恒温15min,N₂气氛"),
-      st("还原", "REDUCING", [0, 10.5, 0, 4.5], 900, 5, 60, 0, "还原60min,30%CO+70%N₂"),
+      st(
+        "恒温",
+        "STABILIZING",
+        [0, 15, 0, 0],
+        900,
+        5,
+        15,
+        0,
+        "900℃恒温15min,N₂气氛",
+      ),
+      st(
+        "还原",
+        "REDUCING",
+        [0, 10.5, 0, 4.5],
+        900,
+        5,
+        60,
+        0,
+        "还原60min,30%CO+70%N₂",
+      ),
       st("冷却", "COOLING", [0, 5, 0, 0], 50, 0, 0, -10, "N₂保护冷却至50℃"),
     ],
   },
@@ -365,7 +459,9 @@ export function mockSkipStage(reason: string): void {
   if (run) run.skip = true;
 }
 
-export function mockSubscribeExperiment(cb: (s: ExperimentState) => void): () => void {
+export function mockSubscribeExperiment(
+  cb: (s: ExperimentState) => void,
+): () => void {
   expListeners.add(cb);
   cb(experiment);
   return () => void expListeners.delete(cb);
@@ -380,7 +476,10 @@ const history = new Map<string, HistItem>();
 
 function accessible(item: HistItem): boolean {
   const user = mockCurrentUser();
-  return Boolean(user && (user.role === "ADMIN" || item.detail.owner_user_id === user.user_id));
+  return Boolean(
+    user &&
+      (user.role === "ADMIN" || item.detail.owner_user_id === user.user_id),
+  );
 }
 
 function historyItem(id: string): HistItem {
@@ -407,7 +506,9 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
     stageEl += 60;
     totalEl += 60;
     samples.push({
-      timestamp: new Date(Date.parse("2026-06-01T09:00:00") + totalEl * 1000).toISOString(),
+      timestamp: new Date(
+        Date.parse("2026-06-01T09:00:00") + totalEl * 1000,
+      ).toISOString(),
       experiment_duration: fmtHms(totalEl),
       temperature: Number(t.toFixed(1)),
       weight: Number(wt.toFixed(3)),
@@ -426,7 +527,13 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
   return samples;
 }
 
-function seed(id: string, name: string, mode: string, start: string, w0: number): void {
+function seed(
+  id: string,
+  name: string,
+  mode: string,
+  start: string,
+  w0: number,
+): void {
   const program = mockListPrograms().find((p) => p.id === mode);
   if (!program) return;
   const samples = simulate(program, w0);
@@ -437,7 +544,9 @@ function seed(id: string, name: string, mode: string, start: string, w0: number)
       sample_name: name,
       sample_weight: w0,
       start_time: start,
-      end_time: new Date(Date.parse(start) + samples.length * 60000).toISOString(),
+      end_time: new Date(
+        Date.parse(start) + samples.length * 60000,
+      ).toISOString(),
       description: "演示数据",
       operator: "张工",
       experiment_type: mode,
@@ -450,7 +559,13 @@ function seed(id: string, name: string, mode: string, start: string, w0: number)
   });
 }
 seed("exp-demo-2", "鞍钢球团-B", "REDUCIBILITY", "2026-06-02T09:00:00", 100);
-seed("exp-demo-1", "首钢烧结矿-A", "LOW_TEMP_DEGRADATION", "2026-06-01T14:30:00", 500);
+seed(
+  "exp-demo-1",
+  "首钢烧结矿-A",
+  "LOW_TEMP_DEGRADATION",
+  "2026-06-01T14:30:00",
+  500,
+);
 
 export function mockListExperiments(): ExperimentSummary[] {
   return [...history.values()]
@@ -476,7 +591,10 @@ export function mockGetExperimentDetail(id: string): ExperimentDetail {
   return { ...h.detail, sample_count: h.samples.length };
 }
 
-export function mockGetExperimentSamples(id: string, maxPoints?: number): SampleDto[] {
+export function mockGetExperimentSamples(
+  id: string,
+  maxPoints?: number,
+): SampleDto[] {
   if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const all = h.samples;
@@ -491,7 +609,10 @@ export function mockDeleteExperiment(id: string): void {
   history.delete(id);
 }
 
-export function mockSetExperimentOwner(id: string, ownerUserId: string | null): void {
+export function mockSetExperimentOwner(
+  id: string,
+  ownerUserId: string | null,
+): void {
   if (mockCurrentUser()?.role !== "ADMIN") throw new Error("FORBIDDEN");
   const item = history.get(id);
   if (!item) throw new Error("实验不存在");
@@ -534,6 +655,11 @@ export function mockExportText(id: string, sep: string): string {
 
 export function mockReportHtml(id: string): string {
   if (run?.id === id) archive(run, false);
+  const esc = (value: string) =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
   const h = historyItem(id);
   const d = h.detail;
   const a = (d.analysis ?? null) as Record<string, unknown> | null;
@@ -547,10 +673,10 @@ export function mockReportHtml(id: string): string {
     ["结束时间", d.end_time ?? "—"],
     ["采样点数", String(h.samples.length)],
   ]
-    .map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`)
+    .map(([k, v]) => `<tr><th>${esc(k!)}</th><td>${esc(v!)}</td></tr>`)
     .join("");
   const analysis = a
-    ? `<pre>${JSON.stringify(a, null, 2)}</pre>`
+    ? `<pre>${esc(JSON.stringify(a, null, 2))}</pre>`
     : '<p style="color:#999">尚未进行结果分析。</p>';
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>检测报告 ${d.experiment_id}</title>\
 <style>body{font-family:'Microsoft YaHei',system-ui,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;color:#1a1a1a}\
@@ -558,100 +684,181 @@ h1{font-size:20px}h2{font-size:14px;border-bottom:2px solid #d9631f;padding-bott
 table{border-collapse:collapse}th,td{border:1px solid #e2e2e2;padding:5px 10px;text-align:left}th{background:#f6f6f6}\
 pre{background:#f6f6f6;padding:10px;border-radius:4px;font-size:12px}</style></head><body>\
 <h1>铁矿石冶金性能检测报告</h1><div style="color:#666;font-size:12px">TMH-LPF-900 · 北京科技大学（浏览器预览）</div>\
-<h2>实验信息</h2><table>${meta}</table><h2>结果分析</h2>${analysis}</body></html>`;
+<h2>实验信息</h2><table>${meta}</table><h2>报告人工补录（浏览器模拟）</h2><pre>${esc(JSON.stringify(d.runtime?.report_details ?? "待补录", null, 2))}</pre><h2>结果分析</h2>${analysis}</body></html>`;
 }
 
 // ---- GB analyses (mirror tmh_core::gb) ----
-function parseHmsMin(s?: string | null): number | null {
-  if (!s) return null;
-  const parts = s.split(":");
-  if (parts.length < 3) return null;
-  const h = Number(parts[0]);
-  const m = Number(parts[1]);
-  const sec = Number(parts[2]);
-  if ([h, m, sec].some(Number.isNaN)) return null;
-  return h * 60 + m + sec / 60;
-}
-
-function slope(pts: [number, number][]): number | null {
-  if (pts.length < 2) return null;
-  const n = pts.length;
-  const sx = pts.reduce((a, p) => a + p[0], 0);
-  const sy = pts.reduce((a, p) => a + p[1], 0);
-  const sxx = pts.reduce((a, p) => a + p[0] * p[0], 0);
-  const sxy = pts.reduce((a, p) => a + p[0] * p[1], 0);
-  const d = n * sxx - sx * sx;
-  return d === 0 ? null : (n * sxy - sx * sy) / d;
-}
-
-export function mockAnalyze13241(id: string, o2Pct: number): Record<string, unknown> {
-  if (run?.id === id) archive(run, false);
+export function mockAnalyze13241(
+  id: string,
+  input: ReductionInput,
+): Record<string, unknown> {
   const h = historyItem(id);
-  const w0 = h.detail.sample_weight;
-  const last = h.samples[h.samples.length - 1];
-  const wt = last ? last.weight : w0;
-  if (w0 <= 0 || o2Pct <= 0) throw new Error("W0 或 O2% 无效");
-  const deltaW = w0 - wt;
-  const pts = h.samples
-    .map((s): [number, number] | null => {
-      const m = parseHmsMin(s.experiment_duration);
-      return m == null ? null : [m, ((w0 - s.weight) / (w0 * (o2Pct / 100))) * 100];
-    })
-    .filter((p): p is [number, number] => p !== null);
+  if (!h.detail.end_time) throw new Error("实验未结束");
+  if (
+    (h.detail.program_snapshot?.base_standard_id ??
+      h.detail.experiment_type) !== "REDUCIBILITY"
+  )
+    throw new Error("分析方法不匹配");
+  const { manual_m1: m1, manual_m180: m180, w1, w2 } = input;
+  if (m1 == null || m180 == null)
+    throw new Error(
+      "浏览器旧模拟记录缺少还原称量，请依据原始记录补录 m₁ 和 m₁₈₀",
+    );
+  if (!input.source_record?.trim())
+    throw new Error("人工补录须填写原始记录编号或来源说明");
+  const m0 = h.detail.sample_weight;
+  if (
+    ![m0, m1, m180, w1, w2].every(Number.isFinite) ||
+    m0 <= 0 ||
+    m1 < m0 ||
+    m180 <= 0 ||
+    w1 < 0 ||
+    w1 > 100 ||
+    w2 <= 0 ||
+    w2 > 100
+  )
+    throw new Error("亚铁/全铁含量或称量无效");
+  const points = input.manual_rate_points;
+  let rate: Record<string, number> | null = null;
+  if (points) {
+    if (
+      points.some(
+        ([t, y], i) =>
+          !Number.isFinite(t) ||
+          !Number.isFinite(y) ||
+          t < 0 ||
+          (i > 0 && points[i - 1]![0] >= t),
+      )
+    )
+      throw new Error("人工速率曲线须按时间递增");
+    const crossing = (threshold: number): number | null => {
+      for (let i = 0; i < points.length; i++) {
+        const [t, y] = points[i]!;
+        if (y === threshold) return t;
+        const previous = points[i - 1];
+        if (previous && previous[1] < threshold && y > threshold)
+          return (
+            previous[0] +
+            ((threshold - previous[1]) / (y - previous[1])) * (t - previous[0])
+          );
+      }
+      return null;
+    };
+    const t30 = crossing(30);
+    for (const [endpoint, factor] of [
+      [60, 33.6],
+      [55, 26.5],
+      [50, 20],
+    ] as const) {
+      const t = crossing(endpoint);
+      if (t30 !== null && t !== null && t > t30) {
+        rate = {
+          index: factor / (t - t30),
+          t30,
+          endpoint_percent: endpoint,
+          endpoint_min: t,
+          factor,
+        };
+        break;
+      }
+    }
+    if (!rate)
+      throw new Error("人工速率曲线须覆盖 30% 与 60%、55% 或 50% 还原度");
+  }
+  const rt =
+    ((0.111 * w1) / (0.43 * w2) + ((m1 - m180) / (m0 * 0.43 * w2)) * 100) * 100;
   const value = {
     standard: "GB/T 13241",
-    w0,
-    wt,
-    o2_pct: o2Pct,
-    rt: (deltaW / (w0 * (o2Pct / 100))) * 100,
-    delta_w: deltaW,
-    reduction_rate_index: slope(pts),
+    standard_version: "2017",
+    calculation_version: "GB-2026-09-05.1",
+    input: structuredClone(input),
+    m0,
+    m1,
+    rt,
+    ri: rt,
+    reduction_rate_index: rate?.index ?? null,
+    rate_evidence: rate,
+    manual_used: true,
+    result_scope: "single_trial",
+    standard_conformity: "pending_group_and_process_verification",
+    computed_by: mockCurrentUser()?.display_name,
     computed_at: new Date().toISOString(),
   };
   h.detail.analysis = value;
+  h.detail.revisions = [structuredClone(value), ...(h.detail.revisions ?? [])];
   return value;
 }
-
 export function mockAnalyze13242(
   id: string,
-  m: { m0: number; mGt63: number; m31563: number; m05315: number; mLt05: number },
+  input: RdiInput,
 ): Record<string, unknown> {
-  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
-  if (m.m0 <= 0) throw new Error("m0 无效");
-  const total = m.mGt63 + m.m31563 + m.m05315 + m.mLt05;
+  if (!h.detail.end_time) throw new Error("实验未结束");
+  if (
+    !Number.isFinite(input.drum_rpm) ||
+    input.drum_rpm <= 0 ||
+    !Number.isInteger(input.drum_revolutions) ||
+    input.drum_revolutions <= 0 ||
+    !Number.isFinite(input.sieve_seconds) ||
+    input.sieve_seconds <= 0
+  )
+    throw new Error("请填写实际转鼓与筛分记录");
+  const { m0, m1, m2, m3 } = input;
+  if (
+    ![m0, m1, m2, m3].every((x) => Number.isFinite(x) && x >= 0) ||
+    m0 <= 0 ||
+    m1 + m2 + m3 > m0
+  )
+    throw new Error("入鼓/筛上质量无效");
+  if (
+    (h.detail.program_snapshot?.base_standard_id ??
+      h.detail.experiment_type) !== "LOW_TEMP_DEGRADATION"
+  )
+    throw new Error("分析方法不匹配");
   const value = {
     standard: "GB/T 13242",
-    m0: m.m0,
-    m_gt63: m.mGt63,
-    m_315_63: m.m31563,
-    m_05_315: m.m05315,
-    m_lt05: m.mLt05,
-    rdi_plus_6_3: (m.mGt63 / m.m0) * 100,
-    rdi_plus_3_15: ((m.mGt63 + m.m31563) / m.m0) * 100,
-    rdi_minus_0_5: (m.mLt05 / m.m0) * 100,
-    sieve_warning: Math.abs(total - m.m0) / m.m0 > 0.02,
-    computed_at: new Date().toISOString(),
+    calculation_version: "GB-2026-09-05.1",
+    input,
+    rdi_plus_6_3: (m1 / m0) * 100,
+    rdi_plus_3_15: ((m1 + m2) / m0) * 100,
+    rdi_minus_0_5: ((m0 - m1 - m2 - m3) / m0) * 100,
+    result_scope: "single_trial",
+    external_conditions_met:
+      Math.abs(input.drum_rpm - 30) <= 1 &&
+      input.drum_revolutions === 300 &&
+      input.sieve_seconds === 60,
   };
   h.detail.analysis = value;
   return value;
 }
-
-export function mockAnalyze13240(id: string, volumes: [number, number][]): Record<string, unknown> {
-  if (run?.id === id) archive(run, false);
+export function mockAnalyze13240(
+  id: string,
+  input: SwellingInput,
+): Record<string, unknown> {
   const h = historyItem(id);
-  const per = volumes.filter(([v0]) => v0 > 0).map(([v0, v1]) => ((v1 - v0) / v0) * 100);
-  if (!per.length) throw new Error("无有效试样体积");
+  if (!h.detail.end_time) throw new Error("实验未结束");
+  if (
+    ![input.v0, input.v1].every((x) => Number.isFinite(x) && x > 0) ||
+    input.pellet_count !== 18 ||
+    !input.volume_method.trim() ||
+    !input.same_method
+  )
+    throw new Error("整份体积、颗粒数或体积方法无效");
+  if (
+    (h.detail.program_snapshot?.base_standard_id ??
+      h.detail.experiment_type) !== "FREE_SWELLING"
+  )
+    throw new Error("分析方法不匹配");
   const value = {
     standard: "GB/T 13240",
-    per_pellet: per,
-    average: per.reduce((a, b) => a + b, 0) / per.length,
-    computed_at: new Date().toISOString(),
+    calculation_version: "GB-2026-09-05.1",
+    input,
+    swelling_index: ((input.v1 - input.v0) / input.v0) * 100,
+    result_scope: "single_trial",
   };
   h.detail.analysis = value;
   return value;
 }
-
 
 function modeAdmin(): void {
   const user = mockCurrentUser();
@@ -661,40 +868,92 @@ function modeAdmin(): void {
 }
 export function mockSaveCustomProgram(program: ProgramDto): ProgramDto {
   modeAdmin();
-  if (PROGRAMS.some(p => p.id === program.id)) throw new Error("标准模式不可覆盖");
+  if (PROGRAMS.some((p) => p.id === program.id))
+    throw new Error("标准模式不可覆盖");
   const p = structuredClone(program);
   p.id ||= `custom-${crypto.randomUUID()}`;
   p.source = "custom";
-  const i = customPrograms.findIndex(x => x.id === p.id);
-  if (i < 0) customPrograms.push(p); else customPrograms[i] = p;
+  const i = customPrograms.findIndex((x) => x.id === p.id);
+  if (i < 0) customPrograms.push(p);
+  else customPrograms[i] = p;
   return structuredClone(p);
 }
 export function mockDeleteCustomProgram(id: string): void {
   modeAdmin();
-  const i = customPrograms.findIndex(p => p.id === id);
+  const i = customPrograms.findIndex((p) => p.id === id);
   if (i < 0) throw new Error("自定义模式不存在");
   customPrograms.splice(i, 1);
 }
-export function mockGenerateSampleId(programId: string, experimentTime: string): string {
-  const p = mockListPrograms().find(x => x.id === programId);
+export function mockGenerateSampleId(
+  programId: string,
+  experimentTime: string,
+): string {
+  const p = mockListPrograms().find((x) => x.id === programId);
   if (!p) throw new Error("未知实验模式");
-  const prefix = `${p.sample_prefix}-${experimentTime.slice(0,10).replaceAll("-", "")}-`;
-  const max = Math.max(0,...mockListExperiments().map(r => r.sample_id?.startsWith(prefix) ? Number(r.sample_id.slice(prefix.length)) || 0 : 0));
-  return `${prefix}${String(max+1).padStart(3,"0")}`;
+  const prefix = `${p.sample_prefix}-${experimentTime.slice(0, 10).replaceAll("-", "")}-`;
+  const max = Math.max(
+    0,
+    ...mockListExperiments().map((r) =>
+      r.sample_id?.startsWith(prefix)
+        ? Number(r.sample_id.slice(prefix.length)) || 0
+        : 0,
+    ),
+  );
+  return `${prefix}${String(max + 1).padStart(3, "0")}`;
 }
-export function mockGetExperimentStartDefaults(programId: string): ExperimentStartDefaults {
+export function mockGetExperimentStartDefaults(
+  programId: string,
+): ExperimentStartDefaults {
   const user = mockCurrentUser();
   if (!user) throw new Error("AUTH_REQUIRED");
   const latest = mockListExperiments()[0];
   const now = new Date().toISOString();
-  return {sample_id: mockGenerateSampleId(programId, now), sample_name: latest?.sample_name ?? "", sample_weight: 500, operator: user.display_name, experiment_type: programId, experiment_time: now, project_name: latest?.project_name ?? null, notes: null};
+  return {
+    sample_id: mockGenerateSampleId(programId, now),
+    sample_name: latest?.sample_name ?? "",
+    sample_weight: 500,
+    operator: user.display_name,
+    experiment_type: programId,
+    experiment_time: now,
+    project_name: latest?.project_name ?? null,
+    notes: null,
+  };
 }
-export function mockPreflightExperiment(params: ExperimentParams): ExperimentPreflightResult {
+export function mockPreflightExperiment(
+  params: ExperimentParams,
+): ExperimentPreflightResult {
   if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
-  const program = mockListPrograms().find(p => p.id === params.experiment_type) ?? null;
+  const program =
+    mockListPrograms().find((p) => p.id === params.experiment_type) ?? null;
   const blocking = [];
-  if (run) blocking.push({code:"RUNNING", message_zh:"实验已在运行"});
-  if (!params.sample_id?.trim() || !params.sample_name.trim() || !Number.isFinite(params.sample_weight) || params.sample_weight <= 0) blocking.push({code:"PARAMS", message_zh:"请填写有效样品编号、名称与重量"});
-  if (!program?.enabled) blocking.push({code:"PROGRAM", message_zh:"实验模式不可用"});
-  return {ok: !blocking.length, blocking, warnings: [], program};
+  if (run) blocking.push({ code: "RUNNING", message_zh: "实验已在运行" });
+  if (
+    !params.sample_id?.trim() ||
+    !params.sample_name.trim() ||
+    !Number.isFinite(params.sample_weight) ||
+    params.sample_weight <= 0
+  )
+    blocking.push({
+      code: "PARAMS",
+      message_zh: "请填写有效样品编号、名称与重量",
+    });
+  if (!program?.enabled)
+    blocking.push({ code: "PROGRAM", message_zh: "实验模式不可用" });
+  return { ok: !blocking.length, blocking, warnings: [], program };
+}
+
+export function mockSaveReportDetails(
+  id: string,
+  details: ReportDetails,
+): void {
+  const h = historyItem(id);
+  if (Object.values(details).some((v) => v.length > 4096))
+    throw new Error("报告字段过长");
+  const patch = {
+    report_details: structuredClone(details),
+    report_details_operator: mockCurrentUser()?.display_name,
+    report_details_updated_at: new Date().toISOString(),
+  };
+  h.detail.runtime = { ...h.detail.runtime, ...patch };
+  h.detail.revisions = [structuredClone(patch), ...(h.detail.revisions ?? [])];
 }

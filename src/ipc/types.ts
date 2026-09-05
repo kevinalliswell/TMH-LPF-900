@@ -9,6 +9,9 @@ export interface GasReading {
 }
 
 export interface DeviceHealth {
+  temp_valid?: boolean;
+  mfc_valid?: boolean;
+  balance_valid?: boolean;
   temp_connected: boolean;
   mfc_connected: boolean;
   balance_connected: boolean;
@@ -127,6 +130,8 @@ export interface StageDto {
 export type ProgramSource = "standard" | "custom";
 
 export interface ProgramDto {
+  base_standard_id?: string | null;
+  base_standard_version?: string | null;
   description: string;
   category: string;
   enabled: boolean;
@@ -155,6 +160,8 @@ export interface ExperimentSummary {
 }
 
 export interface ExperimentDetail {
+  revisions?: Record<string, unknown>[];
+  runtime?: Record<string, unknown>;
   program_snapshot?: ProgramDto | null;
   sample_id?: string | null;
   project_name?: string | null;
@@ -175,6 +182,16 @@ export interface ExperimentDetail {
 }
 
 export interface SampleDto {
+  quality?: string | null;
+  record?: {
+    telemetry?: {
+      health?: {
+        temp_valid?: boolean;
+        balance_valid?: boolean;
+        mfc_valid?: boolean;
+      };
+    };
+  } | null;
   timestamp: string;
   experiment_duration?: string | null;
   temperature: number;
@@ -235,4 +252,43 @@ export interface ExperimentStartDefaults {
   project_name?: string | null;
   experiment_time: string;
   notes?: string | null;
+}
+
+export interface ReductionInput {
+  w1: number;
+  w2: number;
+  manual_m1?: number | null;
+  manual_m180?: number | null;
+  manual_rate_points?: [number, number][] | null;
+  source_record?: string | null;
+}
+export interface RdiInput {
+  m0: number;
+  m1: number;
+  m2: number;
+  m3: number;
+  drum_rpm: number;
+  drum_revolutions: number;
+  sieve_seconds: number;
+}
+export interface SwellingInput {
+  v0: number;
+  v1: number;
+  pellet_count: number;
+  volume_method: string;
+  same_method: boolean;
+}
+
+export interface ReportDetails {
+  lab_name: string;
+  lab_address: string;
+  report_number: string;
+  report_date: string;
+  sample_preparation: string;
+  equipment: string;
+  gas_and_calibration: string;
+  external_steps: string;
+  deviations: string;
+  reviewer: string;
+  repeat_group_reference: string;
 }

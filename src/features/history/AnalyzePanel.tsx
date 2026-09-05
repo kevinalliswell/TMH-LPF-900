@@ -28,7 +28,11 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           inputMode="decimal"
           className="mono w-full px-2 py-1 rounded outline-none"
-          style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+          style={{
+            background: "var(--panel-2)",
+            border: "1px solid var(--border-bright)",
+            color: "var(--fg)",
+          }}
         />
         {suffix && (
           <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
@@ -54,47 +58,62 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function ResultBlock({ analysis }: { analysis: Record<string, unknown> }) {
-  const std = analysis.standard;
+  const metrics = [
+    ["ri", "还原性 RI（R₁₈₀）", "%"],
+    ["reduction_rate_index", "还原速率指数", "%/min"],
+    ["rdi_plus_6_3", "RDI +6.3", "%"],
+    ["rdi_plus_3_15", "RDI +3.15", "%"],
+    ["rdi_minus_0_5", "RDI −0.5", "%"],
+    ["swelling_index", "整份自由膨胀指数", "%"],
+  ];
   return (
     <div className="rounded p-3 mb-3" style={{ background: "var(--panel-2)" }}>
       <div className="flex flex-wrap gap-6">
-        {std === "GB/T 13241" && (
-          <>
-            <Metric label="还原度 Rt" value={`${fmt(analysis.rt)} %`} />
-            <Metric label="失重 ΔW" value={`${fmt(analysis.delta_w)} g`} />
-            <Metric label="还原速率指数" value={`${fmt(analysis.reduction_rate_index, 3)} %/min`} />
-          </>
-        )}
-        {std === "GB/T 13242" && (
-          <>
-            <Metric label="RDI +6.3" value={`${fmt(analysis.rdi_plus_6_3)} %`} />
-            <Metric label="RDI +3.15" value={`${fmt(analysis.rdi_plus_3_15)} %`} />
-            <Metric label="RDI −0.5" value={`${fmt(analysis.rdi_minus_0_5)} %`} />
-          </>
-        )}
-        {std === "GB/T 13240" && (
-          <Metric label="平均自由膨胀指数" value={`${fmt(analysis.average)} %`} />
-        )}
+        {metrics
+          .filter(([key]) => analysis[key!] !== undefined)
+          .map(([key, label, unit]) => (
+            <Metric
+              key={key}
+              label={label!}
+              value={`${fmt(analysis[key!])} ${unit}`}
+            />
+          ))}
       </div>
-      {analysis.sieve_warning === true && (
-        <div className="mt-2 text-[12px]" style={{ color: "var(--warn)" }}>
-          ⚠ 筛分总质量与 m₀ 偏差超过 2%，请复核。
-        </div>
-      )}
-      {std === "GB/T 13240" && Array.isArray(analysis.per_pellet) && (
-        <div className="mt-2 mono text-[12px]" style={{ color: "var(--fg-dim)" }}>
-          单球: {(analysis.per_pellet as number[]).map((v) => v.toFixed(1)).join(" · ")} %
-        </div>
-      )}
-      {typeof analysis.computed_at === "string" && (
-        <div className="mt-2 mono text-[11px]" style={{ color: "var(--fg-faint)" }}>
-          计算于 {analysis.computed_at.replace("T", " ").slice(0, 19)}
-        </div>
+      <p className="text-[12px] mt-2" style={{ color: "var(--warn)" }}>
+        单次试验计算；最终结果仍需过程、外部步骤及重复性验收。
+      </p>
+      {!analysis.calculation_version && <p>旧版本计算结果须复核后重算。</p>}
+      {analysis.external_conditions_met === false && (
+        <p>转鼓或筛分记录偏离标准条件。</p>
       )}
     </div>
   );
 }
 
+const initialFields: Record<string, string> = {
+  w1: "",
+  w2: "",
+  manual_m1: "",
+  manual_m180: "",
+  manual_rate_points: "",
+  source_record: "",
+  m0: "",
+  m1: "",
+  m2: "",
+  m3: "",
+  drum_rpm: "",
+  drum_revolutions: "",
+  sieve_seconds: "",
+  v0: "",
+  v1: "",
+  pellet_count: "18",
+  volume_method: "",
+};
+function number(value: string): number {
+  if (!value.trim() || !Number.isFinite(Number(value)))
+    throw new Error("请完整填写有效数值，缺测不能作为 0");
+  return Number(value);
+}
 export function AnalyzePanel({
   detail,
   onAnalyzed,
@@ -102,24 +121,63 @@ export function AnalyzePanel({
   detail: ExperimentDetail;
   onAnalyzed: () => void;
 }) {
-  const push = useToasts((s) => s.push);
+  const [fields, setFields] = useState(initialFields);
+  const [sameMethod, setSameMethod] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 13241
-  const [o2, setO2] = useState("28.5");
-  // 13242
-  const [m0, setM0] = useState(String(detail.sample_weight));
-  const [mGt63, setMGt63] = useState("");
-  const [m31563, setM31563] = useState("");
-  const [m05315, setM05315] = useState("");
-  const [mLt05, setMLt05] = useState("");
-  // 13240
-  const [volumes, setVolumes] = useState("");
-
-  const run = async (fn: () => Promise<unknown>) => {
+  const push = useToasts((s) => s.push);
+  const type =
+    detail.program_snapshot?.base_standard_id ?? detail.experiment_type;
+  const field = (key: string, label: string, suffix?: string) => (
+    <Field
+      key={key}
+      label={label}
+      suffix={suffix}
+      value={fields[key] ?? ""}
+      onChange={(v) => setFields((f) => ({ ...f, [key]: v }))}
+    />
+  );
+  const submit = async () => {
     setBusy(true);
     try {
-      await fn();
-      push("分析完成，结果已保存", "info");
+      const n = (key: string) => number(fields[key] ?? "");
+      if (type === "REDUCIBILITY") {
+        const manual = fields.manual_rate_points?.trim();
+        const points = manual
+          ? manual.split(/[;；\n]+/).map((line) => {
+              const pair = line.split(/[,，]/);
+              if (pair.length !== 2)
+                throw new Error("速率曲线每行需为时间(min),还原度(%)");
+              return [number(pair[0]!), number(pair[1]!)] as [number, number];
+            })
+          : null;
+        await analyzeGb13241(detail.experiment_id, {
+          w1: n("w1"),
+          w2: n("w2"),
+          manual_m1: fields.manual_m1?.trim() ? n("manual_m1") : null,
+          manual_m180: fields.manual_m180?.trim() ? n("manual_m180") : null,
+          manual_rate_points: points,
+          source_record: fields.source_record,
+        });
+      }
+      if (type === "LOW_TEMP_DEGRADATION")
+        await analyzeGb13242(detail.experiment_id, {
+          m0: n("m0"),
+          m1: n("m1"),
+          m2: n("m2"),
+          m3: n("m3"),
+          drum_rpm: n("drum_rpm"),
+          drum_revolutions: n("drum_revolutions"),
+          sieve_seconds: n("sieve_seconds"),
+        });
+      if (type === "FREE_SWELLING")
+        await analyzeGb13240(detail.experiment_id, {
+          v0: n("v0"),
+          v1: n("v1"),
+          pellet_count: n("pellet_count"),
+          volume_method: fields.volume_method ?? "",
+          same_method: sameMethod,
+        });
+      push("单次计算已保存，原始输入与计算版本已归档", "info");
       onAnalyzed();
     } catch (e) {
       toastError(e);
@@ -127,91 +185,89 @@ export function AnalyzePanel({
       setBusy(false);
     }
   };
-
-  const type = detail.experiment_type;
-  const analysis = (detail.analysis ?? null) as Record<string, unknown> | null;
-
   return (
     <div className="panel p-4">
       <SectionTitle>结果分析</SectionTitle>
-      {analysis && <ResultBlock analysis={analysis} />}
-
-      {type === "REDUCIBILITY" && (
-        <div className="flex items-end gap-3">
-          <div className="w-40">
-            <Field label="全铁含氧量 O₂%" value={o2} onChange={setO2} suffix="%" />
-          </div>
-          <button
-            disabled={busy}
-            onClick={() => run(() => analyzeGb13241(detail.experiment_id, Number(o2)))}
-            className="px-3 py-1.5 rounded text-[13px]"
-            style={{ background: "var(--gas)", color: "#04140f" }}
-          >
-            计算还原度
-          </button>
-        </div>
+      {detail.analysis && (
+        <ResultBlock analysis={detail.analysis as Record<string, unknown>} />
       )}
-
+      {type === "REDUCIBILITY" && (
+        <>
+          <p className="text-[12px] mb-3">
+            m₀ 为干试料质量；m₁ 自动取还原开始前有效总称量（含还原管）。W₁、W₂
+            按质量百分数输入，例如 10、60。
+          </p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            {field("w1", "W₁ 亚铁含量（GB/T 6730.8）", "%")}
+            {field("w2", "W₂ 全铁含量（GB/T 6730.5）", "%")}
+          </div>
+          <details className="mb-3">
+            <summary>人工补录缺失称量或速率数据（可选）</summary>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              {field("manual_m1", "m₁ 还原开始前总称量", "g")}
+              {field("manual_m180", "m₁₈₀ 还原 180 分钟总称量", "g")}
+              {field(
+                "manual_rate_points",
+                "速率数据：时间(min),还原度(%)；分号分隔",
+              )}
+              {field("source_record", "原始记录编号 / 来源说明")}
+            </div>
+            <p className="text-[12px]">
+              人工值优先于自动值，并在报告中标明。m₁ 与 m₁₈₀
+              必须包含同一还原管。
+            </p>
+          </details>
+        </>
+      )}
       {type === "LOW_TEMP_DEGRADATION" && (
         <>
+          <p className="text-[12px] mb-3">
+            m₀ 需还原后、转鼓前重新称量。三个筛上级分分别称量；−0.5 mm
+            指数按差量计算，包含未回收粉末。
+          </p>
           <div className="grid grid-cols-3 gap-3 mb-3">
-            <Field label="m₀ 初始" value={m0} onChange={setM0} suffix="g" />
-            <Field label="+6.3mm" value={mGt63} onChange={setMGt63} suffix="g" />
-            <Field label="3.15–6.3mm" value={m31563} onChange={setM31563} suffix="g" />
-            <Field label="0.5–3.15mm" value={m05315} onChange={setM05315} suffix="g" />
-            <Field label="−0.5mm" value={mLt05} onChange={setMLt05} suffix="g" />
+            {field("m0", "m₀ 还原后、转鼓前质量", "g")}
+            {field("m1", "m₁ 6.3 mm 筛上质量", "g")}
+            {field("m2", "m₂ 3.15 mm 筛上质量（不含 m₁）", "g")}
+            {field("m3", "m₃ 0.5 mm 筛上质量（不含前两项）", "g")}
+            {field("drum_rpm", "实际转鼓转速", "r/min")}
+            {field("drum_revolutions", "实际转数", "r")}
+            {field("sieve_seconds", "实际筛分时间", "s")}
           </div>
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() =>
-                analyzeGb13242(detail.experiment_id, {
-                  m0: Number(m0),
-                  mGt63: Number(mGt63),
-                  m31563: Number(m31563),
-                  m05315: Number(m05315),
-                  mLt05: Number(mLt05),
-                }),
-              )
-            }
-            className="px-3 py-1.5 rounded text-[13px]"
-            style={{ background: "var(--gas)", color: "#04140f" }}
-          >
-            计算 RDI
-          </button>
         </>
       )}
-
       {type === "FREE_SWELLING" && (
         <>
-          <Field
-            label="试样体积对 V0,V1（每行一对，逗号分隔）"
-            value={volumes}
-            onChange={setVolumes}
-          />
-          <div className="text-[11px] mt-1 mb-2" style={{ color: "var(--fg-faint)" }}>
-            例：10,12 换行 10,11
+          <p className="text-[12px] mb-3">
+            记录同一份 18 颗球团的还原前后总体积。
+          </p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            {field("v0", "V₀ 整份还原前体积", "mL")}
+            {field("v1", "V₁ 整份还原后体积", "mL")}
+            {field("pellet_count", "本份颗粒数")}
+            {field("volume_method", "体积测定方法与记录编号")}
           </div>
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() => {
-                const pairs = volumes
-                  .split(/[\n;]+/)
-                  .map((line) => line.split(",").map((x) => Number(x.trim())))
-                  .filter((p) => p.length === 2 && p.every((n) => Number.isFinite(n)))
-                  .map((p) => [p[0], p[1]] as [number, number]);
-                if (!pairs.length) throw new Error("请输入至少一组有效体积");
-                return analyzeGb13240(detail.experiment_id, pairs);
-              })
-            }
-            className="px-3 py-1.5 rounded text-[13px]"
-            style={{ background: "var(--gas)", color: "#04140f" }}
-          >
-            计算自由膨胀指数
-          </button>
+          <label className="text-[12px]">
+            <input
+              type="checkbox"
+              checked={sameMethod}
+              onChange={(e) => setSameMethod(e.target.checked)}
+            />{" "}
+            确认还原前后采用相同测定方法
+          </label>
         </>
       )}
+      <div className="mt-3">
+        <button
+          disabled={busy || !detail.end_time}
+          onClick={submit}
+          className="px-3 py-1.5 rounded text-[13px]"
+          style={{ background: "var(--gas)", color: "#04140f" }}
+        >
+          {busy ? "计算中…" : "保存单次计算"}
+        </button>
+        {!detail.end_time && <span> 实验结束后可分析</span>}
+      </div>
     </div>
   );
 }

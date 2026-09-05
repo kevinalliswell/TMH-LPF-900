@@ -25,7 +25,10 @@ use tmh_core::engine::{
     standard_program, validate_program, ExperimentEngine, Phase, Program, ProgramSource, Stage,
     StageKind, SAFETY_ATMOSPHERE, STANDARD_MODES,
 };
-use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
+use tmh_core::gb::{
+    free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput, SwellingInput,
+    CALCULATION_VERSION,
+};
 use tmh_core::sampler::{build_sample_row, SampleContext};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage, UserRow};
 use tmh_core::telemetry::{aggregate, TelemetrySnapshot};
@@ -433,19 +436,6 @@ fn flammable_warnings(program: &Program, h2_limit: f64, co_limit: f64) -> Vec<Pr
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
-fn phase_str(p: Phase) -> &'static str {
-    match p {
-        Phase::Idle => "IDLE",
-        Phase::Configuring => "CONFIGURING",
-        Phase::Running => "RUNNING",
-        Phase::StageTransition => "STAGE_TRANSITION",
-        Phase::Completing => "COMPLETING",
-        Phase::Stopping => "STOPPING",
-        Phase::Error => "ERROR",
-    }
-}
-
-/// Stage kind → sample status tag (lets the report isolate the reduction stage).
 fn kind_str(k: StageKind) -> &'static str {
     match k {
         StageKind::Heating => "HEATING",
@@ -579,6 +569,23 @@ fn build_sample(hub: &DeviceHub, id: &str, w0: f64, total_s: f64, status: &str) 
         initial_weight: w0,
     };
     build_sample_row(&ctx, &snap, iso_now(), total_s.max(0.0) as u64, status)
+}
+
+fn timed_sample(
+    hub: &DeviceHub,
+    id: &str,
+    w0: f64,
+    total_s: f64,
+    stage_s: f64,
+    status: &str,
+) -> SampleRow {
+    let mut row = build_sample(hub, id, w0, total_s, status);
+    let mut record: serde_json::Value =
+        serde_json::from_str(row.record_json.as_deref().unwrap_or("{}")).unwrap_or_default();
+    record["elapsed_s"] = serde_json::json!(total_s);
+    record["stage_elapsed_s"] = serde_json::json!(stage_s);
+    row.record_json = Some(record.to_string());
+    row
 }
 
 /// Build the running-status snapshot from the engine's current position.
@@ -763,7 +770,14 @@ fn finalize(
     let end = iso_now();
     // Poison-tolerant: a panic elsewhere must not leave the run permanently "unfinished",
     // which would make crash recovery re-close it on every later start (#47).
-    let _ = lock(storage).finish_experiment(id, &end);
+    let data_ok = buffer.rows.is_empty() && buffer.dropped == 0;
+    let persisted = if data_ok {
+        let db = lock(storage);
+        db.patch_runtime_metadata(id, &serde_json::json!({"outcome":outcome,"data_complete":true,"safety_confirmed":safety_result.is_ok()}).to_string())
+            .and_then(|_| db.finish_experiment(id,&end)).is_ok()
+    } else {
+        false
+    };
     let safety_ok = safety_result.is_ok();
     audit.write(
         &AuditEntry::new(
@@ -794,10 +808,11 @@ fn finalize(
             "elapsed_s": total_s,
             "safety_atmosphere_confirmed": safety_ok,
             "unwritten_samples": buffer.rows.len(),
+            "persistence_confirmed": persisted,
             "dropped_samples": buffer.dropped
         })),
     );
-    let final_status = if safety_ok {
+    let final_status = if safety_ok && persisted {
         ExperimentStatus::idle()
     } else {
         ExperimentStatus::safety_error(id, total_s)
@@ -941,6 +956,18 @@ fn spawn_experiment_task(
             }
 
             let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(f64::NAN);
+            let previous_kind = engine
+                .current_stage()
+                .map(|s| kind_str(s.kind))
+                .unwrap_or("UNKNOWN");
+            let measured = timed_sample(
+                &hub,
+                &id,
+                w0,
+                engine.total_elapsed_s() + dt,
+                engine.stage_elapsed_s() + dt,
+                previous_kind,
+            );
             let result = if exp.skip.swap(false, Ordering::Relaxed) {
                 audit.write(
                     &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
@@ -954,8 +981,31 @@ fn spawn_experiment_task(
                 engine.tick(t8, dt)
             };
 
+            if since_sample >= sample_period_s || result.apply_stage.is_some() || result.completed {
+                buffer.push(measured);
+                since_sample = 0.0;
+                samples_since_flush += 1;
+            }
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
                 if let Some(s) = engine.current_stage() {
+                    if s.kind == StageKind::Reducing {
+                        let mut baseline =
+                            timed_sample(&hub, &id, w0, engine.total_elapsed_s(), 0.0, "REDUCING");
+                        if let Some(raw) = baseline.record_json.as_mut() {
+                            let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+                            value["sample_role"] = serde_json::json!("reduction_baseline");
+                            *raw = value.to_string();
+                        }
+                        let saved = lock(&storage).patch_runtime_metadata(&id, &serde_json::json!({
+                            "reduction_m1": if baseline.system_message.is_none() { Some(baseline.weight) } else { None },
+                            "reduction_start_s": engine.total_elapsed_s()
+                        }).to_string());
+                        if saved.is_err() || baseline.system_message.is_some() {
+                            exp.stop.store(true, Ordering::Relaxed);
+                            continue;
+                        }
+                        buffer.push(baseline);
+                    }
                     if apply_stage_atmosphere(&hub, s, w0).is_err() {
                         audit.write(
                             &AuditEntry::new(
@@ -999,23 +1049,6 @@ fn spawn_experiment_task(
                 }
             }
 
-            let status = engine
-                .current_stage()
-                .map(|s| kind_str(s.kind))
-                .unwrap_or_else(|| phase_str(engine.phase()));
-            // Sample on the configured cadence, and always once more on completion so the
-            // final weighing the GB analysis and the chart depend on is never dropped.
-            if since_sample >= sample_period_s || result.completed {
-                buffer.push(build_sample(
-                    &hub,
-                    &id,
-                    w0,
-                    engine.total_elapsed_s(),
-                    status,
-                ));
-                since_sample = 0.0;
-                samples_since_flush += 1;
-            }
             if samples_since_flush >= FLUSH_EVERY_SAMPLES {
                 flush(&storage, &audit, &mut buffer, &id, &owner_display_name);
                 samples_since_flush = 0;
@@ -1069,7 +1102,9 @@ fn recover_unfinished(hub: &DeviceHub, storage: &Storage, audit: &AuditLog) {
     let now = iso_now();
     let ids: Vec<String> = unfinished.iter().map(|e| e.experiment_id.clone()).collect();
     for id in &ids {
-        let _ = storage.finish_experiment(id, &now);
+        let _ = storage
+            .patch_runtime_metadata(id, "{\"outcome\":\"recovered\",\"data_complete\":false}")
+            .and_then(|_| storage.finish_experiment(id, &now));
     }
     audit.write(
         &AuditEntry::new(Category::Experiment, "crash_recovery", AuditResult::Success)
@@ -2012,6 +2047,18 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         .insert_experiment(&row)
         .map_err(|e| e.to_string())?;
 
+    lock(&st.storage)
+        .patch_runtime_metadata(
+            &id,
+            &serde_json::json!({
+                "schema_version":1,"outcome":"running","device_mode":st.mode,
+                "sample_interval_s":st.cadence.sampling.as_secs_f64()*st.sim_speed,
+                "calculation_version":CALCULATION_VERSION
+            })
+            .to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+
     // Reset signals and publish the initial running status before the task spins up.
     st.exp.stop.store(false, Ordering::Relaxed);
     st.exp.skip.store(false, Ordering::Relaxed);
@@ -2121,6 +2168,14 @@ fn skip_stage(state: State<AppState>, reason: String) -> Result<(), String> {
     if reason.trim().is_empty() {
         return Err("跳段原因必填".into());
     }
+    if let Some(id) = &status.experiment_id {
+        lock(&state.storage)
+            .patch_runtime_metadata(
+                id,
+                &serde_json::json!({"skipped":true,"skip_reason":reason}).to_string(),
+            )
+            .map_err(|e| e.to_string())?;
+    }
     state.exp.skip.store(true, Ordering::Relaxed);
     // The requester is not always the run's owner (an admin may take over), so record who
     // asked here; the tick task audits the skip it actually performs.
@@ -2163,6 +2218,12 @@ fn save_custom_program(state: State<AppState>, program: Program) -> Result<Progr
         return Err("标准模式不可覆盖，请复制为自定义模式".into());
     }
     validate_program(&program)?;
+    let base = program
+        .base_standard_id
+        .as_deref()
+        .and_then(standard_program)
+        .ok_or("自定义实验须从国标模板复制")?;
+    program.base_standard_version = base.base_standard_version;
 
     lock(&state.storage)
         .save_custom_program(
@@ -2248,6 +2309,8 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
 
 #[derive(serde::Serialize)]
 struct ExperimentDetail {
+    revisions: Vec<serde_json::Value>,
+    runtime: serde_json::Value,
     program_snapshot: Option<Program>,
     sample_id: Option<String>,
     project_name: Option<String>,
@@ -2273,6 +2336,8 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
     ExperimentDetail {
+        revisions: Vec::new(),
+        runtime: serde_json::json!({}),
         program_snapshot: r
             .program_snapshot_json
             .as_deref()
@@ -2298,6 +2363,8 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
 
 #[derive(serde::Serialize)]
 struct SampleDto {
+    quality: Option<String>,
+    record: Option<serde_json::Value>,
     timestamp: String,
     experiment_duration: Option<String>,
     temperature: f64,
@@ -2312,6 +2379,11 @@ struct SampleDto {
 
 fn sample_dto(r: SampleRow) -> SampleDto {
     SampleDto {
+        quality: r.system_message,
+        record: r
+            .record_json
+            .as_deref()
+            .and_then(|v| serde_json::from_str(v).ok()),
         timestamp: r.timestamp,
         experiment_duration: r.experiment_duration,
         temperature: r.temperature,
@@ -2348,7 +2420,11 @@ fn get_experiment_detail(state: State<AppState>, id: String) -> Result<Experimen
         .map_err(|e| e.to_string())?
         .ok_or("实验不存在")?;
     let count = s.count_samples(&id).map_err(|e| e.to_string())?;
-    Ok(detail_of(row, count))
+    let mut detail = detail_of(row, count);
+    detail.runtime = serde_json::from_str(&s.runtime_metadata(&id).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    detail.revisions = s.analysis_revisions(&id).map_err(|e| e.to_string())?;
+    Ok(detail)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -2385,47 +2461,47 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
 
 // ---- GB analysis ------------------------------------------------------------
 
-/// Parse "HH:MM:SS" → minutes (for the reduction-rate least-squares fit).
-fn parse_hms_min(s: &str) -> Option<f64> {
-    let mut it = s.split(':');
-    let h: f64 = it.next()?.parse().ok()?;
-    let m: f64 = it.next()?.parse().ok()?;
-    let sec: f64 = it.next()?.parse().ok()?;
-    Some(h * 60.0 + m + sec / 60.0)
-}
-
-/// Sample rows GB analysis may use: inside the reduction stage AND actually weighed.
-///
-/// The sampler deliberately writes balance-offline rows with `weight = 0.0` and a
-/// "天平离线" annotation so the series stays gap-free (docs/06 §6.3) — but feeding those
-/// zeros to the Rt formula turns ΔW into the entire sample mass. Rows from heating,
-/// stabilising and cooling are excluded too: no reduction happens there, so including them
-/// dilutes the reduction-rate slope (#42). `report.rs` already scopes its condition checks
-/// the same way.
-fn reducing_samples(samples: &[SampleRow]) -> Vec<&SampleRow> {
-    let reducing = kind_str(StageKind::Reducing);
-    samples
+/// Read exact stage time without treating old untimed rows or missing readings as zero.
+fn reduction_curve(
+    samples: &[SampleRow],
+    m0: f64,
+    m1: f64,
+    input: &ReductionInput,
+    max_gap_s: f64,
+) -> Vec<(f64, f64)> {
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for row in samples
         .iter()
-        .filter(|r| r.experiment_status.as_deref() == Some(reducing))
-        .filter(|r| r.system_message.is_none() && r.weight > 0.0)
-        .collect()
+        .filter(|r| r.experiment_status.as_deref() == Some("REDUCING"))
+    {
+        let record: serde_json::Value =
+            serde_json::from_str(row.record_json.as_deref().unwrap_or("{}")).unwrap_or_default();
+        let Some(t) = record["stage_elapsed_s"].as_f64() else {
+            continue;
+        };
+        let rt = if row.system_message.is_none() {
+            reducibility(m0, m1, row.weight, input.w1, input.w2).map(|r| r.rt)
+        } else {
+            None
+        };
+        if let Some(&(previous, _)) = points.last() {
+            if (t / 60.0 - previous) * 60.0 > max_gap_s {
+                points.push(((previous + t / 60.0) / 2.0, f64::NAN));
+            }
+        }
+        points.push((t / 60.0, rt.unwrap_or(f64::NAN)));
+    }
+    points
 }
-
-/// `(minutes since the reduction stage began, Rt)` pairs for the rate-index fit. The time
-/// base is the first reduction sample rather than the start of the run (#42).
-fn reduction_curve(samples: &[&SampleRow], w0: f64, o2_pct: f64) -> Vec<(f64, f64)> {
-    let t0 = samples
-        .first()
-        .and_then(|r| r.experiment_duration.as_deref())
-        .and_then(parse_hms_min)
-        .unwrap_or(0.0);
-    samples
-        .iter()
-        .filter_map(|r| {
-            let m = parse_hms_min(r.experiment_duration.as_deref()?)?;
-            Some((m - t0, reducibility(w0, r.weight, o2_pct)?.rt))
-        })
-        .collect()
+fn value_at(points: &[(f64, f64)], time: f64) -> Option<f64> {
+    if let Some((_, v)) = points.iter().find(|p| p.0 == time && p.1.is_finite()) {
+        return Some(*v);
+    }
+    points.windows(2).find_map(|p| {
+        let ((a, b), (c, d)) = (p[0], p[1]);
+        (a < time && c > time && b.is_finite() && d.is_finite())
+            .then(|| b + (d - b) * (time - a) / (c - a))
+    })
 }
 
 /// Persist an analysis-result JSON onto the experiment row and audit it.
@@ -2436,7 +2512,9 @@ fn persist_analysis(
     operator: &str,
     value: &serde_json::Value,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    let mut versioned = value.clone();
+    versioned["computed_by"] = serde_json::json!(operator);
+    let json = serde_json::to_string(&versioned).map_err(|e| e.to_string())?;
     lock(&state.storage)
         .set_analysis_results(id, &json)
         .map_err(|e| e.to_string())?;
@@ -2456,96 +2534,186 @@ fn require_experiment(state: &AppState, id: &str) -> Result<UserRow, String> {
     Ok(user)
 }
 
-/// GB/T 13241 reducibility: Rt from W0 (sample weight) and Wt (final sample weight),
-/// plus the reduction-rate index over the recorded curve. `o2_pct` is operator-entered.
-#[tauri::command(rename_all = "snake_case")]
+fn analysis_context(
+    state: &AppState,
+    id: &str,
+    expected: &str,
+) -> Result<(UserRow, ExperimentRow, Vec<SampleRow>, serde_json::Value), String> {
+    let user = require_experiment(state, id)?;
+    let db = lock(&state.storage);
+    let row = db
+        .get_experiment(id)
+        .map_err(|e| e.to_string())?
+        .ok_or("实验不存在")?;
+    if row.end_time.is_none() {
+        return Err("实验未结束，暂不可分析".into());
+    }
+    let program: Option<Program> = row
+        .program_snapshot_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let method = program
+        .as_ref()
+        .and_then(|p| p.base_standard_id.as_deref())
+        .or(row.experiment_type.as_deref());
+    if method != Some(expected) {
+        return Err("分析方法与本次执行程序不匹配".into());
+    }
+    let meta = serde_json::from_str(&db.runtime_metadata(id).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok((
+        user,
+        row,
+        db.get_samples(id, 0).map_err(|e| e.to_string())?,
+        meta,
+    ))
+}
+
+#[tauri::command]
 fn analyze_gb13241(
     state: State<AppState>,
     id: String,
-    o2_pct: f64,
+    input: ReductionInput,
 ) -> Result<serde_json::Value, String> {
-    let user = require_experiment(&state, &id)?;
-    let (w0, samples) = {
-        let s = lock(&state.storage);
-        let row = s
-            .get_experiment(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or("实验不存在")?;
-        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
-        (row.sample_weight, samples)
-    };
-    // Wt is the last VALID reduction-stage weighing, not simply the last row in the run —
-    // that one is recorded after cooling and may be a balance-offline zero (#42).
-    let usable = reducing_samples(&samples);
-    let wt = usable
-        .last()
-        .map(|r| r.weight)
-        .ok_or("还原段没有有效采样(天平离线或数据不足),无法计算还原度")?;
-    let red = reducibility(w0, wt, o2_pct).ok_or("W0 或 O2% 无效")?;
-    let points = reduction_curve(&usable, w0, o2_pct);
-    let value = serde_json::json!({
-        "standard": "GB/T 13241",
-        "w0": w0,
-        "wt": wt,
-        "o2_pct": o2_pct,
-        "rt": red.rt,
-        "delta_w": red.delta_w,
-        "reduction_rate_index": reduction_rate_index(&points),
-        "valid_sample_count": usable.len(),
-        "excluded_sample_count": samples.len() - usable.len(),
-        "computed_at": iso_now(),
-    });
+    let (user, row, samples, meta) = analysis_context(&state, &id, "REDUCIBILITY")?;
+    let value = calculate_reduction(&row, &samples, &meta, &input)?;
     persist_analysis(&state, &id, "GB/T 13241", &user.display_name, &value)?;
     Ok(value)
 }
-
-/// GB/T 13242 low-temperature degradation RDI from operator-entered sieve masses (g).
-#[tauri::command(rename_all = "snake_case")]
-fn analyze_gb13242(
-    state: State<AppState>,
-    id: String,
-    m0: f64,
-    m_gt63: f64,
-    m_315_63: f64,
-    m_05_315: f64,
-    m_lt05: f64,
+fn calculate_reduction(
+    row: &ExperimentRow,
+    samples: &[SampleRow],
+    meta: &serde_json::Value,
+    input: &ReductionInput,
 ) -> Result<serde_json::Value, String> {
-    let user = require_experiment(&state, &id)?;
-    let r = rdi(m0, m_gt63, m_315_63, m_05_315, m_lt05).ok_or("m0 无效")?;
-    let value = serde_json::json!({
-        "standard": "GB/T 13242",
-        "m0": m0,
-        "m_gt63": m_gt63,
-        "m_315_63": m_315_63,
-        "m_05_315": m_05_315,
-        "m_lt05": m_lt05,
-        "rdi_plus_6_3": r.rdi_plus_6_3,
-        "rdi_plus_3_15": r.rdi_plus_3_15,
-        "rdi_minus_0_5": r.rdi_minus_0_5,
-        "sieve_warning": r.sieve_warning,
-        "computed_at": iso_now(),
-    });
-    persist_analysis(&state, &id, "GB/T 13242", &user.display_name, &value)?;
+    let manual_used = input.manual_m1.is_some()
+        || input.manual_m180.is_some()
+        || input.manual_rate_points.is_some();
+    if manual_used
+        && input
+            .source_record
+            .as_ref()
+            .map_or(true, |v| v.trim().is_empty())
+    {
+        return Err("人工补录须填写原始记录编号或来源说明".into());
+    }
+    let m1 = input
+        .manual_m1
+        .or_else(|| meta["reduction_m1"].as_f64())
+        .ok_or("缺少还原开始前有效总称量 m₁，可依据原始记录人工补录")?;
+    let max_gap = meta["sample_interval_s"]
+        .as_f64()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0)
+        * 1.5;
+    reducibility(row.sample_weight, m1, m1, input.w1, input.w2).ok_or("亚铁/全铁含量或称量无效")?;
+    let points = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
+    let rt = if let Some(m180) = input.manual_m180 {
+        reducibility(row.sample_weight, m1, m180, input.w1, input.w2)
+            .ok_or("180 分钟总称量无效")?
+            .rt
+    } else {
+        value_at(&points, 180.0).ok_or("180 分钟处没有连续有效称量，可依据原始记录人工补录 m₁₈₀")?
+    };
+    let rate = if let Some(manual) = &input.manual_rate_points {
+        Some(
+            reduction_rate(manual)
+                .ok_or("人工速率曲线须按时间递增并覆盖 30% 与 60%、55% 或 50% 还原度")?,
+        )
+    } else {
+        reduction_rate(&points)
+    };
+    let value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
+      "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"ri":rt,
+      "reduction_rate_index":rate.as_ref().map(|r|r.index),"rate_evidence":rate,
+      "runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
     Ok(value)
 }
 
-/// GB/T 13240 free-swelling index from operator-entered (V0, V1) volume pairs (mL).
+#[tauri::command]
+fn analyze_gb13242(
+    state: State<AppState>,
+    id: String,
+    input: RdiInput,
+) -> Result<serde_json::Value, String> {
+    let (user, _, _, meta) = analysis_context(&state, &id, "LOW_TEMP_DEGRADATION")?;
+    let result = rdi(input.m0, input.m1, input.m2, input.m3)
+        .ok_or("入鼓质量或筛上质量无效：须为有限非负值且筛上合计不大于入鼓质量")?;
+    if !input.drum_rpm.is_finite()
+        || input.drum_rpm <= 0.0
+        || input.drum_revolutions == 0
+        || !input.sieve_seconds.is_finite()
+        || input.sieve_seconds <= 0.0
+    {
+        return Err("请填写实际转鼓与筛分记录".into());
+    }
+    let external_conditions_met = (input.drum_rpm - 30.0).abs() <= 1.0
+        && input.drum_revolutions == 300
+        && input.sieve_seconds == 60.0;
+    let value = serde_json::json!({"standard":"GB/T 13242","standard_version":"2017","calculation_version":CALCULATION_VERSION,
+      "input":input,"rdi_plus_6_3":result.rdi_plus_6_3,"rdi_plus_3_15":result.rdi_plus_3_15,"rdi_minus_0_5":result.rdi_minus_0_5,
+      "external_conditions_met":external_conditions_met,"runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
+    persist_analysis(&state, &id, "GB/T 13242", &user.display_name, &value)?;
+    Ok(value)
+}
 #[tauri::command]
 fn analyze_gb13240(
     state: State<AppState>,
     id: String,
-    volumes: Vec<(f64, f64)>,
+    input: SwellingInput,
 ) -> Result<serde_json::Value, String> {
-    let user = require_experiment(&state, &id)?;
-    let r = free_swelling(&volumes).ok_or("无有效试样体积")?;
-    let value = serde_json::json!({
-        "standard": "GB/T 13240",
-        "per_pellet": r.per_pellet,
-        "average": r.average,
-        "computed_at": iso_now(),
-    });
+    let (user, _, _, meta) = analysis_context(&state, &id, "FREE_SWELLING")?;
+    if input.pellet_count != 18 || input.volume_method.trim().is_empty() || !input.same_method {
+        return Err("须为同一份 18 颗球团的总体积，并确认还原前后采用相同体积测定方法".into());
+    }
+    let result = free_swelling(&[(input.v0, input.v1)]).ok_or("整份体积必须为有限正值")?;
+    let value = serde_json::json!({"standard":"GB/T 13240","standard_version":"2018","calculation_version":CALCULATION_VERSION,
+      "input":input,"swelling_index":result.swelling_index,"runtime_evidence":meta,
+      "result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
     persist_analysis(&state, &id, "GB/T 13240", &user.display_name, &value)?;
     Ok(value)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ReportDetails {
+    lab_name: String,
+    lab_address: String,
+    report_number: String,
+    report_date: String,
+    sample_preparation: String,
+    equipment: String,
+    gas_and_calibration: String,
+    external_steps: String,
+    deviations: String,
+    reviewer: String,
+    repeat_group_reference: String,
+}
+#[tauri::command]
+fn save_report_details(
+    state: State<AppState>,
+    id: String,
+    details: ReportDetails,
+) -> Result<(), String> {
+    let user = require_experiment(&state, &id)?;
+    let value = serde_json::to_value(&details).map_err(|e| e.to_string())?;
+    if value
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|v| v.as_str().map_or(true, |s| s.len() > 4096))
+    {
+        return Err("报告字段过长".into());
+    }
+    let patch = serde_json::json!({"report_details":details,"report_details_operator":user.display_name,"report_details_updated_at":iso_now()});
+    lock(&state.storage)
+        .save_report_revision(&id, &patch.to_string())
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(Category::Experiment, "report_details", AuditResult::Success)
+            .operator(user.display_name)
+            .detail(serde_json::json!({"id":id})),
+    );
+    Ok(())
 }
 
 // ---- Report & export --------------------------------------------------------
@@ -2575,10 +2743,19 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
         let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
         (exp, samples)
     };
-    let analysis = exp
+    let mut analysis = exp
         .analysis_results_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+    let runtime: serde_json::Value = serde_json::from_str(
+        &lock(&st.storage)
+            .runtime_metadata(&id)
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let a = analysis.get_or_insert_with(|| serde_json::json!({}));
+    a["report_details"] = runtime["report_details"].clone();
+    a["runtime_evidence"] = runtime;
     let html = tmh_core::report::render_report_html(
         &exp,
         &samples,
@@ -2871,6 +3048,7 @@ pub fn run() {
             analyze_gb13242,
             analyze_gb13240,
             generate_report,
+            save_report_details,
             export_experiment,
             get_updater_status,
             check_for_update,
@@ -3192,13 +3370,6 @@ mod tests {
     }
 
     #[test]
-    fn hms_minutes_parses() {
-        assert_eq!(parse_hms_min("01:30:00"), Some(90.0));
-        assert_eq!(parse_hms_min("00:00:30"), Some(0.5));
-        assert_eq!(parse_hms_min("bad"), None);
-    }
-
-    #[test]
     fn reducing_target_matches_program() {
         assert_eq!(reducing_target(Some("REDUCIBILITY")), Some(900.0));
         assert_eq!(reducing_target(Some("LOW_TEMP_DEGRADATION")), Some(500.0));
@@ -3240,6 +3411,7 @@ mod tests {
 
     fn row(status: &str, minutes: u64, weight: f64, offline: bool) -> SampleRow {
         SampleRow {
+            record_json: None,
             experiment_id: "e1".into(),
             timestamp: "2026-09-01T08:00:00".into(),
             experiment_duration: Some(format!("{:02}:{:02}:00", minutes / 60, minutes % 60)),
@@ -3256,45 +3428,35 @@ mod tests {
     }
 
     #[test]
-    fn gb_analysis_ignores_non_reduction_and_balance_offline_rows() {
-        // Regression for #42: the run ends with cooling rows, and any balance-offline row
-        // carries weight = 0.0 by design. Taking "the last sample" made Wt = 0, so
-        // ΔW became the whole sample and Rt came out at 333% for a 30% O2 run.
-        let samples = vec![
-            row("HEATING", 0, 100.0, false),
-            row("REDUCING", 10, 95.0, false),
-            row("REDUCING", 20, 0.0, true), // balance dropped out mid-stage
-            row("REDUCING", 30, 85.0, false),
-            row("COOLING", 40, 84.0, false),
-            row("COOLING", 50, 0.0, true), // and again after the run
-        ];
-        let usable = reducing_samples(&samples);
-        assert_eq!(usable.len(), 2, "only weighed reduction rows survive");
+    fn exact_reduction_endpoint_cannot_bridge_a_missing_measurement() {
+        assert_eq!(value_at(&[(179.0, 40.0), (181.0, 42.0)], 180.0), Some(41.0));
         assert_eq!(
-            usable.last().unwrap().weight,
-            85.0,
-            "Wt is the last valid weighing"
+            value_at(&[(179.0, 40.0), (180.0, f64::NAN), (181.0, 42.0)], 180.0),
+            None
         );
-
-        // The curve is rebased on the reduction stage, not the start of the run.
-        let curve = reduction_curve(&usable, 100.0, 30.0);
-        assert_eq!(curve.len(), 2);
-        assert_eq!(curve[0].0, 0.0, "time base is the first reduction sample");
-        assert_eq!(curve[1].0, 20.0);
-        assert!((curve[0].1 - (5.0 / 30.0 * 100.0)).abs() < 1e-9);
-    }
-
-    #[test]
-    fn gb_analysis_has_no_usable_rows_when_the_balance_was_never_online() {
-        let samples = vec![
-            row("HEATING", 0, 100.0, false),
-            row("REDUCING", 10, 0.0, true),
-            row("COOLING", 20, 0.0, true),
+        let mut rows = vec![
+            row("REDUCING", 1, 490.0, false),
+            row("REDUCING", 3, 480.0, true),
         ];
-        assert!(
-            reducing_samples(&samples).is_empty(),
-            "an all-offline reduction stage must yield no result instead of a fabricated one"
+        rows[0].record_json = Some("{\"stage_elapsed_s\":60}".into());
+        rows[1].record_json = Some("{\"stage_elapsed_s\":180}".into());
+        let curve = reduction_curve(
+            &rows,
+            500.0,
+            500.0,
+            &ReductionInput {
+                w1: 0.0,
+                w2: 60.0,
+                manual_m1: None,
+                manual_m180: None,
+                manual_rate_points: None,
+                source_record: None,
+            },
+            90.0,
         );
+        assert_eq!(curve.len(), 3);
+        assert!(curve[1].1.is_nan());
+        assert!(curve[2].1.is_nan());
     }
 
     #[test]
@@ -3348,7 +3510,13 @@ mod tests {
         assert_eq!(buffer.dropped, 25);
         // The rows kept are the newest ones: the 25 oldest were evicted.
         let minutes = |r: &SampleRow| {
-            parse_hms_min(r.experiment_duration.as_deref().unwrap()).unwrap() as usize
+            r.experiment_duration
+                .as_deref()
+                .unwrap()
+                .split(':')
+                .take(2)
+                .map(|v| v.parse::<usize>().unwrap())
+                .fold(0, |sum, v| sum * 60 + v)
         };
         assert_eq!(minutes(buffer.rows.first().unwrap()), 25);
         assert_eq!(
@@ -3376,5 +3544,31 @@ mod tests {
         load_comm_config()
             .validate()
             .expect("fallback config valid");
+    }
+    #[test]
+    fn manual_missing_data_can_produce_a_traceable_standard_calculation() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        let mut row = lock(&state.storage)
+            .list_experiments()
+            .unwrap()
+            .pop()
+            .unwrap();
+        row.sample_weight = 500.0;
+        let mut input = ReductionInput {
+            w1: 10.0,
+            w2: 60.0,
+            manual_m1: Some(1500.0),
+            manual_m180: Some(1450.0),
+            manual_rate_points: Some(vec![(0.0, 30.0), (10.0, 60.0)]),
+            source_record: Some("原始记录 LAB-001".into()),
+        };
+        let value = calculate_reduction(&row, &[], &serde_json::json!({}), &input).unwrap();
+        assert!((value["ri"].as_f64().unwrap() - 43.06201550387597).abs() < 1e-10);
+        assert!((value["reduction_rate_index"].as_f64().unwrap() - 3.36).abs() < 1e-10);
+        assert_eq!(value["manual_used"], true);
+        assert_eq!(value["input"]["source_record"], "原始记录 LAB-001");
+        input.source_record = None;
+        assert!(calculate_reduction(&row, &[], &serde_json::json!({}), &input).is_err());
     }
 }

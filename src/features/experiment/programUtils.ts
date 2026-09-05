@@ -124,6 +124,9 @@ export function copyAsCustom(program: ProgramDto): ProgramDto {
     enabled: true,
     sample_prefix: normalizeSamplePrefix(program.sample_prefix, program.id),
     source: "custom",
+    base_standard_id: program.base_standard_id ?? program.id,
+    base_standard_version: program.base_standard_version ?? (program.id === "FREE_SWELLING" ? "2018" : "2017"),
+
   };
 }
 

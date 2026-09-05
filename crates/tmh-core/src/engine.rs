@@ -81,6 +81,10 @@ pub struct Stage {
 /// A full experiment program.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
+    #[serde(default)]
+    pub base_standard_id: Option<String>,
+    #[serde(default)]
+    pub base_standard_version: Option<String>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -136,6 +140,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
     use StageKind::*;
     let p = match mode_id {
         "REDUCIBILITY" => Program {
+            base_standard_id: Some("REDUCIBILITY".into()),
+            base_standard_version: Some("2017".into()),
             id: "REDUCIBILITY".into(),
             name: "GB/T 13241 还原性".into(),
             description: "GB/T 13241-2017 铁矿石还原性的测定方法".into(),
@@ -187,6 +193,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
             ],
         },
         "LOW_TEMP_DEGRADATION" => Program {
+            base_standard_id: Some("LOW_TEMP_DEGRADATION".into()),
+            base_standard_version: Some("2017".into()),
             id: "LOW_TEMP_DEGRADATION".into(),
             name: "GB/T 13242 低温粉化".into(),
             description: "GB/T 13242-2017 铁矿石低温粉化试验方法".into(),
@@ -238,6 +246,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
             ],
         },
         "FREE_SWELLING" => Program {
+            base_standard_id: Some("FREE_SWELLING".into()),
+            base_standard_version: Some("2018".into()),
             id: "FREE_SWELLING".into(),
             name: "GB/T 13240 自由膨胀".into(),
             description: "GB/T 13240-2018 球团矿自由膨胀指数测定方法".into(),
