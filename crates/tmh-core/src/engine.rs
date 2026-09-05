@@ -400,6 +400,15 @@ impl ExperimentEngine {
         self.total_elapsed_s
     }
 
+    /// A stage's exposure clock starts only when its gas switch is acknowledged.
+    /// Transport delay remains part of the complete experiment timeline.
+    pub fn confirm_stage_started(&mut self, switching_s: f64) {
+        if switching_s.is_finite() && switching_s >= 0.0 {
+            self.total_elapsed_s += switching_s;
+        }
+        self.stage_elapsed_s = 0.0;
+    }
+
     /// Advance `dt` seconds with sample temperature `t8`. Returns which stage's
     /// atmosphere to (re)apply and whether the run completed.
     pub fn tick(&mut self, t8: f64, dt: f64) -> TickResult {
@@ -635,5 +644,17 @@ mod tests {
         assert!(p.enabled);
         assert_eq!(p.sample_prefix, "");
         assert_eq!(p.source, ProgramSource::Custom);
+    }
+    #[test]
+    fn gas_acknowledgement_delay_is_not_reduction_exposure() {
+        let mut e = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
+        e.skip_stage();
+        e.skip_stage();
+        e.confirm_stage_started(17.0);
+        assert_eq!(e.total_elapsed_s(), 17.0);
+        assert_eq!(e.stage_elapsed_s(), 0.0);
+        assert!(!e.tick(900.0, 10800.0 - 17.0).completed);
+        assert_eq!(e.stage_index(), 2);
+        assert_eq!(e.tick(900.0, 17.0).apply_stage, Some(3));
     }
 }
