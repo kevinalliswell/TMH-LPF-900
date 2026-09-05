@@ -2,8 +2,8 @@ use crate::auth_session::{AuthSession, SessionError, SessionState};
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::sync::{Mutex, MutexGuard};
 use tmh_core::auth::{
-    hash_password, new_user_id, normalize_username, validate_display_name, verify_password,
-    UserRole,
+    hash_password, new_user_id, normalize_username, validate_display_name, verify_absent_user,
+    verify_password, UserRole,
 };
 use tmh_core::storage::{Storage, UserRow};
 
@@ -144,21 +144,28 @@ impl AuthService {
             .get_user_by_username(&username)
             .map_err(|_| AuthCode::Storage)?
         else {
+            // Spend the same time as a real verification so login timing does not reveal
+            // which usernames exist (#46). Always false.
+            verify_absent_user(password);
             return Err(AuthCode::Failed);
         };
         if !user.is_active {
             return Err(AuthCode::AccountDisabled);
         }
-        if user
-            .locked_until
-            .as_deref()
-            .and_then(parse_timestamp)
-            .is_some_and(|until| now_epoch_s < until)
-        {
+        let lock_deadline = user.locked_until.as_deref().and_then(parse_timestamp);
+        if lock_deadline.is_some_and(|until| now_epoch_s < until) {
             return Err(AuthCode::AccountLocked);
         }
+        // A lock that has run out opens a FRESH failure window. Without this the stored
+        // count stays at the threshold forever, so the first typo after every unlock
+        // re-locks the account for another 15 minutes (#46).
+        let prior_failures = if lock_deadline.is_some() {
+            0
+        } else {
+            user.failed_login_count
+        };
         if !verify_password(&user.password_hash, password) {
-            let failed_count = user.failed_login_count.saturating_add(1);
+            let failed_count = prior_failures.saturating_add(1);
             let locked_until = (failed_count >= MAX_LOGIN_FAILURES)
                 .then(|| timestamp(now_epoch_s.saturating_add(ACCOUNT_LOCK_SECONDS)));
             storage
@@ -417,6 +424,68 @@ mod tests {
             AuthCode::AccountLocked
         );
         auth.login(&storage, "admin", "strong-pass", 1105).unwrap();
+    }
+
+    #[test]
+    fn expired_lock_starts_a_fresh_failure_window() {
+        // Regression for #46: the stored failure count used to survive the lock, so the
+        // first typo after every unlock re-locked the account for another 15 minutes.
+        let storage = Storage::open_in_memory().unwrap();
+        let auth = AuthService::new(900);
+        auth.bootstrap(&storage, "admin", "管理员", "strong-pass", 100)
+            .unwrap();
+        auth.logout();
+        for now in 200..205 {
+            let _ = auth.login(&storage, "admin", "wrong-pass", now);
+        }
+        // Locked at t=204 until t=1104.
+        assert_eq!(
+            auth.login(&storage, "admin", "strong-pass", 1000)
+                .unwrap_err(),
+            AuthCode::AccountLocked
+        );
+        // Lock lapsed: one more typo is an ordinary failure, NOT an instant re-lock.
+        assert_eq!(
+            auth.login(&storage, "admin", "wrong-pass", 1200)
+                .unwrap_err(),
+            AuthCode::Failed
+        );
+        // ...and the right password still gets in immediately afterwards.
+        auth.login(&storage, "admin", "strong-pass", 1201).unwrap();
+        auth.logout();
+        // The fresh window still locks after five failures of its own.
+        for now in 1300..1304 {
+            assert_eq!(
+                auth.login(&storage, "admin", "wrong-pass", now)
+                    .unwrap_err(),
+                AuthCode::Failed
+            );
+        }
+        assert_eq!(
+            auth.login(&storage, "admin", "wrong-pass", 1304)
+                .unwrap_err(),
+            AuthCode::AccountLocked
+        );
+    }
+
+    #[test]
+    fn unknown_username_is_rejected_without_revealing_absence() {
+        let storage = Storage::open_in_memory().unwrap();
+        let auth = AuthService::new(900);
+        auth.bootstrap(&storage, "admin", "管理员", "strong-pass", 100)
+            .unwrap();
+        auth.logout();
+        // Same error code as a wrong password on an existing account (#46).
+        assert_eq!(
+            auth.login(&storage, "ghost", "strong-pass", 200)
+                .unwrap_err(),
+            AuthCode::Failed
+        );
+        assert_eq!(
+            auth.login(&storage, "admin", "wrong-pass", 201)
+                .unwrap_err(),
+            AuthCode::Failed
+        );
     }
 
     #[test]

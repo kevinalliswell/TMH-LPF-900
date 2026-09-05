@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getGasSafetyLimits } from "../../ipc";
-import type { GasLimits } from "../../ipc/types";
+import { getGasSafetyLimits, getRuntimeSettings } from "../../ipc";
+import type { GasLimits, RuntimeSettings } from "../../ipc/types";
 import { useRuntimeMode } from "../../stores/runtimeMode";
 import { Page, SectionTitle } from "../../components/Page";
 
@@ -25,10 +25,14 @@ const MODE_LABEL: Record<string, string> = {
 
 export function SettingsView() {
   const [limits, setLimits] = useState<GasLimits | null>(null);
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null);
   const mode = useRuntimeMode();
   useEffect(() => {
     getGasSafetyLimits()
       .then(setLimits)
+      .catch(() => {});
+    getRuntimeSettings()
+      .then(setSettings)
       .catch(() => {});
   }, []);
 
@@ -82,11 +86,35 @@ export function SettingsView() {
       </div>
 
       <div className="panel p-4">
+        <SectionTitle>采集节奏（来自 comm_config.json）</SectionTitle>
+        <div className="grid grid-cols-4 gap-4">
+          <Cadence label="实验采样" value={settings && `${settings.sampling_interval_s} s`} />
+          <Cadence label="遥测刷新" value={settings && `${settings.telemetry_interval_s} s`} />
+          <Cadence label="陈旧判定" value={settings && `${settings.heartbeat_timeout_s} s`} />
+          <Cadence label="空闲锁定" value={settings && `${settings.idle_timeout_s / 60} min`} />
+        </div>
+        <div className="text-[12px] mt-3" style={{ color: "var(--fg-faint)" }}>
+          这些值由后端从配置文件装载后回报，不再是前后端各写一份的常量。
+        </div>
+      </div>
+
+      <div className="panel p-4">
         <SectionTitle>运行</SectionTitle>
         <div className="mono text-[12px]" style={{ color: "var(--fg-dim)" }}>
           设备模式: {mode === null ? "…" : (MODE_LABEL[mode] ?? mode)}
         </div>
       </div>
     </Page>
+  );
+}
+
+function Cadence({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
+        {label}
+      </span>
+      <span className="mono text-[15px]">{value ?? "…"}</span>
+    </div>
   );
 }

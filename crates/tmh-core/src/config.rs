@@ -122,6 +122,8 @@ pub enum ConfigError {
     ZeroScale(&'static str),
     #[error("MFC slave addresses must be distinct")]
     SlaveAddrConflict,
+    #[error("interval must be positive and finite: {0}")]
+    NonPositiveInterval(&'static str),
     #[error("parse error: {0}")]
     Parse(String),
     #[error("io error: {0}")]
@@ -180,6 +182,27 @@ impl CommConfig {
         ] {
             if v == 0.0 {
                 return Err(ConfigError::ZeroScale(name));
+            }
+        }
+        // Cadences are consumed by the sampler, the telemetry pump and the staleness
+        // check; a zero or negative value would spin those loops (#44).
+        for (name, v) in [
+            ("SAMPLING.interval_s", self.sampling.interval_s),
+            (
+                "PERFORMANCE_CONFIG.data_collection_interval",
+                self.performance.data_collection_interval,
+            ),
+            (
+                "PERFORMANCE_CONFIG.experiment_data_interval",
+                self.performance.experiment_data_interval,
+            ),
+            (
+                "PERFORMANCE_CONFIG.heartbeat_timeout",
+                self.performance.heartbeat_timeout,
+            ),
+        ] {
+            if !v.is_finite() || v <= 0.0 {
+                return Err(ConfigError::NonPositiveInterval(name));
             }
         }
         let a = &self.slave_address_mfc;
@@ -260,6 +283,24 @@ mod tests {
         let mut c = base();
         c.gas_safety_limits.h2 = 0.0;
         assert_eq!(c.validate(), Err(ConfigError::NonPositiveLimit("H2")));
+    }
+
+    #[test]
+    fn nonpositive_or_nonfinite_interval_is_rejected() {
+        let mut c = base();
+        c.sampling.interval_s = 0.0;
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::NonPositiveInterval("SAMPLING.interval_s"))
+        );
+        let mut c = base();
+        c.performance.heartbeat_timeout = f64::NAN;
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::NonPositiveInterval(
+                "PERFORMANCE_CONFIG.heartbeat_timeout"
+            ))
+        );
     }
 
     #[test]
