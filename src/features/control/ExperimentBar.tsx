@@ -1,9 +1,11 @@
-import { useState } from "react";
-import { EXPERIMENT_MODES, skipStage, stopExperiment } from "../../ipc";
+import { useEffect, useState } from "react";
+import { EXPERIMENT_MODES, getExperimentDetail, skipStage, stopExperiment } from "../../ipc";
+import type { ProgramDto } from "../../ipc/types";
 import { Modal } from "../../components/Modal";
 import { useExperiment } from "../../stores/experiment";
 import { toastError, useToasts } from "../../stores/toast";
 import { StartExperimentDialog } from "../experiment/StartExperimentDialog";
+import { gasSummary, stageCondition } from "../experiment/programUtils";
 
 /** Format an elapsed second count as HH:MM:SS. */
 export function fmtHms(totalS: number | undefined): string {
@@ -16,10 +18,24 @@ export function ExperimentBar() {
   const ex = useExperiment((s) => s.state);
   const [showDialog, setShowDialog] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
+  const [confirmSkip, setConfirmSkip] = useState(false);
+  const [skipReason, setSkipReason] = useState("");
+  const [program, setProgram] = useState<ProgramDto | null>(null);
   const push = useToasts((s) => s.push);
+
+  useEffect(() => {
+    let cancelled = false;
+    setProgram(null);
+    if (ex.experiment_id) getExperimentDetail(ex.experiment_id).then(detail => {
+      if (!cancelled) setProgram(detail.program_snapshot ?? null);
+    }).catch(toastError);
+    return () => { cancelled = true; };
+  }, [ex.experiment_id]);
 
   const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? ex.mode ?? "";
   const stageNo = (ex.stage_index ?? 0) + 1;
+  const curStage = program?.stages[ex.stage_index ?? 0];
+  const nextStage = program?.stages[(ex.stage_index ?? 0) + 1];
 
   const doStop = async () => {
     try {
@@ -34,8 +50,10 @@ export function ExperimentBar() {
 
   const doSkip = async () => {
     try {
-      await skipStage();
+      await skipStage(skipReason);
       push("已跳至下一阶段", "info");
+      setSkipReason("");
+      setConfirmSkip(false);
     } catch (e) {
       toastError(e);
     }
@@ -75,7 +93,7 @@ export function ExperimentBar() {
             </span>
             <div className="flex-1" />
             <button
-              onClick={doSkip}
+              onClick={() => setConfirmSkip(true)}
               className="px-2.5 py-1 rounded text-[12px]"
               style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
             >
@@ -105,6 +123,57 @@ export function ExperimentBar() {
       </div>
 
       {showDialog && <StartExperimentDialog onClose={() => setShowDialog(false)} />}
+      {confirmSkip && (
+        <Modal title="跳过阶段" onClose={() => setConfirmSkip(false)}>
+          <div className="flex flex-col gap-3 text-[13px]">
+            <div style={{ color: "var(--fg-dim)" }}>
+              确认跳过当前阶段?该操作会写入审计，并在下一轮控制周期下发下一阶段气氛。
+            </div>
+            <div className="rounded p-2.5" style={{ background: "var(--bg)", border: "1px solid var(--border)" }}>
+              <div className="text-[12px]" style={{ color: "var(--fg-faint)" }}>
+                当前阶段
+              </div>
+              <div className="mt-1">
+                {curStage ? `${curStage.name} · ${stageCondition(curStage)}` : ex.stage_name ?? "—"}
+              </div>
+              <div className="text-[12px] mt-2" style={{ color: "var(--fg-faint)" }}>
+                下一阶段
+              </div>
+              <div className="mt-1">
+                {nextStage
+                  ? `${nextStage.name} · ${stageCondition(nextStage)} · ${gasSummary(nextStage.gas)}`
+                  : program ? "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）" : "程序快照未取得，暂不可跳段"}
+              </div>
+            </div>
+            <label className="flex flex-col gap-1 text-[12px]" style={{ color: "var(--fg-dim)" }}>
+              跳段原因 *
+              <textarea
+                value={skipReason}
+                onChange={(e) => setSkipReason(e.target.value)}
+                className="px-2 py-1.5 rounded text-[13px] min-h-20"
+                style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+              />
+            </label>
+          </div>
+          <div className="flex justify-end gap-2 mt-4">
+            <button
+              onClick={() => setConfirmSkip(false)}
+              className="px-3 py-1.5 rounded text-[13px]"
+              style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+            >
+              取消
+            </button>
+            <button
+              onClick={doSkip}
+              disabled={!skipReason.trim() || !program || ex.can_control === false}
+              className="px-3 py-1.5 rounded text-[13px]"
+              style={{ background: "var(--warn)", color: "#1a1204", opacity: skipReason.trim() ? 1 : 0.6 }}
+            >
+              确认跳过
+            </button>
+          </div>
+        </Modal>
+      )}
       {confirmStop && (
         <Modal title="停止实验" onClose={() => setConfirmStop(false)}>
           <div className="text-[13px] mb-4" style={{ color: "var(--fg-dim)" }}>

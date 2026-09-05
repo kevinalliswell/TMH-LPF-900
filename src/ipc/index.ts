@@ -13,6 +13,8 @@ import type {
   GasLimits,
   RuntimeSettings,
   ProgramDto,
+  ExperimentPreflightResult,
+  ExperimentStartDefaults,
   SampleDto,
   TareResult,
   TelemetrySnapshot,
@@ -43,6 +45,11 @@ import {
   mockGetExperimentSamples,
   mockListExperiments,
   mockListPrograms,
+  mockSaveCustomProgram,
+  mockDeleteCustomProgram,
+  mockPreflightExperiment,
+  mockGenerateSampleId,
+  mockGetExperimentStartDefaults,
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
@@ -229,9 +236,9 @@ export async function stopExperiment(reason: string): Promise<void> {
   await invoke("stop_experiment", { reason });
 }
 
-export async function skipStage(): Promise<void> {
-  if (!isTauri()) return void mockSkipStage();
-  await invoke("skip_stage");
+export async function skipStage(reason: string): Promise<void> {
+  if (!isTauri()) return void mockSkipStage(reason);
+  await invoke("skip_stage", { reason });
 }
 
 export async function listPrograms(): Promise<ProgramDto[]> {
@@ -384,4 +391,40 @@ export function subscribeTelemetry(cb: (s: TelemetrySnapshot) => void): () => vo
     // Tell the backend to stop the pump thread — nulling onmessage alone leaks it (#8).
     void invoke("unsubscribe_telemetry");
   };
+}
+
+export async function saveCustomProgram(program: ProgramDto): Promise<ProgramDto> {
+  return isTauri()
+    ? invoke("save_custom_program", { program })
+    : mockSaveCustomProgram(program);
+}
+
+export async function deleteCustomProgram(id: string): Promise<void> {
+  if (!isTauri()) return void mockDeleteCustomProgram(id);
+  await invoke("delete_custom_program", { id });
+}
+
+export async function preflightExperiment(
+  params: ExperimentParams,
+): Promise<ExperimentPreflightResult> {
+  return isTauri()
+    ? invoke("preflight_experiment", { params })
+    : mockPreflightExperiment(params);
+}
+
+export async function generateSampleId(
+  programId: string,
+  experimentTime: string,
+): Promise<string> {
+  return isTauri()
+    ? invoke("generate_sample_id", { program_id: programId, experiment_time: experimentTime })
+    : mockGenerateSampleId(programId, experimentTime);
+}
+
+export async function getExperimentStartDefaults(
+  programId: string,
+): Promise<ExperimentStartDefaults> {
+  return isTauri()
+    ? invoke("get_experiment_start_defaults", { program_id: programId })
+    : mockGetExperimentStartDefaults(programId);
 }

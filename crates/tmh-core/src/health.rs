@@ -68,6 +68,28 @@ impl Health {
     }
 }
 
+/// Measurement freshness is independent of successful parameter writes and connection health.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadFreshness {
+    pub last_success: Option<Instant>,
+    pub latest_attempt_ok: bool,
+}
+impl ReadFreshness {
+    pub fn success(&mut self, now: Instant) {
+        self.last_success = Some(now);
+        self.latest_attempt_ok = true;
+    }
+    pub fn fail(&mut self) {
+        self.latest_attempt_ok = false;
+    }
+    pub fn is_fresh(&self, now: Instant) -> bool {
+        self.latest_attempt_ok
+            && self
+                .last_success
+                .is_some_and(|last| now.saturating_duration_since(last) <= Duration::from_secs(10))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,7 +22,7 @@ pub fn build_sample_row(
     elapsed_secs: u64,
     status: &str,
 ) -> SampleRow {
-    let balance_offline = !snap.health.balance_connected;
+    let balance_offline = !snap.health.balance_connected || !snap.health.balance_valid;
     let weight = if balance_offline {
         0.0
     } else {
@@ -31,7 +31,17 @@ pub fn build_sample_row(
     // Weight loss in grams (matches the report/export "失重(g)" column and the GB Rt
     // formula's ΔW = W0 − Wt). Floored at 0 so a tare/noise blip can't go negative.
     let weight_loss = (ctx.initial_weight - weight).max(0.0);
-    let system_message = balance_offline.then(|| "天平离线".to_string());
+    let mut issues = Vec::new();
+    if balance_offline {
+        issues.push("天平离线");
+    }
+    if !snap.health.temp_valid {
+        issues.push("温度数据无效或过期");
+    }
+    if !snap.health.mfc_valid {
+        issues.push("MFC 数据无效或过期");
+    }
+    let system_message = (!issues.is_empty()).then(|| issues.join("; "));
     SampleRow {
         experiment_id: ctx.experiment_id.clone(),
         timestamp,
@@ -94,6 +104,9 @@ mod tests {
             ],
             weight,
             health: DeviceHealth {
+                temp_valid: true,
+                mfc_valid: true,
+                balance_valid: true,
                 temp_connected: true,
                 mfc_connected: true,
                 balance_connected,

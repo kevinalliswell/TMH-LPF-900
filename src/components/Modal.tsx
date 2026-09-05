@@ -1,13 +1,16 @@
 import { useEffect } from "react";
 
+
 export function Modal({
   title,
   onClose,
   children,
+  wide = false,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
+  wide?: boolean;
 }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -23,11 +26,14 @@ export function Modal({
       style={{ background: "rgba(3,6,10,0.62)", backdropFilter: "blur(2px)" }}
       onClick={onClose}
     >
-      <div className="panel p-4 w-[460px] max-w-[92vw]" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`panel p-4 max-w-[92vw] max-h-[90vh] overflow-auto ${wide ? "w-[980px]" : "w-[460px]"}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between mb-3">
           <div className="text-sm font-semibold">{title}</div>
           <button onClick={onClose} style={{ color: "var(--fg-faint)" }} aria-label="关闭">
-            ✕
+            <span aria-hidden="true">×</span>
           </button>
         </div>
         {children}

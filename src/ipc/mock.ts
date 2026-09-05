@@ -10,6 +10,8 @@ import type {
   ExperimentState,
   ExperimentSummary,
   ProgramDto,
+  ExperimentPreflightResult,
+  ExperimentStartDefaults,
   SampleDto,
   StageDto,
   StageKind,
@@ -103,9 +105,11 @@ function st(
   return { name, kind, gas, target_temp, tolerance, duration_min, ramp_rate, description };
 }
 
+const customPrograms: ProgramDto[] = [];
 const PROGRAMS: ProgramDto[] = [
   {
     id: "REDUCIBILITY",
+    description: "", category: "standard", enabled: true, sample_prefix: "RED", source: "standard",
     name: "GB/T 13241 还原性",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
@@ -116,6 +120,7 @@ const PROGRAMS: ProgramDto[] = [
   },
   {
     id: "LOW_TEMP_DEGRADATION",
+    description: "", category: "standard", enabled: true, sample_prefix: "RDI", source: "standard",
     name: "GB/T 13242 低温粉化",
     stages: [
       st("升温", "HEATING", [0, 5, 0, 0], 500, 5, 0, 10, "升温至500℃,N₂保护"),
@@ -126,6 +131,7 @@ const PROGRAMS: ProgramDto[] = [
   },
   {
     id: "FREE_SWELLING",
+    description: "", category: "standard", enabled: true, sample_prefix: "FSI", source: "standard",
     name: "GB/T 13240 自由膨胀",
     stages: [
       st("升温", "HEATING", [0, 10, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
@@ -137,7 +143,7 @@ const PROGRAMS: ProgramDto[] = [
 ];
 
 export function mockListPrograms(): ProgramDto[] {
-  return PROGRAMS.map((p) => ({ ...p, stages: p.stages.map((s) => ({ ...s })) }));
+  return structuredClone([...PROGRAMS, ...customPrograms]);
 }
 
 // ---- experiment stage engine (browser) ----
@@ -165,6 +171,8 @@ function applyStage(s: StageDto, w0: number): void {
 }
 
 interface MockRun {
+  sampleId: string;
+  projectName: string | null;
   program: ProgramDto;
   id: string;
   mode: string;
@@ -226,14 +234,18 @@ function sampleNow(r: MockRun, t8: number): SampleDto {
   };
 }
 
-function archive(r: MockRun): void {
+function archive(r: MockRun, completed = true): void {
   const detail: ExperimentDetail = {
     experiment_id: r.id,
     experiment_name: r.sample,
+    sample_id: r.sampleId,
+    project_name: r.projectName,
+    experiment_time: r.started,
+    program_snapshot: structuredClone(r.program),
     sample_name: r.sample,
     sample_weight: r.w0,
     start_time: r.started,
-    end_time: new Date().toISOString(),
+    end_time: completed ? new Date().toISOString() : null,
     description: r.notes || null,
     operator: r.operator || null,
     experiment_type: r.mode,
@@ -299,7 +311,7 @@ export function mockStartExperiment(p: ExperimentParams): string {
   const user = mockCurrentUser();
   if (!user) throw new Error("AUTH_REQUIRED");
   if (experiment.running) throw new Error("实验已在运行");
-  const program = PROGRAMS.find((pr) => pr.id === p.experiment_type);
+  const program = mockListPrograms().find((pr) => pr.id === p.experiment_type);
   if (!program) throw new Error("未知实验模式");
 
   const id = `exp-${Date.now()}`;
@@ -309,6 +321,8 @@ export function mockStartExperiment(p: ExperimentParams): string {
     id,
     mode: p.experiment_type,
     sample: p.sample_name,
+    sampleId: p.sample_id,
+    projectName: p.project_name ?? null,
     operator: user.display_name,
     ownerUserId: user.user_id,
     notes: p.notes ?? "",
@@ -346,7 +360,8 @@ export function mockStopExperiment(): void {
   notify();
 }
 
-export function mockSkipStage(): void {
+export function mockSkipStage(reason: string): void {
+  if (!reason.trim()) throw new Error("跳段原因必填");
   if (run) run.skip = true;
 }
 
@@ -412,7 +427,7 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
 }
 
 function seed(id: string, name: string, mode: string, start: string, w0: number): void {
-  const program = PROGRAMS.find((p) => p.id === mode);
+  const program = mockListPrograms().find((p) => p.id === mode);
   if (!program) return;
   const samples = simulate(program, w0);
   history.set(id, {
@@ -456,11 +471,13 @@ export function mockListExperiments(): ExperimentSummary[] {
 }
 
 export function mockGetExperimentDetail(id: string): ExperimentDetail {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   return { ...h.detail, sample_count: h.samples.length };
 }
 
 export function mockGetExperimentSamples(id: string, maxPoints?: number): SampleDto[] {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const all = h.samples;
   const cap = maxPoints ?? 2000;
@@ -496,6 +513,7 @@ const CSV_COLUMNS = [
 ];
 
 export function mockExportText(id: string, sep: string): string {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const rows = h.samples.map((s) =>
     [
@@ -515,6 +533,7 @@ export function mockExportText(id: string, sep: string): string {
 }
 
 export function mockReportHtml(id: string): string {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const d = h.detail;
   const a = (d.analysis ?? null) as Record<string, unknown> | null;
@@ -566,6 +585,7 @@ function slope(pts: [number, number][]): number | null {
 }
 
 export function mockAnalyze13241(id: string, o2Pct: number): Record<string, unknown> {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const w0 = h.detail.sample_weight;
   const last = h.samples[h.samples.length - 1];
@@ -596,6 +616,7 @@ export function mockAnalyze13242(
   id: string,
   m: { m0: number; mGt63: number; m31563: number; m05315: number; mLt05: number },
 ): Record<string, unknown> {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   if (m.m0 <= 0) throw new Error("m0 无效");
   const total = m.mGt63 + m.m31563 + m.m05315 + m.mLt05;
@@ -617,6 +638,7 @@ export function mockAnalyze13242(
 }
 
 export function mockAnalyze13240(id: string, volumes: [number, number][]): Record<string, unknown> {
+  if (run?.id === id) archive(run, false);
   const h = historyItem(id);
   const per = volumes.filter(([v0]) => v0 > 0).map(([v0, v1]) => ((v1 - v0) / v0) * 100);
   if (!per.length) throw new Error("无有效试样体积");
@@ -628,4 +650,51 @@ export function mockAnalyze13240(id: string, volumes: [number, number][]): Recor
   };
   h.detail.analysis = value;
   return value;
+}
+
+
+function modeAdmin(): void {
+  const user = mockCurrentUser();
+  if (!user) throw new Error("AUTH_REQUIRED");
+  if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
+  if (run) throw new Error("实验运行中不可修改模式");
+}
+export function mockSaveCustomProgram(program: ProgramDto): ProgramDto {
+  modeAdmin();
+  if (PROGRAMS.some(p => p.id === program.id)) throw new Error("标准模式不可覆盖");
+  const p = structuredClone(program);
+  p.id ||= `custom-${crypto.randomUUID()}`;
+  p.source = "custom";
+  const i = customPrograms.findIndex(x => x.id === p.id);
+  if (i < 0) customPrograms.push(p); else customPrograms[i] = p;
+  return structuredClone(p);
+}
+export function mockDeleteCustomProgram(id: string): void {
+  modeAdmin();
+  const i = customPrograms.findIndex(p => p.id === id);
+  if (i < 0) throw new Error("自定义模式不存在");
+  customPrograms.splice(i, 1);
+}
+export function mockGenerateSampleId(programId: string, experimentTime: string): string {
+  const p = mockListPrograms().find(x => x.id === programId);
+  if (!p) throw new Error("未知实验模式");
+  const prefix = `${p.sample_prefix}-${experimentTime.slice(0,10).replaceAll("-", "")}-`;
+  const max = Math.max(0,...mockListExperiments().map(r => r.sample_id?.startsWith(prefix) ? Number(r.sample_id.slice(prefix.length)) || 0 : 0));
+  return `${prefix}${String(max+1).padStart(3,"0")}`;
+}
+export function mockGetExperimentStartDefaults(programId: string): ExperimentStartDefaults {
+  const user = mockCurrentUser();
+  if (!user) throw new Error("AUTH_REQUIRED");
+  const latest = mockListExperiments()[0];
+  const now = new Date().toISOString();
+  return {sample_id: mockGenerateSampleId(programId, now), sample_name: latest?.sample_name ?? "", sample_weight: 500, operator: user.display_name, experiment_type: programId, experiment_time: now, project_name: latest?.project_name ?? null, notes: null};
+}
+export function mockPreflightExperiment(params: ExperimentParams): ExperimentPreflightResult {
+  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
+  const program = mockListPrograms().find(p => p.id === params.experiment_type) ?? null;
+  const blocking = [];
+  if (run) blocking.push({code:"RUNNING", message_zh:"实验已在运行"});
+  if (!params.sample_id?.trim() || !params.sample_name.trim() || !Number.isFinite(params.sample_weight) || params.sample_weight <= 0) blocking.push({code:"PARAMS", message_zh:"请填写有效样品编号、名称与重量"});
+  if (!program?.enabled) blocking.push({code:"PROGRAM", message_zh:"实验模式不可用"});
+  return {ok: !blocking.length, blocking, warnings: [], program};
 }

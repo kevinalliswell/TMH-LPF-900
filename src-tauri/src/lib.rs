@@ -22,7 +22,8 @@ use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
-    standard_program, ExperimentEngine, Phase, Program, Stage, StageKind, SAFETY_ATMOSPHERE,
+    standard_program, validate_program, ExperimentEngine, Phase, Program, ProgramSource, Stage,
+    StageKind, SAFETY_ATMOSPHERE, STANDARD_MODES,
 };
 use tmh_core::gb::{free_swelling, rdi, reducibility, reduction_rate_index};
 use tmh_core::sampler::{build_sample_row, SampleContext};
@@ -36,8 +37,6 @@ use tmh_core::transport::MockTransport;
 // carries that attribute so the key stays snake_case on both sides of the boundary, and
 // `scripts/check-ipc-contract.mjs` fails the build if the two ever drift apart (#40).
 
-/// Registered experiment modes (custom modes land in a later slice).
-const MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
 /// Number of gas channels (order: H2, N2, CO2, CO).
 const GAS_COUNT: usize = 4;
 /// Mock reduction removes this fraction of the sample mass (so GB analysis has signal).
@@ -317,6 +316,123 @@ fn emit_experiment_status(app: &AppHandle, status: &ExperimentStatus) {
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
+fn custom_program_id() -> String {
+    format!("custom-{}", tmh_core::auth::new_user_id())
+}
+
+fn clean_opt(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn sample_prefix_fallback(id: &str) -> &'static str {
+    match id {
+        "REDUCIBILITY" => "RED",
+        "LOW_TEMP_DEGRADATION" => "RDI",
+        "FREE_SWELLING" => "FSI",
+        _ => "CUS",
+    }
+}
+
+fn normalize_sample_prefix(raw: &str, id: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if cleaned.len() < 2 {
+        sample_prefix_fallback(id).into()
+    } else {
+        cleaned
+    }
+}
+
+fn normalize_custom_program(program: &mut Program) {
+    program.source = ProgramSource::Custom;
+    program.id = program.id.trim().to_string();
+    program.name = program.name.trim().to_string();
+    program.description = program.description.trim().to_string();
+    if program.category.trim().is_empty() || program.category == "standard" {
+        program.category = "custom".into();
+    } else {
+        program.category = program.category.trim().to_string();
+    }
+    program.sample_prefix = normalize_sample_prefix(&program.sample_prefix, &program.id);
+    for stage in &mut program.stages {
+        stage.name = stage.name.trim().to_string();
+        stage.description = stage.description.trim().to_string();
+    }
+}
+
+fn read_custom_programs(storage: &Storage) -> Result<Vec<Program>, String> {
+    storage
+        .list_custom_programs()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|json| {
+            let p: Program = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            validate_program(&p)?;
+            Ok(p)
+        })
+        .collect()
+}
+
+fn standard_programs() -> Vec<Program> {
+    STANDARD_MODES
+        .iter()
+        .filter_map(|m| standard_program(m))
+        .collect()
+}
+
+fn all_programs(storage: &Storage) -> Result<Vec<Program>, String> {
+    let mut programs = standard_programs();
+    programs.extend(read_custom_programs(storage)?);
+    Ok(programs)
+}
+
+fn program_by_id(state: &AppState, id: &str) -> Result<Program, String> {
+    if let Some(p) = standard_program(id) {
+        return Ok(p);
+    }
+    read_custom_programs(&lock(&state.storage))?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "未知实验模式".to_string())
+}
+
+fn flammable_warnings(program: &Program, h2_limit: f64, co_limit: f64) -> Vec<PreflightIssue> {
+    let mut warnings = Vec::new();
+    for (i, stage) in program.stages.iter().enumerate() {
+        if stage.gas[0] > h2_limit {
+            warnings.push(PreflightIssue::warning(
+                "H2_LIMIT",
+                format!(
+                    "第 {} 阶段 H₂ 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
+                    i + 1,
+                    stage.gas[0],
+                    h2_limit
+                ),
+            ));
+        }
+        if stage.gas[3] > co_limit {
+            warnings.push(PreflightIssue::warning(
+                "CO_LIMIT",
+                format!(
+                    "第 {} 阶段 CO 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
+                    i + 1,
+                    stage.gas[3],
+                    co_limit
+                ),
+            ));
+        }
+    }
+    warnings
+}
+
+/// Phase → stable string for the `experiment_status` sample column.
 fn phase_str(p: Phase) -> &'static str {
     match p {
         Phase::Idle => "IDLE",
@@ -355,11 +471,21 @@ fn idle_timeout_s() -> i64 {
 
 /// Simulated-time acceleration: `TMH_SIM_SPEED` if set, else fast for mock, real (1.0)
 /// for hardware. Mock runs at 180× so a multi-hour program plays out in a few minutes.
+fn validate_runtime_mode(mode: &str) -> Result<(), String> {
+    if mode == "mock" {
+        Ok(())
+    } else {
+        Err(format!(
+            "当前版本仅支持 mock；{mode:?} 尚未接入，拒绝以模拟设备冒充该模式"
+        ))
+    }
+}
+
 fn sim_speed(mode: &str) -> f64 {
     std::env::var("TMH_SIM_SPEED")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| *v > 0.0)
+        .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
 }
 
@@ -786,8 +912,8 @@ fn spawn_experiment_task(
             // Safety (issue #3): sustained loss of a safety-critical bus (5 consecutive
             // failures marks it offline) is an error-exit path — force the protective
             // atmosphere instead of running blind with flammable gas open.
-            let mfc_ok = hub.mfc_rx().borrow().connected;
-            let temp_ok = hub.temp_rx().borrow().connected;
+            let mfc_ok = hub.mfc_rx().borrow().is_fresh(Instant::now());
+            let temp_ok = hub.temp_rx().borrow().is_fresh(Instant::now());
             if !mfc_ok || !temp_ok {
                 let device = if !mfc_ok { "mfc" } else { "temp" };
                 audit.write(
@@ -814,7 +940,7 @@ fn spawn_experiment_task(
                 break;
             }
 
-            let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(25.0);
+            let t8 = hub.temp_rx().borrow().temps[7].unwrap_or(f64::NAN);
             let result = if exp.skip.swap(false, Ordering::Relaxed) {
                 audit.write(
                     &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
@@ -1360,8 +1486,8 @@ fn get_device_health(state: State<AppState>) -> Result<DeviceHealthDto, String> 
 fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
     PublicSafetyStatus {
         experiment_running: state.exp.is_running(),
-        mfc_connected: state.hub.mfc_rx().borrow().connected,
-        temp_connected: state.hub.temp_rx().borrow().connected,
+        mfc_connected: state.hub.mfc_rx().borrow().is_fresh(Instant::now()),
+        temp_connected: state.hub.temp_rx().borrow().is_fresh(Instant::now()),
     }
 }
 
@@ -1612,6 +1738,70 @@ fn unsubscribe_telemetry(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct PreflightIssue {
+    code: String,
+    message_zh: String,
+}
+
+impl PreflightIssue {
+    fn blocking(code: &str, message_zh: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message_zh: message_zh.into(),
+        }
+    }
+
+    fn warning(code: &str, message_zh: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message_zh: message_zh.into(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ExperimentPreflightResult {
+    ok: bool,
+    blocking: Vec<PreflightIssue>,
+    warnings: Vec<PreflightIssue>,
+    program: Option<Program>,
+}
+
+#[derive(serde::Serialize)]
+struct ExperimentStartDefaults {
+    sample_id: String,
+    sample_name: String,
+    sample_weight: Option<f64>,
+    operator: String,
+    experiment_type: String,
+    project_name: Option<String>,
+    experiment_time: String,
+    notes: Option<String>,
+}
+
+fn compact_date(value: &str) -> String {
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 8 {
+        digits[..8].to_string()
+    } else {
+        chrono::Local::now().format("%Y%m%d").to_string()
+    }
+}
+
+fn next_sample_id(program: &Program, experiment_time: &str, rows: &[ExperimentRow]) -> String {
+    let prefix = normalize_sample_prefix(&program.sample_prefix, &program.id);
+    let stem = format!("{}-{}-", prefix, compact_date(experiment_time));
+    let max_seq = rows
+        .iter()
+        .filter_map(|r| r.sample_id.as_deref())
+        .filter_map(|id| id.strip_prefix(&stem))
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("{stem}{:03}", max_seq + 1)
+}
+
 // ---- Experiment -------------------------------------------------------------
 
 #[tauri::command]
@@ -1632,13 +1822,154 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
     if params.sample_name.trim().is_empty() {
         return Err("样品名称必填".into());
     }
-    if params.sample_weight.is_nan() || params.sample_weight <= 0.0 {
+    if !params.sample_weight.is_finite() || params.sample_weight <= 0.0 {
         return Err("样品重量必须大于 0".into());
     }
-    if !MODES.contains(&params.experiment_type.as_str()) {
+    if !STANDARD_MODES.contains(&params.experiment_type.as_str())
+        && !params.experiment_type.starts_with("custom-")
+    {
         return Err("未知实验模式".into());
     }
     Ok(())
+}
+
+fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
+    let mut blocking = Vec::new();
+    if let Err(message) = validate_experiment_params(params) {
+        blocking.push(PreflightIssue::blocking("PARAMS", message));
+    }
+    let mut warnings = Vec::new();
+
+    if state.exp.is_running() {
+        blocking.push(PreflightIssue::blocking(
+            "EXPERIMENT_RUNNING",
+            "实验已在运行",
+        ));
+    }
+
+    let program = match program_by_id(state, &params.experiment_type) {
+        Ok(p) => {
+            if !p.enabled {
+                blocking.push(PreflightIssue::blocking(
+                    "PROGRAM_DISABLED",
+                    "实验模式已停用，无法启动",
+                ));
+            }
+            warnings.extend(flammable_warnings(&p, state.limit_h2, state.limit_co));
+            Some(p)
+        }
+        Err(e) => {
+            blocking.push(PreflightIssue::blocking("PROGRAM_NOT_FOUND", e));
+            None
+        }
+    };
+
+    let temp = state.hub.temp_rx().borrow().clone();
+    let mfc = state.hub.mfc_rx().borrow().clone();
+    let balance = state.hub.balance_rx().borrow().clone();
+    if !temp.is_fresh(Instant::now()) || !temp.temps[7].is_some_and(|v| v.is_finite()) {
+        blocking.push(PreflightIssue::blocking(
+            "TEMP_OFFLINE",
+            "温度总线离线，无法启动实验",
+        ));
+    }
+    if !mfc.is_fresh(Instant::now()) {
+        blocking.push(PreflightIssue::blocking(
+            "MFC_OFFLINE",
+            "气体流量 MFC 离线，无法启动实验",
+        ));
+    }
+    if !balance.is_fresh(Instant::now()) || !balance.weight.is_some_and(|v| v.is_finite()) {
+        blocking.push(PreflightIssue::blocking(
+            "BALANCE_OFFLINE",
+            "电子天平离线，无法启动实验",
+        ));
+    }
+    if let Some(weight) = balance.weight {
+        if params.sample_weight > 0.0 {
+            let diff = (weight - params.sample_weight).abs();
+            let threshold = (params.sample_weight * 0.02).max(0.1);
+            if diff > threshold {
+                warnings.push(PreflightIssue::warning(
+                    "WEIGHT_MISMATCH",
+                    format!(
+                        "当前天平读数 {:.3} g 与输入样品重量 {:.3} g 差异较大，请确认初始重量",
+                        weight, params.sample_weight
+                    ),
+                ));
+            }
+        }
+    } else if balance.connected {
+        warnings.push(PreflightIssue::warning(
+            "BALANCE_NO_WEIGHT",
+            "电子天平在线但暂无有效重量读数，请确认初始重量",
+        ));
+    }
+
+    ExperimentPreflightResult {
+        ok: blocking.is_empty(),
+        blocking,
+        warnings,
+        program,
+    }
+}
+
+#[tauri::command]
+fn preflight_experiment(
+    state: State<AppState>,
+    params: ExperimentParams,
+) -> Result<ExperimentPreflightResult, String> {
+    current_user(&state)?;
+    Ok(build_preflight(&state, &params))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn generate_sample_id(
+    state: State<AppState>,
+    program_id: String,
+    experiment_time: String,
+) -> Result<String, String> {
+    let program = program_by_id(&state, &program_id)?;
+    let user = current_user(&state)?;
+    let rows = visible_rows(&lock(&state.storage), &user)?;
+    Ok(next_sample_id(&program, &experiment_time, &rows))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn get_experiment_start_defaults(
+    state: State<AppState>,
+    program_id: String,
+) -> Result<ExperimentStartDefaults, String> {
+    let program = program_by_id(&state, &program_id)?;
+    let now = iso_now();
+    let user = current_user(&state)?;
+    let rows = visible_rows(&lock(&state.storage), &user)?;
+    let latest = rows.first().cloned();
+    let balance = state.hub.balance_rx().borrow().clone();
+    Ok(ExperimentStartDefaults {
+        sample_id: next_sample_id(&program, &now, &rows),
+        sample_name: latest
+            .as_ref()
+            .map(|r| r.sample_name.clone())
+            .unwrap_or_default(),
+        sample_weight: balance
+            .weight
+            .filter(|w| balance.is_fresh(Instant::now()) && w.is_finite() && *w > 0.0),
+        operator: user.display_name,
+        experiment_type: program_id,
+        project_name: latest.and_then(|r| r.project_name),
+        experiment_time: now,
+        notes: None,
+    })
+}
+
+fn visible_rows(storage: &Storage, user: &UserRow) -> Result<Vec<ExperimentRow>, String> {
+    if user.role == UserRole::Admin {
+        storage.list_experiments()
+    } else {
+        storage.list_experiments_for_owner(&user.user_id)
+    }
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1650,18 +1981,27 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     if st.exp.is_running() {
         return Err("实验已在运行".into());
     }
-    let program = standard_program(&params.experiment_type).ok_or("未知实验模式")?;
+    let preflight = build_preflight(&st, &params);
+    if let Some(issue) = preflight.blocking.first() {
+        return Err(issue.message_zh.clone());
+    }
+    let program = preflight.program.ok_or("未知实验模式")?;
+    validate_program(&program)?;
 
     let now = iso_now();
-    let id = format!("exp-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let id = format!("exp-{}", tmh_core::auth::new_user_id());
     let row = ExperimentRow {
         experiment_id: id.clone(),
         experiment_name: params.sample_name.clone(),
+        sample_id: Some(params.sample_id.trim().to_string()),
+        project_name: clean_opt(params.project_name.clone()),
+        experiment_time: Some(now.clone()),
+        program_snapshot_json: Some(serde_json::to_string(&program).map_err(|e| e.to_string())?),
         sample_name: params.sample_name.clone(),
         sample_weight: params.sample_weight,
         start_time: now.clone(),
         end_time: None,
-        description: params.notes.clone(),
+        description: clean_opt(params.notes.clone()),
         operator: Some(user.display_name.clone()),
         experiment_type: Some(params.experiment_type.clone()),
         analysis_results_json: None,
@@ -1772,11 +2112,14 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn skip_stage(state: State<AppState>) -> Result<(), String> {
+fn skip_stage(state: State<AppState>, reason: String) -> Result<(), String> {
     let user = require_experiment_controller(&state)?;
     let status = state.exp.snapshot();
     if !status.running {
         return Err("没有正在运行的实验".into());
+    }
+    if reason.trim().is_empty() {
+        return Err("跳段原因必填".into());
     }
     state.exp.skip.store(true, Ordering::Relaxed);
     // The requester is not always the run's owner (an admin may take over), so record who
@@ -1789,7 +2132,7 @@ fn skip_stage(state: State<AppState>) -> Result<(), String> {
         )
         .operator(user.display_name)
         .detail(serde_json::json!({
-            "id": status.experiment_id, "from_stage": status.stage_index
+            "id": status.experiment_id, "from_stage": status.stage_index, "reason": reason
         })),
     );
     Ok(())
@@ -1799,16 +2142,80 @@ fn skip_stage(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
     current_user(&state)?;
-    Ok(tmh_core::engine::STANDARD_MODES
-        .iter()
-        .filter_map(|m| standard_program(m))
-        .collect())
+    all_programs(&lock(&state.storage))
+}
+
+#[tauri::command]
+fn save_custom_program(state: State<AppState>, program: Program) -> Result<Program, String> {
+    let user = current_admin(&state)?;
+    if state.exp.is_running() {
+        return Err("实验运行中不可修改模式".into());
+    }
+    let mut program = program;
+    let replacing_existing = !program.id.trim().is_empty();
+    if program.id.trim().is_empty() {
+        program.id = custom_program_id();
+    } else {
+        program.id = program.id.trim().to_string();
+    }
+    normalize_custom_program(&mut program);
+    if STANDARD_MODES.contains(&program.id.as_str()) {
+        return Err("标准模式不可覆盖，请复制为自定义模式".into());
+    }
+    validate_program(&program)?;
+
+    lock(&state.storage)
+        .save_custom_program(
+            &program.id,
+            &serde_json::to_string(&program).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Config,
+            "save_custom_program",
+            AuditResult::Success,
+        )
+        .operator(user.display_name)
+        .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
+    );
+    Ok(program)
+}
+
+#[tauri::command]
+fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), String> {
+    if STANDARD_MODES.contains(&id.as_str()) {
+        return Err("标准模式不可删除".into());
+    }
+    let user = current_admin(&state)?;
+    if state.exp.is_running() {
+        return Err("实验运行中不可删除模式".into());
+    }
+    if !lock(&state.storage)
+        .delete_custom_program(&id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("自定义模式不存在".into());
+    }
+    state.audit.write(
+        &AuditEntry::new(
+            Category::Config,
+            "delete_custom_program",
+            AuditResult::Success,
+        )
+        .operator(user.display_name)
+        .detail(serde_json::json!({ "id": id })),
+    );
+    Ok(())
 }
 
 // ---- History query ----------------------------------------------------------
 
 #[derive(serde::Serialize)]
 struct ExperimentSummary {
+    sample_id: Option<String>,
+    project_name: Option<String>,
+    experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
     sample_name: String,
@@ -1826,6 +2233,9 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
         has_analysis: r.analysis_results_json.is_some(),
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
+        sample_id: r.sample_id,
+        project_name: r.project_name,
+        experiment_time: r.experiment_time,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
@@ -1838,6 +2248,10 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
 
 #[derive(serde::Serialize)]
 struct ExperimentDetail {
+    program_snapshot: Option<Program>,
+    sample_id: Option<String>,
+    project_name: Option<String>,
+    experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
     sample_name: String,
@@ -1859,8 +2273,15 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
     ExperimentDetail {
+        program_snapshot: r
+            .program_snapshot_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok()),
         experiment_id: r.experiment_id,
         experiment_name: r.experiment_name,
+        sample_id: r.sample_id,
+        project_name: r.project_name,
+        experiment_time: r.experiment_time,
         sample_name: r.sample_name,
         sample_weight: r.sample_weight,
         start_time: r.start_time,
@@ -2331,6 +2752,10 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 /// Build and run the Tauri application.
 pub fn run() {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
+    if let Err(message) = validate_runtime_mode(&mode) {
+        eprintln!("TMH 启动失败: {message}");
+        std::process::exit(1);
+    }
     let sim_speed = sim_speed(&mode);
     // Software update checking is OFF by default (docs/09 §9.3); config/env enables it.
     let updater_enabled = matches!(
@@ -2433,6 +2858,11 @@ pub fn run() {
             stop_experiment,
             skip_stage,
             list_programs,
+            preflight_experiment,
+            generate_sample_id,
+            get_experiment_start_defaults,
+            save_custom_program,
+            delete_custom_program,
             list_experiments,
             get_experiment_detail,
             get_experiment_samples,
@@ -2556,6 +2986,10 @@ mod tests {
                 .insert_experiment(&ExperimentRow {
                     experiment_id: id.into(),
                     experiment_name: id.into(),
+                    sample_id: Some(format!("{id}-sample")),
+                    project_name: Some("project".into()),
+                    experiment_time: None,
+                    program_snapshot_json: None,
                     sample_name: "样品".into(),
                     sample_weight: 100.0,
                     start_time: "2026-09-01T08:00:00".into(),
@@ -2731,6 +3165,14 @@ mod tests {
         };
         edit(&mut p);
         p
+    }
+
+    #[test]
+    fn unsupported_modes_cannot_label_mock_devices_as_real() {
+        assert!(validate_runtime_mode("mock").is_ok());
+        for mode in ["real", "replay", "", "MOCK", "typo"] {
+            assert!(validate_runtime_mode(mode).is_err(), "{mode}");
+        }
     }
 
     #[test]

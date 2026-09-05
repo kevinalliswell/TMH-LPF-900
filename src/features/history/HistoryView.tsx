@@ -14,6 +14,8 @@ import {
 import type { ExperimentDetail, ExperimentSummary, PublicUser, SampleDto } from "../../ipc/types";
 import { toastError, useToasts } from "../../stores/toast";
 import { Modal } from "../../components/Modal";
+import { SectionTitle } from "../../components/Page";
+import { ProgramPreview } from "../experiment/ProgramPreview";
 import { AnalyzePanel } from "./AnalyzePanel";
 import { HistoryChart } from "./HistoryChart";
 import { useAuth } from "../../stores/auth";
@@ -177,6 +179,8 @@ export function HistoryView() {
               </div>
               <div className="grid grid-cols-4 gap-4 mt-3">
                 <Meta label="实验编号" value={detail.experiment_id} />
+                <Meta label="样品编号" value={detail.sample_id ?? "—"} />
+                <Meta label="项目名称" value={detail.project_name ?? "—"} />
                 <Meta label="模式" value={modeName(detail.experiment_type)} />
                 <Meta label="操作员" value={detail.operator ?? "—"} />
                 <Meta label="样品重量" value={`${detail.sample_weight} g`} />
@@ -218,6 +222,13 @@ export function HistoryView() {
                 ))}
               </div>
             </div>
+
+            {detail.program_snapshot && (
+              <div className="panel p-3">
+                <SectionTitle>程序快照</SectionTitle>
+                <ProgramPreview program={detail.program_snapshot} compact />
+              </div>
+            )}
 
             <div className="panel p-3">
               <div className="section-title px-1 pb-1">温度 / 质量曲线</div>

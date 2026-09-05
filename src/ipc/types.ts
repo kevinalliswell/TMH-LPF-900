@@ -124,7 +124,14 @@ export interface StageDto {
   description: string;
 }
 
+export type ProgramSource = "standard" | "custom";
+
 export interface ProgramDto {
+  description: string;
+  category: string;
+  enabled: boolean;
+  sample_prefix: string;
+  source: ProgramSource;
   id: string;
   name: string;
   stages: StageDto[];
@@ -132,6 +139,9 @@ export interface ProgramDto {
 
 /** History list row. */
 export interface ExperimentSummary {
+  sample_id?: string | null;
+  project_name?: string | null;
+  experiment_time?: string | null;
   experiment_id: string;
   experiment_name: string;
   sample_name: string;
@@ -145,6 +155,10 @@ export interface ExperimentSummary {
 }
 
 export interface ExperimentDetail {
+  program_snapshot?: ProgramDto | null;
+  sample_id?: string | null;
+  project_name?: string | null;
+  experiment_time?: string | null;
   experiment_id: string;
   experiment_name: string;
   sample_name: string;
@@ -174,6 +188,8 @@ export interface SampleDto {
 }
 
 export interface ExperimentParams {
+  operator?: string;
+  experiment_time?: string | null;
   sample_id: string;
   sample_name: string;
   sample_weight: number;
@@ -197,3 +213,26 @@ export const EXPERIMENT_MODES = [
   { id: "LOW_TEMP_DEGRADATION", name: "GB/T 13242 低温粉化" },
   { id: "FREE_SWELLING", name: "GB/T 13240 自由膨胀" },
 ] as const;
+
+export interface PreflightIssue {
+  code: string;
+  message_zh: string;
+}
+
+export interface ExperimentPreflightResult {
+  ok: boolean;
+  blocking: PreflightIssue[];
+  warnings: PreflightIssue[];
+  program?: ProgramDto | null;
+}
+
+export interface ExperimentStartDefaults {
+  sample_id: string;
+  sample_name: string;
+  sample_weight?: number | null;
+  operator: string;
+  experiment_type: string;
+  project_name?: string | null;
+  experiment_time: string;
+  notes?: string | null;
+}

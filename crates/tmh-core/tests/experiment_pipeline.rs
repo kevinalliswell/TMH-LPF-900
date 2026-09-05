@@ -53,14 +53,18 @@ fn reducibility_run_drives_devices_and_persists() {
         .insert_experiment(&ExperimentRow {
             experiment_id: "e1".into(),
             experiment_name: "t".into(),
+            sample_id: None,
             sample_name: "s".into(),
             sample_weight: w0,
             start_time: "t0".into(),
+            experiment_time: None,
             end_time: None,
+            project_name: None,
             description: None,
             operator: None,
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
+            program_snapshot_json: None,
             created_at: "t0".into(),
             owner_user_id: None,
         })

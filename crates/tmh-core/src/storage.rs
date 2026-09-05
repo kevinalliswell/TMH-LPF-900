@@ -7,7 +7,7 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -77,6 +77,10 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 /// An `experiments` row.
 #[derive(Debug, Clone)]
 pub struct ExperimentRow {
+    pub sample_id: Option<String>,
+    pub project_name: Option<String>,
+    pub experiment_time: Option<String>,
+    pub program_snapshot_json: Option<String>,
     pub experiment_id: String,
     pub experiment_name: String,
     pub sample_name: String,
@@ -162,6 +166,26 @@ impl Storage {
             tx.execute_batch(MIGRATION_V2)?;
             tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
+            version = 2;
+        }
+        if version == 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE experiments ADD COLUMN sample_id TEXT;
+                ALTER TABLE experiments ADD COLUMN project_name TEXT;
+                ALTER TABLE experiments ADD COLUMN experiment_time TEXT;
+                ALTER TABLE experiments ADD COLUMN program_snapshot_json TEXT;",
+            )?;
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+        }
+        if version <= 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE custom_programs (id TEXT PRIMARY KEY, program_json TEXT NOT NULL);",
+            )?;
+            tx.pragma_update(None, "user_version", 4)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -178,6 +202,28 @@ impl Storage {
         Ok(self
             .conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))?)
+    }
+
+    pub fn list_custom_programs(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT program_json FROM custom_programs ORDER BY id")?;
+        let rows = statement
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_custom_program(&self, id: &str, json: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![id, json])?;
+        Ok(())
+    }
+
+    pub fn delete_custom_program(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM custom_programs WHERE id=?1", [id])?
+            > 0)
     }
 
     pub fn user_count(&self) -> Result<i64> {
@@ -307,7 +353,7 @@ impl Storage {
         self.conn.execute(
             "INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, \
              start_time, end_time, description, operator, experiment_type, analysis_results_json, \
-             created_at, owner_user_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             created_at, owner_user_id, sample_id, project_name, experiment_time, program_snapshot_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 e.experiment_id,
                 e.experiment_name,
@@ -321,6 +367,10 @@ impl Storage {
                 e.analysis_results_json,
                 e.created_at,
                 e.owner_user_id,
+                e.sample_id,
+                e.project_name,
+                e.experiment_time,
+                e.program_snapshot_json,
             ],
         )?;
         Ok(())
@@ -486,7 +536,7 @@ impl Storage {
 /// Column list shared by every `experiments` SELECT (keeps `experiment_from_row` in sync).
 const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_name, \
      sample_weight, start_time, end_time, description, operator, experiment_type, \
-     analysis_results_json, created_at, owner_user_id FROM experiments";
+     analysis_results_json, created_at, owner_user_id, sample_id, project_name, experiment_time, program_snapshot_json FROM experiments";
 
 const USER_SELECT: &str =
     "SELECT user_id, username, display_name, password_hash, role, is_active, \
@@ -507,6 +557,10 @@ fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
         analysis_results_json: r.get(9)?,
         created_at: r.get(10)?,
         owner_user_id: r.get(11)?,
+        sample_id: r.get(12)?,
+        project_name: r.get(13)?,
+        experiment_time: r.get(14)?,
+        program_snapshot_json: r.get(15)?,
     })
 }
 
@@ -574,6 +628,10 @@ mod tests {
 
     fn experiment(id: &str) -> ExperimentRow {
         ExperimentRow {
+            sample_id: Some(format!("{id}-001")),
+            project_name: Some("project".into()),
+            experiment_time: Some("2026-07-05T10:00:00".into()),
+            program_snapshot_json: Some(r#"{"id":"REDUCIBILITY"}"#.into()),
             experiment_id: id.into(),
             experiment_name: "exp".into(),
             sample_name: "s1".into(),
@@ -607,9 +665,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_inits_at_version_2() {
+    fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 4);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -660,7 +718,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 4);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -766,8 +824,35 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_version().unwrap(), 4);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_migration_preserves_owners_and_roundtrips_traceability() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(MIGRATION_V2).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        let s = Storage { conn };
+        s.insert_user(&user("owner", "owner", UserRole::User))
+            .unwrap();
+        s.conn.execute("INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, start_time, created_at, owner_user_id) VALUES ('old', 'old', 'sample', 100, '2026-01-01', '2026-01-01', 'owner')", []).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        let old = s.get_experiment("old").unwrap().unwrap();
+        assert_eq!(old.owner_user_id.as_deref(), Some("owner"));
+        assert!(old.sample_id.is_none());
+        let mut new = experiment("new");
+        new.owner_user_id = Some("owner".into());
+        s.insert_experiment(&new).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        let saved = s.get_experiment("new").unwrap().unwrap();
+        assert_eq!(saved.sample_id, new.sample_id);
+        assert_eq!(saved.project_name, new.project_name);
+        assert_eq!(saved.experiment_time, new.experiment_time);
+        assert_eq!(saved.program_snapshot_json, new.program_snapshot_json);
+        assert_eq!(saved.owner_user_id, new.owner_user_id);
+        assert_eq!(s.list_experiments_for_owner("owner").unwrap().len(), 2);
     }
 }
