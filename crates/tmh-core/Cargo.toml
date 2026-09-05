@@ -21,6 +21,9 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 rust_xlsxwriter = { workspace = true }
+argon2 = { workspace = true }
+rand_core = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true

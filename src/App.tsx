@@ -1,5 +1,5 @@
 import { useEffect, type FC } from "react";
-import { subscribeExperimentState, subscribeTelemetry } from "./ipc";
+import { getRuntimeSettings, subscribeExperimentState, subscribeTelemetry } from "./ipc";
 import { useExperiment } from "./stores/experiment";
 import { useNav, type View } from "./stores/nav";
 import { useTelemetry } from "./stores/telemetry";
@@ -13,12 +13,17 @@ import { SettingsView } from "./features/settings/SettingsView";
 import { HelpView } from "./features/help/HelpView";
 import { AboutView } from "./features/about/AboutView";
 import { StatusBar } from "./features/control/StatusBar";
+import { AuthGate } from "./features/auth/AuthGate";
+import { UserManagementView } from "./features/users/UserManagementView";
+import { lockSession, logout } from "./ipc";
+import { useAuth } from "./stores/auth";
 
 const NAV: { view: View; label: string }[] = [
   { view: "home", label: "首页" },
   { view: "control", label: "综合控制" },
   { view: "mode", label: "实验模式" },
   { view: "history", label: "历史查询" },
+  { view: "users", label: "用户管理" },
   { view: "settings", label: "通讯设置" },
   { view: "help", label: "帮助" },
   { view: "about", label: "关于" },
@@ -29,20 +34,35 @@ const VIEWS: Record<View, FC> = {
   control: ControlView,
   mode: ModeView,
   history: HistoryView,
+  users: UserManagementView,
   settings: SettingsView,
   help: HelpView,
   about: AboutView,
 };
 
 export default function App() {
+  return <AuthGate><AuthenticatedApp /></AuthGate>;
+}
+
+function AuthenticatedApp() {
   const setSnapshot = useTelemetry((s) => s.setSnapshot);
+  const setStaleMs = useTelemetry((s) => s.setStaleMs);
   const setExperiment = useExperiment((s) => s.setState);
   const view = useNav((s) => s.view);
   const setView = useNav((s) => s.setView);
+  const auth = useAuth((s) => s.snapshot);
+  const refreshAuth = useAuth((s) => s.refresh);
   useEffect(() => subscribeTelemetry(setSnapshot), [setSnapshot]);
   useEffect(() => subscribeExperimentState(setExperiment), [setExperiment]);
+  // Mirror the backend's configured heartbeat timeout rather than hardcoding 5 s (#44).
+  useEffect(() => {
+    void getRuntimeSettings()
+      .then((settings) => setStaleMs(settings.heartbeat_timeout_s * 1000))
+      .catch(() => {});
+  }, [setStaleMs]);
 
-  const title = NAV.find((n) => n.view === view)?.label ?? "";
+  const visibleNav = NAV.filter((item) => item.view !== "users" || auth?.user?.role === "ADMIN");
+  const title = visibleNav.find((n) => n.view === view)?.label ?? "";
   const ViewComponent = VIEWS[view];
 
   return (
@@ -58,7 +78,7 @@ export default function App() {
           </div>
         </div>
         <ul className="py-2 text-[13px]">
-          {NAV.map((n) => {
+          {visibleNav.map((n) => {
             const active = n.view === view;
             return (
               <li key={n.view}>
@@ -94,6 +114,11 @@ export default function App() {
               TMH-LPF-900 v0.2.0
             </span>
           </h1>
+          <div className="flex items-center gap-3 text-xs">
+            <span style={{ color: "var(--fg-dim)" }}>{auth?.user?.display_name} · {auth?.user?.role === "ADMIN" ? "管理员" : "普通用户"}</span>
+            <button onClick={() => void lockSession().finally(() => refreshAuth())} className="px-2 py-1 rounded" style={{ border: "1px solid var(--border)" }}>锁定</button>
+            <button onClick={() => void logout().finally(() => refreshAuth())} className="px-2 py-1 rounded" style={{ border: "1px solid var(--border)" }}>退出</button>
+          </div>
         </header>
 
         <ExperimentBar />

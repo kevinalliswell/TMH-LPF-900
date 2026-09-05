@@ -3,12 +3,13 @@
 //! migrations. This is the DB layer — the single-writer task that funnels sampler
 //! rows through it is wired in M2 slice 4.
 
-use rusqlite::{params, Connection};
+use crate::auth::UserRole;
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
-const SCHEMA: &str = r#"
+const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id          TEXT PRIMARY KEY,
     experiment_name        TEXT NOT NULL,
@@ -41,10 +42,35 @@ CREATE INDEX IF NOT EXISTS idx_experiments_name ON experiments(experiment_name);
 CREATE INDEX IF NOT EXISTS idx_experiment_data_ts ON experiment_data(experiment_id, timestamp);
 "#;
 
+const MIGRATION_V2: &str = r#"
+CREATE TABLE users (
+    user_id                 TEXT PRIMARY KEY,
+    username                TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name            TEXT NOT NULL,
+    password_hash           TEXT NOT NULL,
+    role                    TEXT NOT NULL CHECK(role IN ('ADMIN', 'USER')),
+    is_active               INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    must_change_password    INTEGER NOT NULL DEFAULT 1 CHECK(must_change_password IN (0, 1)),
+    failed_login_count      INTEGER NOT NULL DEFAULT 0,
+    locked_until            TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    password_changed_at     TEXT NOT NULL,
+    last_login_at           TEXT
+);
+ALTER TABLE experiments ADD COLUMN owner_user_id TEXT REFERENCES users(user_id) ON DELETE RESTRICT;
+CREATE INDEX idx_users_role_active ON users(role, is_active);
+CREATE INDEX idx_experiments_owner_start ON experiments(owner_user_id, start_time DESC);
+"#;
+
 /// Storage error (wraps rusqlite).
 #[derive(Debug, thiserror::Error)]
-#[error("storage: {0}")]
-pub struct StorageError(#[from] rusqlite::Error);
+pub enum StorageError {
+    #[error("storage: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("unsupported database schema version {0}")]
+    UnsupportedVersion(i64),
+}
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
@@ -62,6 +88,24 @@ pub struct ExperimentRow {
     pub experiment_type: Option<String>,
     pub analysis_results_json: Option<String>,
     pub created_at: String,
+    pub owner_user_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: String,
+    pub password_hash: String,
+    pub role: UserRole,
+    pub is_active: bool,
+    pub must_change_password: bool,
+    pub failed_login_count: i64,
+    pub locked_until: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub password_changed_at: String,
+    pub last_login_at: Option<String>,
 }
 
 /// An `experiment_data` sample row.
@@ -98,13 +142,26 @@ impl Storage {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         // WAL is a no-op for in-memory DBs but harmless.
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-        conn.execute_batch(SCHEMA)?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(StorageError::UnsupportedVersion(version));
+        }
+        if version == 0 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(SCHEMA_V1)?;
+            tx.pragma_update(None, "user_version", 1)?;
+            tx.commit()?;
+            version = 1;
+        }
+        if version == 1 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_V2)?;
+            tx.pragma_update(None, "user_version", 2)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -123,12 +180,134 @@ impl Storage {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))?)
     }
 
+    pub fn user_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
+    }
+
+    pub fn active_admin_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn insert_user(&self, user: &UserRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO users (user_id, username, display_name, password_hash, role, is_active, \
+             must_change_password, failed_login_count, locked_until, created_at, updated_at, \
+             password_changed_at, last_login_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                user.user_id,
+                user.username,
+                user.display_name,
+                user.password_hash,
+                user.role.as_str(),
+                user.is_active,
+                user.must_change_password,
+                user.failed_login_count,
+                user.locked_until,
+                user.created_at,
+                user.updated_at,
+                user.password_changed_at,
+                user.last_login_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user(&self, user_id: &str) -> Result<Option<UserRow>> {
+        self.conn
+            .query_row(
+                &format!("{USER_SELECT} WHERE user_id = ?1"),
+                params![user_id],
+                user_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn get_user_by_username(&self, username: &str) -> Result<Option<UserRow>> {
+        self.conn
+            .query_row(
+                &format!("{USER_SELECT} WHERE username = ?1 COLLATE NOCASE"),
+                params![username],
+                user_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_users(&self) -> Result<Vec<UserRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{USER_SELECT} ORDER BY username COLLATE NOCASE"))?;
+        let rows = stmt
+            .query_map([], user_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn update_user(
+        &self,
+        user_id: &str,
+        display_name: &str,
+        role: UserRole,
+        is_active: bool,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE users SET display_name = ?2, role = ?3, is_active = ?4, updated_at = ?5 WHERE user_id = ?1",
+            params![user_id, display_name, role.as_str(), is_active, updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_login_failure(
+        &self,
+        user_id: &str,
+        failed_count: i64,
+        locked_until: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE users SET failed_login_count = ?2, locked_until = ?3 WHERE user_id = ?1",
+            params![user_id, failed_count, locked_until],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_login_success(&self, user_id: &str, at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE users SET failed_login_count = 0, locked_until = NULL, last_login_at = ?2 WHERE user_id = ?1",
+            params![user_id, at],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+        at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE users SET password_hash = ?2, must_change_password = ?3, \
+             failed_login_count = 0, locked_until = NULL, password_changed_at = ?4, updated_at = ?4 \
+             WHERE user_id = ?1",
+            params![user_id, password_hash, must_change_password, at],
+        )?;
+        Ok(())
+    }
+
     /// Insert an experiment metadata row.
     pub fn insert_experiment(&self, e: &ExperimentRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, \
              start_time, end_time, description, operator, experiment_type, analysis_results_json, \
-             created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+             created_at, owner_user_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 e.experiment_id,
                 e.experiment_name,
@@ -141,6 +320,7 @@ impl Storage {
                 e.experiment_type,
                 e.analysis_results_json,
                 e.created_at,
+                e.owner_user_id,
             ],
         )?;
         Ok(())
@@ -215,6 +395,28 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn list_experiments_for_owner(&self, owner_user_id: &str) -> Result<Vec<ExperimentRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{EXPERIMENT_SELECT} WHERE owner_user_id = ?1 ORDER BY start_time DESC"
+        ))?;
+        let rows = stmt
+            .query_map(params![owner_user_id], experiment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_experiment_owner(
+        &self,
+        experiment_id: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE experiments SET owner_user_id = ?2 WHERE experiment_id = ?1",
+            params![experiment_id, owner_user_id],
+        )?;
+        Ok(())
+    }
+
     /// Experiments still open (no `end_time`) — used for crash recovery on startup.
     pub fn unfinished_experiments(&self) -> Result<Vec<ExperimentRow>> {
         let mut stmt = self.conn.prepare(&format!(
@@ -284,7 +486,12 @@ impl Storage {
 /// Column list shared by every `experiments` SELECT (keeps `experiment_from_row` in sync).
 const EXPERIMENT_SELECT: &str = "SELECT experiment_id, experiment_name, sample_name, \
      sample_weight, start_time, end_time, description, operator, experiment_type, \
-     analysis_results_json, created_at FROM experiments";
+     analysis_results_json, created_at, owner_user_id FROM experiments";
+
+const USER_SELECT: &str =
+    "SELECT user_id, username, display_name, password_hash, role, is_active, \
+     must_change_password, failed_login_count, locked_until, created_at, updated_at, \
+     password_changed_at, last_login_at FROM users";
 
 fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
     Ok(ExperimentRow {
@@ -299,6 +506,29 @@ fn experiment_from_row(r: &rusqlite::Row) -> rusqlite::Result<ExperimentRow> {
         experiment_type: r.get(8)?,
         analysis_results_json: r.get(9)?,
         created_at: r.get(10)?,
+        owner_user_id: r.get(11)?,
+    })
+}
+
+fn user_from_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
+    let role_value: String = r.get(4)?;
+    let role = role_value.parse::<UserRole>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(UserRow {
+        user_id: r.get(0)?,
+        username: r.get(1)?,
+        display_name: r.get(2)?,
+        password_hash: r.get(3)?,
+        role,
+        is_active: r.get(5)?,
+        must_change_password: r.get(6)?,
+        failed_login_count: r.get(7)?,
+        locked_until: r.get(8)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+        password_changed_at: r.get(11)?,
+        last_login_at: r.get(12)?,
     })
 }
 
@@ -322,6 +552,25 @@ fn sample_from_row(r: &rusqlite::Row) -> rusqlite::Result<SampleRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::UserRole;
+
+    fn user(id: &str, username: &str, role: UserRole) -> UserRow {
+        UserRow {
+            user_id: id.into(),
+            username: username.into(),
+            display_name: username.into(),
+            password_hash: "$argon2id$test".into(),
+            role,
+            is_active: true,
+            must_change_password: false,
+            failed_login_count: 0,
+            locked_until: None,
+            created_at: "2026-09-01T08:00:00".into(),
+            updated_at: "2026-09-01T08:00:00".into(),
+            password_changed_at: "2026-09-01T08:00:00".into(),
+            last_login_at: None,
+        }
+    }
 
     fn experiment(id: &str) -> ExperimentRow {
         ExperimentRow {
@@ -336,6 +585,7 @@ mod tests {
             experiment_type: Some("REDUCIBILITY".into()),
             analysis_results_json: None,
             created_at: "2026-07-05T10:00:00".into(),
+            owner_user_id: None,
         }
     }
 
@@ -357,9 +607,67 @@ mod tests {
     }
 
     #[test]
-    fn schema_inits_at_version_1() {
+    fn schema_inits_at_version_2() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 1);
+        assert_eq!(s.user_version().unwrap(), 2);
+        assert_eq!(s.user_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn users_roundtrip_and_usernames_are_case_insensitively_unique() {
+        let s = Storage::open_in_memory().unwrap();
+        s.insert_user(&user("u1", "admin", UserRole::Admin))
+            .unwrap();
+        let found = s.get_user_by_username("ADMIN").unwrap().unwrap();
+        assert_eq!(found.user_id, "u1");
+        assert_eq!(found.role, UserRole::Admin);
+        assert!(s.insert_user(&user("u2", "Admin", UserRole::User)).is_err());
+        assert_eq!(s.active_admin_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn login_counters_and_password_reset_are_persisted() {
+        let s = Storage::open_in_memory().unwrap();
+        s.insert_user(&user("u1", "operator", UserRole::User))
+            .unwrap();
+        s.record_login_failure("u1", 5, Some("2026-09-01T08:15:00"))
+            .unwrap();
+        let failed = s.get_user("u1").unwrap().unwrap();
+        assert_eq!(failed.failed_login_count, 5);
+        assert_eq!(failed.locked_until.as_deref(), Some("2026-09-01T08:15:00"));
+
+        s.set_user_password("u1", "$argon2id$new", true, "2026-09-01T09:00:00")
+            .unwrap();
+        let reset = s.get_user("u1").unwrap().unwrap();
+        assert!(reset.must_change_password);
+        assert_eq!(reset.failed_login_count, 0);
+        assert!(reset.locked_until.is_none());
+    }
+
+    #[test]
+    fn v1_database_migrates_without_assigning_legacy_experiments() {
+        let dir = std::env::temp_dir().join(format!("tmh_migrate_{}", crate::auth::new_user_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("experiments.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO experiments (experiment_id, experiment_name, sample_name, sample_weight, start_time, created_at) VALUES ('legacy', 'legacy', 'sample', 1.0, '2026-01-01', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Storage::open(&path).unwrap();
+        assert_eq!(s.user_version().unwrap(), 2);
+        assert!(s
+            .get_experiment("legacy")
+            .unwrap()
+            .unwrap()
+            .owner_user_id
+            .is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -458,7 +766,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 1);
+        assert_eq!(s.user_version().unwrap(), 2);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }

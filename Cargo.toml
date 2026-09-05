@@ -27,6 +27,9 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 rust_xlsxwriter = "0.79"
 clap = { version = "4", features = ["derive"] }
+argon2 = { version = "0.5", features = ["std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 strip = true

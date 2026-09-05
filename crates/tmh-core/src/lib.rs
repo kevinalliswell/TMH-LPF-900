@@ -4,6 +4,7 @@
 //! no webview dependency ever.
 
 pub mod audit;
+pub mod auth;
 pub mod bus;
 pub mod clamp;
 pub mod config;

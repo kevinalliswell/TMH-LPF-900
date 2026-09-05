@@ -16,6 +16,7 @@ import type {
   TareResult,
   TelemetrySnapshot,
 } from "./types";
+import { mockCurrentUser } from "./authMock";
 
 // ---- shared device state (targets drive the physics; tick() reports) ----
 const H2_ABS = 10;
@@ -169,6 +170,7 @@ interface MockRun {
   mode: string;
   sample: string;
   operator: string;
+  ownerUserId: string;
   notes: string;
   started: string;
   w0: number;
@@ -202,6 +204,10 @@ function runningState(r: MockRun): ExperimentState {
     tolerance: s?.tolerance ?? 0,
     stage_elapsed_s: r.stageElapsedS,
     total_elapsed_s: r.totalElapsedS,
+    owner_user_id: r.ownerUserId,
+    owner_display_name: r.operator,
+    can_control: true,
+    occupied_by_other: false,
   };
 }
 
@@ -234,6 +240,7 @@ function archive(r: MockRun): void {
     analysis: null,
     created_at: r.started,
     sample_count: r.samples.length,
+    owner_user_id: r.ownerUserId,
   };
   history.set(r.id, { detail, samples: r.samples });
 }
@@ -289,7 +296,8 @@ export function mockStartExperiment(p: ExperimentParams): string {
   if (!p.sample_id.trim()) throw new Error("样品编号必填");
   if (!p.sample_name.trim()) throw new Error("样品名称必填");
   if (!(p.sample_weight > 0)) throw new Error("样品重量必须大于 0");
-  if (!p.operator.trim()) throw new Error("操作员必填");
+  const user = mockCurrentUser();
+  if (!user) throw new Error("AUTH_REQUIRED");
   if (experiment.running) throw new Error("实验已在运行");
   const program = PROGRAMS.find((pr) => pr.id === p.experiment_type);
   if (!program) throw new Error("未知实验模式");
@@ -301,7 +309,8 @@ export function mockStartExperiment(p: ExperimentParams): string {
     id,
     mode: p.experiment_type,
     sample: p.sample_name,
-    operator: p.operator,
+    operator: user.display_name,
+    ownerUserId: user.user_id,
     notes: p.notes ?? "",
     started,
     w0: p.sample_weight,
@@ -353,6 +362,18 @@ interface HistItem {
   samples: SampleDto[];
 }
 const history = new Map<string, HistItem>();
+
+function accessible(item: HistItem): boolean {
+  const user = mockCurrentUser();
+  return Boolean(user && (user.role === "ADMIN" || item.detail.owner_user_id === user.user_id));
+}
+
+function historyItem(id: string): HistItem {
+  const item = history.get(id);
+  if (!item) throw new Error("实验不存在");
+  if (!accessible(item)) throw new Error("FORBIDDEN");
+  return item;
+}
 
 /** Synchronously simulate a full run to fabricate a seed history entry. */
 function simulate(program: ProgramDto, w0: number): SampleDto[] {
@@ -408,6 +429,7 @@ function seed(id: string, name: string, mode: string, start: string, w0: number)
       analysis: null,
       created_at: start,
       sample_count: samples.length,
+      owner_user_id: null,
     },
     samples,
   });
@@ -417,6 +439,7 @@ seed("exp-demo-1", "首钢烧结矿-A", "LOW_TEMP_DEGRADATION", "2026-06-01T14:3
 
 export function mockListExperiments(): ExperimentSummary[] {
   return [...history.values()]
+    .filter(accessible)
     .map((h) => ({
       experiment_id: h.detail.experiment_id,
       experiment_name: h.detail.experiment_name,
@@ -427,19 +450,18 @@ export function mockListExperiments(): ExperimentSummary[] {
       operator: h.detail.operator,
       experiment_type: h.detail.experiment_type,
       has_analysis: h.detail.analysis != null,
+      owner_user_id: h.detail.owner_user_id,
     }))
     .sort((a, b) => b.start_time.localeCompare(a.start_time));
 }
 
 export function mockGetExperimentDetail(id: string): ExperimentDetail {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   return { ...h.detail, sample_count: h.samples.length };
 }
 
 export function mockGetExperimentSamples(id: string, maxPoints?: number): SampleDto[] {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   const all = h.samples;
   const cap = maxPoints ?? 2000;
   if (cap <= 0 || all.length <= cap) return all.map((s) => ({ ...s }));
@@ -448,7 +470,15 @@ export function mockGetExperimentSamples(id: string, maxPoints?: number): Sample
 }
 
 export function mockDeleteExperiment(id: string): void {
+  if (mockCurrentUser()?.role !== "ADMIN") throw new Error("FORBIDDEN");
   history.delete(id);
+}
+
+export function mockSetExperimentOwner(id: string, ownerUserId: string | null): void {
+  if (mockCurrentUser()?.role !== "ADMIN") throw new Error("FORBIDDEN");
+  const item = history.get(id);
+  if (!item) throw new Error("实验不存在");
+  item.detail.owner_user_id = ownerUserId;
 }
 
 // ---- export / report (browser fallbacks; Tauri writes files in Rust) ----
@@ -466,8 +496,7 @@ const CSV_COLUMNS = [
 ];
 
 export function mockExportText(id: string, sep: string): string {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   const rows = h.samples.map((s) =>
     [
       s.timestamp,
@@ -486,8 +515,7 @@ export function mockExportText(id: string, sep: string): string {
 }
 
 export function mockReportHtml(id: string): string {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   const d = h.detail;
   const a = (d.analysis ?? null) as Record<string, unknown> | null;
   const meta = [
@@ -538,8 +566,7 @@ function slope(pts: [number, number][]): number | null {
 }
 
 export function mockAnalyze13241(id: string, o2Pct: number): Record<string, unknown> {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   const w0 = h.detail.sample_weight;
   const last = h.samples[h.samples.length - 1];
   const wt = last ? last.weight : w0;
@@ -569,8 +596,7 @@ export function mockAnalyze13242(
   id: string,
   m: { m0: number; mGt63: number; m31563: number; m05315: number; mLt05: number },
 ): Record<string, unknown> {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   if (m.m0 <= 0) throw new Error("m0 无效");
   const total = m.mGt63 + m.m31563 + m.m05315 + m.mLt05;
   const value = {
@@ -591,8 +617,7 @@ export function mockAnalyze13242(
 }
 
 export function mockAnalyze13240(id: string, volumes: [number, number][]): Record<string, unknown> {
-  const h = history.get(id);
-  if (!h) throw new Error("实验不存在");
+  const h = historyItem(id);
   const per = volumes.filter(([v0]) => v0 > 0).map(([v0, v1]) => ((v1 - v0) / v0) * 100);
   if (!per.length) throw new Error("无有效试样体积");
   const value = {
