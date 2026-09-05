@@ -21,7 +21,6 @@ import {
   blankStage,
   cloneProgram,
   copyAsCustom,
-  createBlankCustomProgram,
   durationSummary,
   gasSummary,
   sanitizeProgram,
@@ -318,7 +317,8 @@ export function ModeView() {
 
   const addCustom = () => {
     setSelectedId(null);
-    setDraft(createBlankCustomProgram());
+    const base = programs.find(p=>p.source==="standard");
+    if(base) setDraft(copyAsCustom(base));
   };
 
   const deleteProgram = async () => {

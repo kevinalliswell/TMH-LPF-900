@@ -5,6 +5,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  ReductionInput,
+  RdiInput,
+  SwellingInput,
+  ReportDetails,
   ClampResult,
   ExperimentDetail,
   ExperimentParams,
@@ -36,6 +40,7 @@ import {
   mockUpdateUser,
 } from "./authMock";
 import {
+  mockSaveReportDetails,
   mockAnalyze13240,
   mockAnalyze13241,
   mockAnalyze13242,
@@ -79,12 +84,21 @@ export async function bootstrapAdmin(
   password: string,
 ): Promise<PublicUser> {
   return isTauri()
-    ? invoke("bootstrap_admin", { username, display_name: displayName, password })
+    ? invoke("bootstrap_admin", {
+        username,
+        display_name: displayName,
+        password,
+      })
     : mockBootstrapAdmin(username, displayName, password);
 }
 
-export async function login(username: string, password: string): Promise<AuthSnapshot> {
-  return isTauri() ? invoke("login", { username, password }) : mockLogin(username, password);
+export async function login(
+  username: string,
+  password: string,
+): Promise<AuthSnapshot> {
+  return isTauri()
+    ? invoke("login", { username, password })
+    : mockLogin(username, password);
 }
 
 export async function logout(): Promise<void> {
@@ -154,8 +168,15 @@ export async function updateUser(
     : mockUpdateUser(userId, displayName, role, isActive);
 }
 
-export async function resetUserPassword(userId: string, temporaryPassword: string): Promise<void> {
-  if (isTauri()) await invoke("reset_user_password", { user_id: userId, temporary_password: temporaryPassword });
+export async function resetUserPassword(
+  userId: string,
+  temporaryPassword: string,
+): Promise<void> {
+  if (isTauri())
+    await invoke("reset_user_password", {
+      user_id: userId,
+      temporary_password: temporaryPassword,
+    });
   else mockResetPassword(userId, temporaryPassword);
 }
 
@@ -199,8 +220,13 @@ export async function getRuntimeSettings(): Promise<RuntimeSettings> {
       };
 }
 
-export async function setGasFlow(gas: number, value: number): Promise<ClampResult> {
-  return isTauri() ? invoke("set_gas_flow", { gas, value }) : mockSetFlow(gas, value);
+export async function setGasFlow(
+  gas: number,
+  value: number,
+): Promise<ClampResult> {
+  return isTauri()
+    ? invoke("set_gas_flow", { gas, value })
+    : mockSetFlow(gas, value);
 }
 
 export async function setGasOnOff(gas: number, on: boolean): Promise<void> {
@@ -209,12 +235,14 @@ export async function setGasOnOff(gas: number, on: boolean): Promise<void> {
 }
 
 export async function openAllValves(): Promise<void> {
-  if (!isTauri()) return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, true));
+  if (!isTauri())
+    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, true));
   await invoke("open_all_valves");
 }
 
 export async function closeAllValves(): Promise<void> {
-  if (!isTauri()) return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, false));
+  if (!isTauri())
+    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, false));
   await invoke("close_all_valves");
 }
 
@@ -227,8 +255,12 @@ export async function tareBalance(): Promise<TareResult> {
   return isTauri() ? invoke("tare_balance") : mockTare();
 }
 
-export async function startExperiment(params: ExperimentParams): Promise<string> {
-  return isTauri() ? invoke("start_experiment", { params }) : mockStartExperiment(params);
+export async function startExperiment(
+  params: ExperimentParams,
+): Promise<string> {
+  return isTauri()
+    ? invoke("start_experiment", { params })
+    : mockStartExperiment(params);
 }
 
 export async function stopExperiment(reason: string): Promise<void> {
@@ -249,8 +281,12 @@ export async function listExperiments(): Promise<ExperimentSummary[]> {
   return isTauri() ? invoke("list_experiments") : mockListExperiments();
 }
 
-export async function getExperimentDetail(id: string): Promise<ExperimentDetail> {
-  return isTauri() ? invoke("get_experiment_detail", { id }) : mockGetExperimentDetail(id);
+export async function getExperimentDetail(
+  id: string,
+): Promise<ExperimentDetail> {
+  return isTauri()
+    ? invoke("get_experiment_detail", { id })
+    : mockGetExperimentDetail(id);
 }
 
 export async function getExperimentSamples(
@@ -269,36 +305,27 @@ export async function deleteExperiment(id: string): Promise<void> {
 
 export async function analyzeGb13241(
   id: string,
-  o2Pct: number,
+  input: ReductionInput,
 ): Promise<Record<string, unknown>> {
   return isTauri()
-    ? invoke("analyze_gb13241", { id, o2_pct: o2Pct })
-    : mockAnalyze13241(id, o2Pct);
+    ? invoke("analyze_gb13241", { id, input })
+    : mockAnalyze13241(id, input);
 }
-
 export async function analyzeGb13242(
   id: string,
-  masses: { m0: number; mGt63: number; m31563: number; m05315: number; mLt05: number },
+  input: RdiInput,
 ): Promise<Record<string, unknown>> {
   return isTauri()
-    ? invoke("analyze_gb13242", {
-        id,
-        m0: masses.m0,
-        m_gt63: masses.mGt63,
-        m_315_63: masses.m31563,
-        m_05_315: masses.m05315,
-        m_lt05: masses.mLt05,
-      })
-    : mockAnalyze13242(id, masses);
+    ? invoke("analyze_gb13242", { id, input })
+    : mockAnalyze13242(id, input);
 }
-
 export async function analyzeGb13240(
   id: string,
-  volumes: [number, number][],
+  input: SwellingInput,
 ): Promise<Record<string, unknown>> {
   return isTauri()
-    ? invoke("analyze_gb13240", { id, volumes })
-    : mockAnalyze13240(id, volumes);
+    ? invoke("analyze_gb13240", { id, input })
+    : mockAnalyze13240(id, input);
 }
 
 export type ExportFormat = "csv" | "txt" | "xlsx";
@@ -325,12 +352,19 @@ export async function generateReport(id: string): Promise<string | void> {
 }
 
 /** Export the sample series. Tauri writes+opens a file; web downloads (xlsx→csv). */
-export async function exportExperiment(id: string, format: ExportFormat): Promise<string | void> {
+export async function exportExperiment(
+  id: string,
+  format: ExportFormat,
+): Promise<string | void> {
   if (isTauri()) return invoke<string>("export_experiment", { id, format });
   // Browser mock can't build a real .xlsx — fall back to CSV (Excel-openable).
   const sep = format === "txt" ? "\t" : ",";
   const ext = format === "txt" ? "txt" : "csv";
-  downloadBlob(mockExportText(id, sep), `${id}.${ext}`, "text/plain;charset=utf-8");
+  downloadBlob(
+    mockExportText(id, sep),
+    `${id}.${ext}`,
+    "text/plain;charset=utf-8",
+  );
 }
 
 const APP_VERSION = "0.2.0";
@@ -357,7 +391,9 @@ export async function installUpdate(): Promise<void> {
   await invoke("install_update");
 }
 
-export function subscribeExperimentState(cb: (s: ExperimentState) => void): () => void {
+export function subscribeExperimentState(
+  cb: (s: ExperimentState) => void,
+): () => void {
   if (!isTauri()) return mockSubscribeExperiment(cb);
   let cancelled = false;
   let un: (() => void) | null = null;
@@ -381,7 +417,9 @@ export function subscribeExperimentState(cb: (s: ExperimentState) => void): () =
 }
 
 /** Subscribe to the 0.2s telemetry stream. Returns an unsubscribe function. */
-export function subscribeTelemetry(cb: (s: TelemetrySnapshot) => void): () => void {
+export function subscribeTelemetry(
+  cb: (s: TelemetrySnapshot) => void,
+): () => void {
   if (!isTauri()) return mockTelemetry(cb);
   const channel = new Channel<TelemetrySnapshot>();
   channel.onmessage = cb;
@@ -393,7 +431,9 @@ export function subscribeTelemetry(cb: (s: TelemetrySnapshot) => void): () => vo
   };
 }
 
-export async function saveCustomProgram(program: ProgramDto): Promise<ProgramDto> {
+export async function saveCustomProgram(
+  program: ProgramDto,
+): Promise<ProgramDto> {
   return isTauri()
     ? invoke("save_custom_program", { program })
     : mockSaveCustomProgram(program);
@@ -417,7 +457,10 @@ export async function generateSampleId(
   experimentTime: string,
 ): Promise<string> {
   return isTauri()
-    ? invoke("generate_sample_id", { program_id: programId, experiment_time: experimentTime })
+    ? invoke("generate_sample_id", {
+        program_id: programId,
+        experiment_time: experimentTime,
+      })
     : mockGenerateSampleId(programId, experimentTime);
 }
 
@@ -427,4 +470,12 @@ export async function getExperimentStartDefaults(
   return isTauri()
     ? invoke("get_experiment_start_defaults", { program_id: programId })
     : mockGetExperimentStartDefaults(programId);
+}
+
+export async function saveReportDetails(
+  id: string,
+  details: ReportDetails,
+): Promise<void> {
+  if (isTauri()) await invoke("save_report_details", { id, details });
+  else mockSaveReportDetails(id, details);
 }

@@ -43,6 +43,7 @@ pub fn build_sample_row(
     }
     let system_message = (!issues.is_empty()).then(|| issues.join("; "));
     SampleRow {
+        record_json: Some(serde_json::json!({"schema_version":1,"telemetry":snap}).to_string()),
         experiment_id: ctx.experiment_id.clone(),
         timestamp,
         experiment_duration: Some(fmt_hms(elapsed_secs)),

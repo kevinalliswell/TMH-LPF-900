@@ -8,9 +8,9 @@ export function MonitorPanel() {
   const h = snap?.health;
   // A stale stream (>5s) dims every panel too — frozen values must not read as live (#10).
   const stale = useTelemetryStale();
-  const tempOff = stale || (h ? !h.temp_connected : false);
-  const mfcOff = stale || (h ? !h.mfc_connected : false);
-  const balOff = stale || (h ? !h.balance_connected : false);
+  const tempOff = stale || (h ? !h.temp_valid : false);
+  const mfcOff = stale || (h ? !h.mfc_valid : false);
+  const balOff = stale || (h ? !h.balance_valid : false);
   const offTag = (off: boolean) => (off ? (stale ? " · 数据陈旧" : " · 离线") : "");
 
   return (

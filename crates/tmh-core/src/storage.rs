@@ -7,7 +7,7 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -66,6 +66,8 @@ CREATE INDEX idx_experiments_owner_start ON experiments(owner_user_id, start_tim
 /// Storage error (wraps rusqlite).
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    #[error("invalid stored JSON: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("storage: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("unsupported database schema version {0}")]
@@ -115,6 +117,7 @@ pub struct UserRow {
 /// An `experiment_data` sample row.
 #[derive(Debug, Clone)]
 pub struct SampleRow {
+    pub record_json: Option<String>,
     pub experiment_id: String,
     pub timestamp: String,
     pub experiment_duration: Option<String>,
@@ -185,6 +188,15 @@ impl Storage {
                 "CREATE TABLE custom_programs (id TEXT PRIMARY KEY, program_json TEXT NOT NULL);",
             )?;
             tx.pragma_update(None, "user_version", 4)?;
+            tx.commit()?;
+            version = 4;
+        }
+        if version <= 4 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE experiment_data ADD COLUMN record_json TEXT;
+              ALTER TABLE experiments ADD COLUMN runtime_metadata TEXT NOT NULL DEFAULT '{}';
+              CREATE TABLE analysis_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id), result_json TEXT NOT NULL);")?;
+            tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -384,7 +396,7 @@ impl Storage {
             let mut stmt = tx.prepare(
                 "INSERT INTO experiment_data (experiment_id, timestamp, experiment_duration, \
                  temperature, weight, weight_loss, co_flow, co2_flow, n2_flow, h2_flow, \
-                 experiment_status, system_message) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 experiment_status, system_message, record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             )?;
             for r in rows {
                 stmt.execute(params![
@@ -400,6 +412,7 @@ impl Storage {
                     r.h2_flow,
                     r.experiment_status,
                     r.system_message,
+                    r.record_json,
                 ])?;
             }
         }
@@ -425,12 +438,55 @@ impl Storage {
         Ok(())
     }
 
+    pub fn runtime_metadata(&self, id: &str) -> Result<String> {
+        Ok(self.conn.query_row(
+            "SELECT runtime_metadata FROM experiments WHERE experiment_id=?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn patch_runtime_metadata(&self, id: &str, patch: &str) -> Result<()> {
+        self.conn.execute("UPDATE experiments SET runtime_metadata=json_patch(runtime_metadata, ?2) WHERE experiment_id=?1", params![id,patch])?;
+        Ok(())
+    }
+
+    pub fn save_report_revision(&mut self, id: &str, patch: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO analysis_revisions(experiment_id,result_json) VALUES (?1,?2)",
+            params![id, patch],
+        )?;
+        tx.execute("UPDATE experiments SET runtime_metadata=json_patch(runtime_metadata, ?2) WHERE experiment_id=?1", params![id,patch])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn analysis_revisions(&self, id: &str) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT result_json FROM analysis_revisions WHERE experiment_id=?1 ORDER BY id DESC",
+        )?;
+        let values = stmt
+            .query_map([id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+            .into_iter()
+            .map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .collect()
+    }
+
     /// Store the analysis-results JSON blob for an experiment.
-    pub fn set_analysis_results(&self, experiment_id: &str, json: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE experiments SET analysis_results_json = ?2 WHERE experiment_id = ?1",
+    pub fn set_analysis_results(&mut self, experiment_id: &str, json: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO analysis_revisions(experiment_id,result_json) VALUES (?1,?2)",
             params![experiment_id, json],
         )?;
+        tx.execute(
+            "UPDATE experiments SET analysis_results_json=?2 WHERE experiment_id=?1",
+            params![experiment_id, json],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -506,7 +562,7 @@ impl Storage {
         let last_rn = total.saturating_sub(1) as i64;
         let mut stmt = self.conn.prepare(
             "SELECT experiment_id, timestamp, experiment_duration, temperature, weight, \
-             weight_loss, co_flow, co2_flow, n2_flow, h2_flow, experiment_status, system_message \
+             weight_loss, co_flow, co2_flow, n2_flow, h2_flow, experiment_status, system_message, record_json \
              FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) - 1 AS rn FROM experiment_data \
              WHERE experiment_id = ?1) WHERE rn % ?2 = 0 OR rn = ?3 ORDER BY id",
         )?;
@@ -521,6 +577,10 @@ impl Storage {
 
     /// Delete an experiment and all its samples (FK order: samples first).
     pub fn delete_experiment(&self, experiment_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM analysis_revisions WHERE experiment_id=?1",
+            [experiment_id],
+        )?;
         self.conn.execute(
             "DELETE FROM experiment_data WHERE experiment_id = ?1",
             params![experiment_id],
@@ -588,6 +648,7 @@ fn user_from_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
 
 fn sample_from_row(r: &rusqlite::Row) -> rusqlite::Result<SampleRow> {
     Ok(SampleRow {
+        record_json: r.get(12)?,
         experiment_id: r.get(0)?,
         timestamp: r.get(1)?,
         experiment_duration: r.get(2)?,
@@ -649,6 +710,7 @@ mod tests {
 
     fn sample(id: &str, t: f64) -> SampleRow {
         SampleRow {
+            record_json: None,
             experiment_id: id.into(),
             timestamp: "2026-07-05T10:00:01".into(),
             experiment_duration: Some("00:00:01".into()),
@@ -667,7 +729,7 @@ mod tests {
     #[test]
     fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 4);
+        assert_eq!(s.user_version().unwrap(), 5);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -718,7 +780,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 4);
+        assert_eq!(s.user_version().unwrap(), 5);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -769,9 +831,16 @@ mod tests {
 
     #[test]
     fn set_analysis_results_roundtrips() {
-        let s = Storage::open_in_memory().unwrap();
+        let mut s = Storage::open_in_memory().unwrap();
         s.insert_experiment(&experiment("e1")).unwrap();
         s.set_analysis_results("e1", r#"{"rt":50.0}"#).unwrap();
+        s.save_report_revision("e1", r#"{"report_details":{"lab_name":"Lab A"}}"#)
+            .unwrap();
+        s.save_report_revision("e1", r#"{"report_details":{"lab_name":"Lab B"}}"#)
+            .unwrap();
+        let revisions = s.analysis_revisions("e1").unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(revisions[1]["report_details"]["lab_name"], "Lab A");
         let e = s.get_experiment("e1").unwrap().unwrap();
         assert_eq!(e.analysis_results_json.as_deref(), Some(r#"{"rt":50.0}"#));
     }
@@ -824,7 +893,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 4);
+        assert_eq!(s.user_version().unwrap(), 5);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }

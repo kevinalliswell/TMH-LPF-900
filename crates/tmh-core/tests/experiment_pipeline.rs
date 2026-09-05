@@ -112,6 +112,7 @@ fn reducibility_run_drives_devices_and_persists() {
 
         let gas = hub.mfc_rx().borrow().gas;
         samples.push(SampleRow {
+            record_json: None,
             experiment_id: "e1".into(),
             timestamp: "t".into(),
             experiment_duration: Some("00:00:00".into()),

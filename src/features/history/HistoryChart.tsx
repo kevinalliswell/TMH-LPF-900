@@ -59,7 +59,7 @@ export function HistoryChart({ samples }: { samples: SampleDto[] }) {
           showSymbol: false,
           yAxisIndex: 0,
           lineStyle: { width: 2, color: "#ff8c42" },
-          data: samples.map((s) => s.temperature),
+          data: samples.map((s) => s.record?.telemetry?.health?.temp_valid === false ? null : s.temperature),
         },
         {
           name: "质量 g",
@@ -67,7 +67,7 @@ export function HistoryChart({ samples }: { samples: SampleDto[] }) {
           showSymbol: false,
           yAxisIndex: 1,
           lineStyle: { width: 2, color: "#38d6c4" },
-          data: samples.map((s) => s.weight),
+          data: samples.map((s) => s.record?.telemetry?.health?.balance_valid === false ? null : s.weight),
         },
       ],
     });

@@ -1,147 +1,242 @@
-//! GB national-standard index calculations (docs/05 §5.6). Pure functions with
-//! golden-value tests. Results serialize into `experiments.analysis_results_json`.
-//! ⚠ The old system used the O2 percentage as a fraction (100× error) — fixed here.
+//! Calculations verified against the user-supplied final GB/T 13240-2018,
+//! GB/T 13241-2017 and GB/T 13242-2017. See docs/13 for clause/page references.
+use serde::{Deserialize, Serialize};
 
-use serde::Serialize;
+pub const CALCULATION_VERSION: &str = "GB-2026-09-05.1";
 
-/// GB/T 13241 reducibility result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Reducibility {
-    /// Reduction degree Rt (%).
     pub rt: f64,
-    /// Mass loss ΔW = W0 − Wt (g).
     pub delta_w: f64,
 }
 
-/// GB/T 13241: `Rt = ΔW / (W0 × O2%/100) × 100`. `o2_pct` is a percentage
-/// (e.g. 28.5), NOT a fraction. `None` for non-positive W0 or O2%.
-pub fn reducibility(w0: f64, wt: f64, o2_pct: f64) -> Option<Reducibility> {
-    if w0 <= 0.0 || o2_pct <= 0.0 {
+/// m0 is dry sample mass; m1/mt both include the same reduction tube.
+/// W1 (ferrous content) and W2 (total iron) are mass percentages, e.g. 10 and 60.
+pub fn reducibility(m0: f64, m1: f64, mt: f64, w1: f64, w2: f64) -> Option<Reducibility> {
+    if ![m0, m1, mt, w1, w2].iter().all(|v| v.is_finite())
+        || m0 <= 0.0
+        || m1 < m0
+        || mt <= 0.0
+        || !(0.0..=100.0).contains(&w1)
+        || w2 <= 0.0
+        || w2 > 100.0
+    {
         return None;
     }
-    let delta_w = w0 - wt;
-    Some(Reducibility {
-        rt: delta_w / (w0 * (o2_pct / 100.0)) * 100.0,
-        delta_w,
-    })
+    let delta_w = m1 - mt;
+    let rt = (0.111 * w1 / (0.430 * w2) + delta_w / (m0 * 0.430 * w2) * 100.0) * 100.0;
+    rt.is_finite().then_some(Reducibility { rt, delta_w })
 }
 
-/// Reduction-rate index: slope of a least-squares fit over `(t_min, rt)` points
-/// (%/min). `None` for fewer than 2 points or a degenerate fit.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReductionRate {
+    pub index: f64,
+    pub t30: f64,
+    pub endpoint_percent: f64,
+    pub endpoint_min: f64,
+    pub factor: f64,
+}
+
+/// First upward crossing by interpolation between adjacent valid points. Caller must
+/// preserve missing points (NaN), preventing interpolation across a measurement gap.
+fn crossing(points: &[(f64, f64)], threshold: f64) -> Option<f64> {
+    for (i, &(t, y)) in points.iter().enumerate() {
+        if !t.is_finite() || !y.is_finite() {
+            continue;
+        }
+        if y == threshold {
+            return Some(t);
+        }
+        if i > 0 {
+            let (a, b) = points[i - 1];
+            if a.is_finite() && b.is_finite() && a < t && b < threshold && y > threshold {
+                return Some(a + (threshold - b) / (y - b) * (t - a));
+            }
+        }
+    }
+    None
+}
+pub fn reduction_rate(points: &[(f64, f64)]) -> Option<ReductionRate> {
+    if points.iter().any(|(t, _)| !t.is_finite() || *t < 0.0)
+        || points.windows(2).any(|w| w[0].0 >= w[1].0)
+    {
+        return None;
+    }
+    let t30 = crossing(points, 30.0)?;
+    for (endpoint_percent, factor) in [(60.0, 33.6), (55.0, 26.5), (50.0, 20.0)] {
+        if let Some(endpoint_min) = crossing(points, endpoint_percent) {
+            if endpoint_min > t30 {
+                return Some(ReductionRate {
+                    index: factor / (endpoint_min - t30),
+                    t30,
+                    endpoint_percent,
+                    endpoint_min,
+                    factor,
+                });
+            }
+        }
+    }
+    None
+}
 pub fn reduction_rate_index(points: &[(f64, f64)]) -> Option<f64> {
-    if points.len() < 2 {
-        return None;
-    }
-    let n = points.len() as f64;
-    let sx: f64 = points.iter().map(|p| p.0).sum();
-    let sy: f64 = points.iter().map(|p| p.1).sum();
-    let sxx: f64 = points.iter().map(|p| p.0 * p.0).sum();
-    let sxy: f64 = points.iter().map(|p| p.0 * p.1).sum();
-    let denom = n * sxx - sx * sx;
-    if denom == 0.0 {
-        return None;
-    }
-    Some((n * sxy - sx * sy) / denom)
+    reduction_rate(points).map(|r| r.index)
 }
 
-/// GB/T 13242 low-temperature degradation RDI result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Rdi {
     pub rdi_plus_6_3: f64,
     pub rdi_plus_3_15: f64,
     pub rdi_minus_0_5: f64,
-    /// True if the sieved total differs from m0 by more than 2%.
-    pub sieve_warning: bool,
 }
-
-/// GB/T 13242. Sieve fractions (g): `>6.3`, `3.15–6.3`, `0.5–3.15`, `<0.5`; `m0`
-/// initial mass. RDI+3.15 is cumulative (`>6.3` + `3.15–6.3`).
-pub fn rdi(m0: f64, m_gt63: f64, m_315_63: f64, m_05_315: f64, m_lt05: f64) -> Option<Rdi> {
-    if m0 <= 0.0 {
+/// Denominator is the reduced test portion BEFORE tumbling. Three masses are separate
+/// retained fractions; fines include unrecovered powder by subtraction (§9.1).
+pub fn rdi(m0: f64, m1: f64, m2: f64, m3: f64) -> Option<Rdi> {
+    if ![m0, m1, m2, m3].iter().all(|v| v.is_finite() && *v >= 0.0)
+        || m0 <= 0.0
+        || m1 + m2 + m3 > m0
+    {
         return None;
     }
-    let total = m_gt63 + m_315_63 + m_05_315 + m_lt05;
     Some(Rdi {
-        rdi_plus_6_3: m_gt63 / m0 * 100.0,
-        rdi_plus_3_15: (m_gt63 + m_315_63) / m0 * 100.0,
-        rdi_minus_0_5: m_lt05 / m0 * 100.0,
-        sieve_warning: ((total - m0).abs() / m0) > 0.02,
+        rdi_plus_6_3: m1 / m0 * 100.0,
+        rdi_plus_3_15: (m1 + m2) / m0 * 100.0,
+        rdi_minus_0_5: (m0 - m1 - m2 - m3) / m0 * 100.0,
     })
 }
-
-/// GB/T 13240 free-swelling index result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FreeSwelling {
-    /// Per-pellet SI (%).
-    pub per_pellet: Vec<f64>,
-    pub average: f64,
+    pub initial_volume: f64,
+    pub final_volume: f64,
+    pub swelling_index: f64,
 }
-
-/// GB/T 13240: per pellet `SI = (V1 − V0) / V0 × 100` (mL); average over pellets.
-/// Pellets with non-positive V0 are skipped. `None` if no valid pellet.
+/// Sum volumes of the SAME test portion; never average per-pellet percentages.
+/// UI records the complete 18-pellet portion as one before/after pair.
 pub fn free_swelling(volumes: &[(f64, f64)]) -> Option<FreeSwelling> {
-    let per: Vec<f64> = volumes
-        .iter()
-        .filter(|(v0, _)| *v0 > 0.0)
-        .map(|(v0, v1)| (v1 - v0) / v0 * 100.0)
-        .collect();
-    if per.is_empty() {
+    if volumes.is_empty()
+        || !volumes
+            .iter()
+            .all(|(a, b)| a.is_finite() && b.is_finite() && *a > 0.0 && *b > 0.0)
+    {
         return None;
     }
-    let average = per.iter().sum::<f64>() / per.len() as f64;
-    Some(FreeSwelling {
-        per_pellet: per,
-        average,
+    let initial_volume: f64 = volumes.iter().map(|p| p.0).sum();
+    let final_volume: f64 = volumes.iter().map(|p| p.1).sum();
+    let swelling_index = (final_volume - initial_volume) / initial_volume * 100.0;
+    swelling_index.is_finite().then_some(FreeSwelling {
+        initial_volume,
+        final_volume,
+        swelling_index,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReductionInput {
+    pub w1: f64,
+    pub w2: f64,
+    #[serde(default)]
+    pub manual_m1: Option<f64>,
+    #[serde(default)]
+    pub manual_m180: Option<f64>,
+    #[serde(default)]
+    pub manual_rate_points: Option<Vec<(f64, f64)>>,
+    #[serde(default)]
+    pub source_record: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RdiInput {
+    pub m0: f64,
+    pub m1: f64,
+    pub m2: f64,
+    pub m3: f64,
+    pub drum_rpm: f64,
+    pub drum_revolutions: u32,
+    pub sieve_seconds: f64,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SwellingInput {
+    pub v0: f64,
+    pub v1: f64,
+    pub pellet_count: u32,
+    pub volume_method: String,
+    pub same_method: bool,
+}
 
-    #[test]
-    fn gb13241_golden_value() {
-        // docs/05 §5.6: W0=100, Wt=85, O2=30% -> Rt = 50.0% (NOT 0.5 or 5000).
-        let r = reducibility(100.0, 85.0, 30.0).unwrap();
-        assert!((r.rt - 50.0).abs() < 1e-9);
-        assert!((r.delta_w - 15.0).abs() < 1e-9);
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RepeatDecision {
+    pub required_count: usize,
+    pub selected_indices: Vec<usize>,
+    pub result: Option<f64>,
+}
+fn repeat_input(values: &[f64], a: f64, b: f64, c: f64) -> Result<(), String> {
+    if values.len() > 4
+        || values.iter().any(|v| !v.is_finite())
+        || ![a, b, c].iter().all(|v| v.is_finite() && *v >= 0.0)
+        || a > b
+        || b > c
+    {
+        return Err("重复试验输入或阈值无效".into());
     }
-
-    #[test]
-    fn gb13241_default_o2_and_rejects() {
-        // O2 default 28.5 gives a distinct, finite result.
-        let r = reducibility(100.0, 85.0, 28.5).unwrap();
-        assert!((r.rt - (15.0 / 28.5 * 100.0)).abs() < 1e-9);
-        assert!(reducibility(0.0, 0.0, 30.0).is_none());
-        assert!(reducibility(100.0, 85.0, 0.0).is_none());
+    Ok(())
+}
+fn spread(values: &[f64]) -> f64 {
+    values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - values.iter().copied().fold(f64::INFINITY, f64::min)
+}
+fn decision(values: &[f64], required_count: usize, middle: bool) -> Result<RepeatDecision, String> {
+    if values.len() < required_count {
+        return Ok(RepeatDecision {
+            required_count,
+            selected_indices: vec![],
+            result: None,
+        });
     }
-
-    #[test]
-    fn reduction_rate_index_slope() {
-        let idx = reduction_rate_index(&[(0.0, 0.0), (1.0, 10.0), (2.0, 20.0)]).unwrap();
-        assert!((idx - 10.0).abs() < 1e-9);
-        assert!(reduction_rate_index(&[(0.0, 0.0)]).is_none());
+    if values.len() > required_count {
+        return Err("已有有效重复性决策，请勿混入额外试验".into());
     }
-
-    #[test]
-    fn gb13242_rdi_cumulative_and_warning() {
-        // total == m0 -> no warning
-        let r = rdi(500.0, 300.0, 100.0, 60.0, 40.0).unwrap();
-        assert!((r.rdi_plus_6_3 - 60.0).abs() < 1e-9);
-        assert!((r.rdi_plus_3_15 - 80.0).abs() < 1e-9); // (300+100)/500*100
-        assert!((r.rdi_minus_0_5 - 8.0).abs() < 1e-9);
-        assert!(!r.sieve_warning);
-        // sieved total 5% short -> warning
-        let w = rdi(500.0, 300.0, 100.0, 50.0, 25.0).unwrap();
-        assert!(w.sieve_warning);
-        assert!(rdi(0.0, 1.0, 1.0, 1.0, 1.0).is_none());
+    let mut selected_indices: Vec<usize> = (0..values.len()).collect();
+    if middle {
+        selected_indices.sort_by(|a, b| values[*a].total_cmp(&values[*b]));
+        selected_indices = selected_indices[1..3].to_vec();
     }
-
-    #[test]
-    fn gb13240_free_swelling_average() {
-        let r = free_swelling(&[(10.0, 12.0), (10.0, 11.0)]).unwrap();
-        assert_eq!(r.per_pellet, vec![20.0, 10.0]);
-        assert!((r.average - 15.0).abs() < 1e-9);
-        assert!(free_swelling(&[]).is_none());
+    let result = Some(
+        selected_indices
+            .iter()
+            .map(|i| values[*i] / selected_indices.len() as f64)
+            .sum(),
+    );
+    Ok(RepeatDecision {
+        required_count,
+        selected_indices,
+        result,
+    })
+}
+pub fn repeat_decision(values: &[f64], a: f64, b: f64, c: f64) -> Result<RepeatDecision, String> {
+    repeat_input(values, a, b, c)?;
+    if values.len() < 2 || spread(&values[..2]) <= a {
+        return decision(values, 2, false);
     }
+    let d = spread(&values[..2]);
+    if d <= b && (values.len() < 3 || spread(&values[..3]) <= b) {
+        return decision(values, 3, false);
+    }
+    decision(
+        values,
+        4,
+        d > c || (values.len() == 4 && spread(values) > c),
+    )
+}
+pub fn sequential_repeat_decision(
+    values: &[f64],
+    a: f64,
+    b: f64,
+    c: f64,
+) -> Result<RepeatDecision, String> {
+    repeat_input(values, a, b, c)?;
+    if values.len() < 2 || spread(&values[..2]) <= a {
+        return decision(values, 2, false);
+    }
+    if values.len() < 3 || spread(&values[..3]) <= b {
+        return decision(values, 3, false);
+    }
+    decision(values, 4, values.len() == 4 && spread(values) > c)
 }

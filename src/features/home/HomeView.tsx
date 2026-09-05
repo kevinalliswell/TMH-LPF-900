@@ -75,9 +75,9 @@ export function HomeView() {
       <div className="panel p-4">
         <SectionTitle>设备连接</SectionTitle>
         <div className="flex gap-6">
-          <Dot ok={!!h?.temp_connected} label="温度控制器" />
-          <Dot ok={!!h?.mfc_connected} label="气体流量 MFC" />
-          <Dot ok={!!h?.balance_connected} label="电子天平" />
+          <Dot ok={!!h?.temp_valid} label="温度控制器" />
+          <Dot ok={!!h?.mfc_valid} label="气体流量 MFC" />
+          <Dot ok={!!h?.balance_valid} label="电子天平" />
         </div>
       </div>
 

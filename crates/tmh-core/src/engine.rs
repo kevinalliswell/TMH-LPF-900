@@ -81,6 +81,10 @@ pub struct Stage {
 /// A full experiment program.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
+    #[serde(default)]
+    pub base_standard_id: Option<String>,
+    #[serde(default)]
+    pub base_standard_version: Option<String>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -136,6 +140,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
     use StageKind::*;
     let p = match mode_id {
         "REDUCIBILITY" => Program {
+            base_standard_id: Some("REDUCIBILITY".into()),
+            base_standard_version: Some("2017".into()),
             id: "REDUCIBILITY".into(),
             name: "GB/T 13241 还原性".into(),
             description: "GB/T 13241-2017 铁矿石还原性的测定方法".into(),
@@ -187,6 +193,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
             ],
         },
         "LOW_TEMP_DEGRADATION" => Program {
+            base_standard_id: Some("LOW_TEMP_DEGRADATION".into()),
+            base_standard_version: Some("2017".into()),
             id: "LOW_TEMP_DEGRADATION".into(),
             name: "GB/T 13242 低温粉化".into(),
             description: "GB/T 13242-2017 铁矿石低温粉化试验方法".into(),
@@ -238,6 +246,8 @@ pub fn standard_program(mode_id: &str) -> Option<Program> {
             ],
         },
         "FREE_SWELLING" => Program {
+            base_standard_id: Some("FREE_SWELLING".into()),
+            base_standard_version: Some("2018".into()),
             id: "FREE_SWELLING".into(),
             name: "GB/T 13240 自由膨胀".into(),
             description: "GB/T 13240-2018 球团矿自由膨胀指数测定方法".into(),
@@ -388,6 +398,15 @@ impl ExperimentEngine {
     }
     pub fn total_elapsed_s(&self) -> f64 {
         self.total_elapsed_s
+    }
+
+    /// A stage's exposure clock starts only when its gas switch is acknowledged.
+    /// Transport delay remains part of the complete experiment timeline.
+    pub fn confirm_stage_started(&mut self, switching_s: f64) {
+        if switching_s.is_finite() && switching_s >= 0.0 {
+            self.total_elapsed_s += switching_s;
+        }
+        self.stage_elapsed_s = 0.0;
     }
 
     /// Advance `dt` seconds with sample temperature `t8`. Returns which stage's
@@ -625,5 +644,17 @@ mod tests {
         assert!(p.enabled);
         assert_eq!(p.sample_prefix, "");
         assert_eq!(p.source, ProgramSource::Custom);
+    }
+    #[test]
+    fn gas_acknowledgement_delay_is_not_reduction_exposure() {
+        let mut e = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
+        e.skip_stage();
+        e.skip_stage();
+        e.confirm_stage_started(17.0);
+        assert_eq!(e.total_elapsed_s(), 17.0);
+        assert_eq!(e.stage_elapsed_s(), 0.0);
+        assert!(!e.tick(900.0, 10800.0 - 17.0).completed);
+        assert_eq!(e.stage_index(), 2);
+        assert_eq!(e.tick(900.0, 17.0).apply_stage, Some(3));
     }
 }
