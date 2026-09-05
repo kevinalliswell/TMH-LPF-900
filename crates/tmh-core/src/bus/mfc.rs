@@ -6,6 +6,7 @@ use crate::clamp::{clamp_setpoint, ClampResult, Gas};
 use crate::config::CommConfig;
 use crate::health::{Health, ReadFreshness};
 use crate::transport::{BusError, Transport};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tmh_protocols::cpl;
 
@@ -14,8 +15,11 @@ const REG_SV: u16 = 1401;
 const TXN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Gas index order used everywhere in this actor.
+#[cfg(test)]
 const IDX_H2: usize = 0;
+#[cfg(test)]
 const IDX_CO2: usize = 2;
+#[cfg(test)]
 const IDX_CO: usize = 3;
 
 /// One gas channel reading (display L/min).
@@ -29,6 +33,7 @@ pub struct GasReading {
 /// Snapshot of the MFC bus (gas order H2, N2, CO2, CO).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MfcSnapshot {
+    pub safety_latched: bool,
     pub gas: [GasReading; 4],
     pub connected: bool,
     pub consecutive_errors: u32,
@@ -49,12 +54,46 @@ pub enum MfcCommand {
 pub enum MfcCommandError {
     #[error("invalid gas channel: {0}")]
     InvalidGas(usize),
+    #[error("safety interlock is latched; acknowledge safe state before resuming")]
+    SafetyLatched,
+    #[error("command queue is full")]
+    QueueFull,
     #[error(transparent)]
     Transport(#[from] BusError),
 }
 
+/// Shared interlock: epoch invalidates commands queued before an emergency even
+/// after a later operator reset. Mutex gives emergency/reset a single linear order.
+#[derive(Default)]
+pub struct SafetyLatch(Mutex<(u64, bool)>);
+impl SafetyLatch {
+    fn state(&self) -> std::sync::MutexGuard<'_, (u64, bool)> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn trip(&self) {
+        let mut s = self.state();
+        s.0 = s.0.wrapping_add(1);
+        s.1 = true;
+    }
+    pub fn epoch(&self) -> u64 {
+        self.state().0
+    }
+    pub fn is_latched(&self) -> bool {
+        self.state().1
+    }
+    fn reset(&self, epoch: u64) -> bool {
+        let mut s = self.state();
+        if s.0 != epoch {
+            return false;
+        }
+        s.1 = false;
+        true
+    }
+}
+
 /// Owns the MFC transport + per-gas state.
 pub struct MfcActor {
+    safety: Arc<SafetyLatch>,
     transport: Box<dyn Transport>,
     addr: [u8; 4],
     scaling: [f64; 4],
@@ -84,6 +123,7 @@ impl MfcActor {
         limit_co: f64,
     ) -> Self {
         Self {
+            safety: Arc::new(SafetyLatch::default()),
             transport,
             addr,
             scaling,
@@ -112,9 +152,44 @@ impl MfcActor {
         )
     }
 
+    pub fn safety_latch(&self) -> Arc<SafetyLatch> {
+        self.safety.clone()
+    }
+    pub fn reset_safety(&self, epoch: u64) -> Result<(), MfcCommandError> {
+        if !self.snapshot().is_fresh(Instant::now())
+            || [0, 2, 3].iter().any(|&i| {
+                !self.gas[i].pv.is_finite() || self.gas[i].pv.abs() > 0.1 || self.gas[i].sv != 0.0
+            })
+            || !self.safety.reset(epoch)
+        {
+            return Err(MfcCommandError::SafetyLatched);
+        }
+        Ok(())
+    }
+    /// Bypass only for the fixed protective atmosphere; always try every channel.
+    pub fn apply_protection(&mut self) -> Result<(), MfcCommandError> {
+        let mut error = None;
+        for (i, value) in [(0, 0.0), (3, 0.0), (2, 0.0), (1, 5.0)] {
+            if let Err(e) = self.write_flow(i, value) {
+                if error.is_none() {
+                    error = Some(e);
+                }
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+
     /// Set a gas flow. Passes through the safety clamp (the sole choke point) before
     /// building the frame; returns the clamp decision (for event + audit).
     pub fn set_flow(&mut self, gas_idx: usize, value: f64) -> Result<ClampResult, MfcCommandError> {
+        if self.safety.is_latched()
+            && !((gas_idx != 1 && gas_idx < 4 && value == 0.0) || (gas_idx == 1 && value == 5.0))
+        {
+            return Err(MfcCommandError::SafetyLatched);
+        }
+        self.write_flow(gas_idx, value)
+    }
+    fn write_flow(&mut self, gas_idx: usize, value: f64) -> Result<ClampResult, MfcCommandError> {
         // The webview is untrusted (docs/03): an out-of-range gas index must never panic
         // this bus thread — a panic drops the command receiver and silently disables ALL
         // gas control, including the emergency shutoff. Out of range is safely rejected.
@@ -124,14 +199,18 @@ impl MfcActor {
         let clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
         let raw = (clamp.applied / self.scaling[gas_idx] * 10.0).round() as i64;
         let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
-        let response = match self.transport.transact(&frame, TXN_TIMEOUT) {
+        let response = match self
+            .transport
+            .reset_buffers()
+            .and_then(|_| self.transport.transact(&frame, TXN_TIMEOUT))
+        {
             Ok(response) => response,
             Err(error) => {
                 self.health.on_error();
                 return Err(error.into());
             }
         };
-        let acknowledged = cpl::parse_response(&response);
+        let acknowledged = cpl::parse_transaction(&response, &frame, self.addr[gas_idx]);
         let invalid_ack = match acknowledged {
             Some(value) => (value - raw as f64 / 10.0).abs() > 1e-6,
             None => true,
@@ -165,21 +244,8 @@ impl MfcActor {
                 self.set_flow(*gas, target).map(|_| None)
             }
             MfcCommand::ShutoffFlammable => {
-                // H2, CO2, CO -> 0. Zero always passes the clamp (never blocked).
-                // Attempt all channels even after an earlier failure: a dead H2 slave must
-                // not prevent CO2/CO from receiving their zero commands.
-                let mut first_error = None;
-                for g in [IDX_H2, IDX_CO2, IDX_CO] {
-                    if let Err(error) = self.set_flow(g, 0.0) {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
-                }
-                match first_error {
-                    Some(error) => Err(error),
-                    None => Ok(None),
-                }
+                self.safety.trip();
+                self.apply_protection().map(|_| None)
             }
         }
     }
@@ -214,8 +280,12 @@ impl MfcActor {
         self.poll_cursor = (self.poll_cursor + 1) % 4;
         self.freshness[idx].fail();
         let frame = cpl::build_read(self.addr[idx], REG_PV, 2);
-        match self.transport.transact(&frame, TXN_TIMEOUT) {
-            Ok(buf) => match cpl::parse_response(&buf) {
+        match self
+            .transport
+            .reset_buffers()
+            .and_then(|_| self.transport.transact(&frame, TXN_TIMEOUT))
+        {
+            Ok(buf) => match cpl::parse_transaction(&buf, &frame, self.addr[idx]) {
                 Some(v) if v.is_finite() => {
                     self.freshness[idx].success(now);
                     self.gas[idx].pv = v * self.scaling[idx];
@@ -233,6 +303,7 @@ impl MfcActor {
 
     pub fn snapshot(&self) -> MfcSnapshot {
         MfcSnapshot {
+            safety_latched: self.safety.is_latched(),
             gas: self.gas,
             connected: self.health.connected,
             consecutive_errors: self.health.consecutive_errors,
@@ -431,5 +502,20 @@ mod tests {
         assert_eq!(a.gas[1].sv, 0.0);
         assert_eq!(a.gas[2].sv, 3.0, "channel after failure was attempted");
         assert_eq!(a.gas[3].sv, 0.0);
+    }
+    #[test]
+    fn reset_requires_fresh_safe_readings_and_the_same_emergency_epoch() {
+        let mut a = actor();
+        a.handle_command(&MfcCommand::ShutoffFlammable).unwrap();
+        let old = a.safety.epoch();
+        assert!(a.reset_safety(old).is_err());
+        for _ in 0..4 {
+            a.poll_next(Instant::now());
+        }
+        a.safety.trip();
+        assert!(a.reset_safety(old).is_err());
+        assert!(a.safety.is_latched());
+        assert!(a.reset_safety(a.safety.epoch()).is_ok());
+        assert!(a.set_flow(0, 3.0).is_ok());
     }
 }

@@ -23,7 +23,7 @@ use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
     standard_program, validate_program, ExperimentEngine, Phase, Program, ProgramSource, Stage,
-    StageKind, SAFETY_ATMOSPHERE, STANDARD_MODES,
+    StageKind, STANDARD_MODES,
 };
 use tmh_core::gb::{
     free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput, SwellingInput,
@@ -539,7 +539,7 @@ fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) -> Result<(),
 /// The safety atmosphere (docs/05 §5.5): N2=5.0, H2=CO2=CO=0. Applied on EVERY exit.
 fn apply_safety_atmosphere(hub: &DeviceHub) -> Result<(), String> {
     let result = hub
-        .request_set_atmosphere(SAFETY_ATMOSPHERE)
+        .request_shutoff_flammable()
         .blocking_recv()
         .map_err(|_| "DEVICE_OFFLINE".to_string())?
         .map_err(|_| "DEVICE_OFFLINE".to_string())
@@ -1527,6 +1527,42 @@ fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
 }
 
 #[tauri::command]
+async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    if st.exp.is_running() {
+        return Err("实验仍在结束，暂不能复位".into());
+    }
+    if !lock(&st.storage)
+        .unfinished_experiments()
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
+        return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
+    }
+    if !st.hub.temp_rx().borrow().is_fresh(Instant::now()) {
+        return Err("温度测量无效，不能复位".into());
+    }
+    st.hub
+        .request_reset_safety()
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let status = ExperimentStatus::idle();
+    st.exp.set_status(status.clone());
+    emit_experiment_status(&app, &status);
+    st.audit.write(
+        &AuditEntry::new(
+            Category::Gas,
+            "reset_safety_interlock",
+            AuditResult::Success,
+        )
+        .operator(user.display_name),
+    );
+    Ok(())
+}
+
+#[tauri::command]
 async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     // Deliberately callable without a session; still attributed, so the trail shows whether
@@ -1534,7 +1570,7 @@ async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
     let operator = audit_operator(&st);
     let authenticated = st.auth.has_active_session(epoch_now());
     st.exp.stop.store(true, Ordering::Relaxed);
-    let result = match st.hub.request_set_atmosphere(SAFETY_ATMOSPHERE).await {
+    let result = match st.hub.request_shutoff_flammable().await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
     };
@@ -1685,6 +1721,10 @@ async fn close_all_valves(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
     let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    app.state::<AppState>()
+        .exp
+        .stop
+        .store(true, Ordering::SeqCst);
     let hub = app.state::<AppState>().hub.clone();
     let result = match hub.request_shutoff_flammable().await {
         Ok(Ok(())) => Ok(()),
@@ -1870,6 +1910,12 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
 
 fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
     let mut blocking = Vec::new();
+    if state.hub.safety_latched() || state.exp.snapshot().phase == Phase::Error {
+        blocking.push(PreflightIssue::blocking(
+            "SAFETY_LATCHED",
+            "保护已锁存；请确认气体测量、设备与数据保存后复位",
+        ));
+    }
     if let Err(message) = validate_experiment_params(params) {
         blocking.push(PreflightIssue::blocking("PARAMS", message));
     }
@@ -2124,7 +2170,7 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
     exp.stop.store(true, Ordering::Relaxed);
     // HARD INVARIANT (docs/05 §5.5): apply the safety atmosphere immediately here too —
     // belt-and-suspenders even if the tick task has already died.
-    let safety_result = match hub.request_set_atmosphere(SAFETY_ATMOSPHERE).await {
+    let safety_result = match hub.request_shutoff_flammable().await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
     };
@@ -3017,6 +3063,7 @@ pub fn run() {
             set_experiment_owner,
             get_public_safety_status,
             emergency_safe_shutdown,
+            reset_safety_interlock,
             get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,

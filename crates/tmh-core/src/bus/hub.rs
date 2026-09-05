@@ -5,6 +5,7 @@
 //! the threads, never on the async runtime. All handles are `Send + Sync` so the
 //! hub can live in Tauri's managed state.
 
+use crate::bus::mfc::SafetyLatch;
 use crate::bus::{
     BalanceActor, BalanceSnapshot, MfcActor, MfcCommand, MfcCommandError, MfcSnapshot, TempActor,
     TempSnapshot,
@@ -36,6 +37,9 @@ impl Default for HubIntervals {
 }
 
 enum MfcReq {
+    Reset {
+        reply: oneshot::Sender<Result<(), MfcCommandError>>,
+    },
     SetFlow {
         gas: usize,
         value: f64,
@@ -55,6 +59,38 @@ enum MfcReq {
     },
 }
 
+impl MfcReq {
+    fn reject(self, error: MfcCommandError) {
+        match self {
+            Self::SetFlow { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::SetAtmosphere { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::SetOnOff { reply, .. } | Self::Shutoff { reply } | Self::Reset { reply } => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+}
+struct QueuedMfc {
+    epoch: u64,
+    req: MfcReq,
+}
+fn dispatch_mfc(mfc: &mut MfcActor, request: QueuedMfc) {
+    let safety = mfc.safety_latch();
+    if request.epoch != safety.epoch() {
+        request.req.reject(MfcCommandError::SafetyLatched);
+        return;
+    }
+    if let MfcReq::Reset { reply } = request.req {
+        let _ = reply.send(mfc.reset_safety(request.epoch));
+        return;
+    }
+    handle_mfc_req(mfc, request.req);
+}
+
 enum BalReq {
     Tare { reply: oneshot::Sender<TareResult> },
 }
@@ -63,6 +99,7 @@ enum BalReq {
 /// loop and the responsive idle wait can dispatch a command the moment it arrives (#5).
 fn handle_mfc_req(mfc: &mut MfcActor, req: MfcReq) {
     match req {
+        MfcReq::Reset { .. } => unreachable!("reset is dispatched with an epoch"),
         MfcReq::SetFlow { gas, value, reply } => {
             let _ = reply.send(mfc.set_flow(gas, value));
         }
@@ -76,9 +113,7 @@ fn handle_mfc_req(mfc: &mut MfcActor, req: MfcReq) {
             let _ = reply.send(mfc.set_atmosphere(values));
         }
         MfcReq::Shutoff { reply } => {
-            let result = mfc
-                .handle_command(&MfcCommand::ShutoffFlammable)
-                .map(|_| ());
+            let result = mfc.apply_protection();
             let _ = reply.send(result);
         }
     }
@@ -91,7 +126,9 @@ pub struct DeviceHub {
     temp_rx: watch::Receiver<TempSnapshot>,
     mfc_rx: watch::Receiver<MfcSnapshot>,
     balance_rx: watch::Receiver<BalanceSnapshot>,
-    mfc_tx: mpsc::UnboundedSender<MfcReq>,
+    safety: Arc<SafetyLatch>,
+    mfc_tx: mpsc::Sender<QueuedMfc>,
+    safety_tx: mpsc::Sender<MfcReq>,
     bal_tx: mpsc::UnboundedSender<BalReq>,
     temp_target_tx: mpsc::UnboundedSender<f64>,
     bal_target_tx: mpsc::UnboundedSender<f64>,
@@ -104,7 +141,9 @@ impl DeviceHub {
         let (temp_tx, temp_rx) = watch::channel(temp.snapshot());
         let (mfc_snap_tx, mfc_rx) = watch::channel(mfc.snapshot());
         let (bal_snap_tx, balance_rx) = watch::channel(balance.snapshot());
-        let (mfc_tx, mfc_cmd_rx) = mpsc::unbounded_channel::<MfcReq>();
+        let safety = mfc.safety_latch();
+        let (mfc_tx, mfc_cmd_rx) = mpsc::channel::<QueuedMfc>(64);
+        let (safety_tx, mut safety_rx) = mpsc::channel::<MfcReq>(8);
         let (bal_tx, bal_cmd_rx) = mpsc::unbounded_channel::<BalReq>();
         let (temp_target_tx, temp_target_rx) = mpsc::unbounded_channel::<f64>();
         let (bal_target_tx, bal_target_rx) = mpsc::unbounded_channel::<f64>();
@@ -139,8 +178,14 @@ impl DeviceHub {
                 let mut mfc = mfc;
                 let mut cmd_rx = mfc_cmd_rx;
                 while !stop.load(Ordering::Relaxed) {
-                    while let Ok(req) = cmd_rx.try_recv() {
-                        handle_mfc_req(&mut mfc, req);
+                    loop {
+                        while let Ok(req) = safety_rx.try_recv() {
+                            handle_mfc_req(&mut mfc, req);
+                        }
+                        match cmd_rx.try_recv() {
+                            Ok(req) => dispatch_mfc(&mut mfc, req),
+                            Err(_) => break,
+                        }
                     }
                     mfc.poll_next(Instant::now());
                     let _ = mfc_snap_tx.send(mfc.snapshot());
@@ -152,10 +197,16 @@ impl DeviceHub {
                     // than waiting a full poll interval (issue #5).
                     let deadline = Instant::now() + iv.mfc;
                     while !stop.load(Ordering::Relaxed) {
-                        while let Ok(req) = cmd_rx.try_recv() {
-                            handle_mfc_req(&mut mfc, req);
-                            let _ = mfc_snap_tx.send(mfc.snapshot());
+                        loop {
+                            while let Ok(req) = safety_rx.try_recv() {
+                                handle_mfc_req(&mut mfc, req);
+                            }
+                            match cmd_rx.try_recv() {
+                                Ok(req) => dispatch_mfc(&mut mfc, req),
+                                Err(_) => break,
+                            }
                         }
+                        let _ = mfc_snap_tx.send(mfc.snapshot());
                         let now = Instant::now();
                         if now >= deadline {
                             break;
@@ -203,6 +254,8 @@ impl DeviceHub {
             temp_rx,
             mfc_rx,
             balance_rx,
+            safety,
+            safety_tx,
             mfc_tx,
             bal_tx,
             temp_target_tx,
@@ -220,6 +273,24 @@ impl DeviceHub {
         self.balance_rx.clone()
     }
 
+    pub fn safety_latched(&self) -> bool {
+        self.safety.is_latched()
+    }
+    pub fn request_reset_safety(&self) -> oneshot::Receiver<Result<(), MfcCommandError>> {
+        let (reply, rx) = oneshot::channel();
+        self.enqueue(MfcReq::Reset { reply });
+        rx
+    }
+    fn enqueue(&self, req: MfcReq) {
+        let request = QueuedMfc {
+            epoch: self.safety.epoch(),
+            req,
+        };
+        if let Err(e) = self.mfc_tx.try_send(request) {
+            e.into_inner().req.reject(MfcCommandError::QueueFull);
+        }
+    }
+
     /// Request a gas setpoint; await the returned receiver for the clamp result.
     pub fn request_set_flow(
         &self,
@@ -227,7 +298,7 @@ impl DeviceHub {
         value: f64,
     ) -> oneshot::Receiver<Result<ClampResult, MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
-        let _ = self.mfc_tx.send(MfcReq::SetFlow { gas, value, reply });
+        self.enqueue(MfcReq::SetFlow { gas, value, reply });
         rx
     }
     pub fn request_set_on_off(
@@ -236,7 +307,7 @@ impl DeviceHub {
         on: bool,
     ) -> oneshot::Receiver<Result<(), MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
-        let _ = self.mfc_tx.send(MfcReq::SetOnOff { gas, on, reply });
+        self.enqueue(MfcReq::SetOnOff { gas, on, reply });
         rx
     }
     /// Apply a four-gas atmosphere and await acknowledgement of every attempted write.
@@ -245,13 +316,16 @@ impl DeviceHub {
         values: [f64; 4],
     ) -> oneshot::Receiver<Result<[ClampResult; 4], MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
-        let _ = self.mfc_tx.send(MfcReq::SetAtmosphere { values, reply });
+        self.enqueue(MfcReq::SetAtmosphere { values, reply });
         rx
     }
     /// Shut off flammable gases (H2/CO2/CO → 0). Never blocked by the clamp.
     pub fn request_shutoff_flammable(&self) -> oneshot::Receiver<Result<(), MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
-        let _ = self.mfc_tx.send(MfcReq::Shutoff { reply });
+        self.safety.trip();
+        if let Err(e) = self.safety_tx.try_send(MfcReq::Shutoff { reply }) {
+            e.into_inner().reject(MfcCommandError::QueueFull);
+        }
         rx
     }
     /// Request a tare; await the returned receiver for the result.

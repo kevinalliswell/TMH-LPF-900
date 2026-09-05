@@ -42,17 +42,40 @@ pub fn build_write(addr: u8, reg: u16, values: &[i64]) -> Vec<u8> {
     frame(addr, "00XWS,", reg, &joined)
 }
 
-/// Parse a device response: STX..ETX content, comma-split, 2nd field / 10.0.
-/// Tolerates any/missing frame tail. `None` on missing STX / field / bad number.
-/// (The per-gas FLOW_SCALING multiply is applied in tmh-core, not here.)
+/// Strict response decoder for the repository's simulated CPL profile. Real device
+/// success/exception codes and write acknowledgement semantics require its manual.
+/// Requires one complete frame, the known header, checksum and CRLF. No NaN,
+/// ambiguous extra fields, truncated tails, or unsolicited frames are accepted.
 pub fn parse_response(buf: &[u8]) -> Option<f64> {
-    let start = buf.iter().position(|&b| b == STX)?;
-    let after = &buf[start + 1..];
-    let content = match after.iter().position(|&b| b == ETX) {
-        Some(e) => &after[..e],
-        None => after,
-    };
-    let s = core::str::from_utf8(content).ok()?;
-    let field = s.split(',').nth(1)?.trim();
-    Some(field.parse::<f64>().ok()? / 10.0)
+    if buf.len() < 15 || buf.len() > 128 || buf.first() != Some(&STX) {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == ETX)?;
+    if end + 5 != buf.len()
+        || &buf[end + 3..] != b"\r\n"
+        || buf[end + 1..end + 3] != cpl_checksum(&buf[..=end])
+    {
+        return None;
+    }
+    let text = core::str::from_utf8(&buf[1..end]).ok()?;
+    let (header, value) = text.split_once(',')?;
+    if header.len() != 7
+        || !header.as_bytes()[..2].iter().all(u8::is_ascii_hexdigit)
+        || &header[2..] != "00X20"
+    {
+        return None;
+    }
+    // This profile uses an integer word in tenths. Reject fractional, exponential
+    // and nonfinite values instead of letting a float comparison acknowledge them.
+    let value = value.parse::<i64>().ok()? as f64 / 10.0;
+    value.is_finite().then_some(value)
+}
+
+/// Match the addressed response to a new request; permit only an exact local echo
+/// followed by a valid response. An echo alone never confirms a write.
+pub fn parse_transaction(buf: &[u8], request: &[u8], address: u8) -> Option<f64> {
+    let response = buf.strip_prefix(request).unwrap_or(buf);
+    let value = parse_response(response)?;
+    let actual = u8::from_str_radix(core::str::from_utf8(&response[1..3]).ok()?, 16).ok()?;
+    (actual == address).then_some(value)
 }

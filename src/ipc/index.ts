@@ -59,6 +59,7 @@ import {
   mockSetFlow,
   mockSetOnOff,
   mockShutoff,
+  mockResetSafety,
   mockSkipStage,
   mockStartExperiment,
   mockStopExperiment,
@@ -478,4 +479,9 @@ export async function saveReportDetails(
 ): Promise<void> {
   if (isTauri()) await invoke("save_report_details", { id, details });
   else mockSaveReportDetails(id, details);
+}
+
+export async function resetSafetyInterlock(): Promise<void> {
+  if (isTauri()) await invoke("reset_safety_interlock");
+  else mockResetSafety();
 }

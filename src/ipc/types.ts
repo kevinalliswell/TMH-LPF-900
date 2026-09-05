@@ -9,6 +9,7 @@ export interface GasReading {
 }
 
 export interface DeviceHealth {
+  safety_latched?: boolean;
   temp_valid?: boolean;
   mfc_valid?: boolean;
   balance_valid?: boolean;
