@@ -43,6 +43,9 @@ export interface TestGroupRevision {
 
 export interface ProcessAssessment {
   version: string;
+  // Older frozen summaries omit these; missing/null means unknown, not complete/zero.
+  data_complete?: boolean | null;
+  dropped_samples?: number | null;
   unassigned_points: number;
   method_conformity: string;
   stages: {

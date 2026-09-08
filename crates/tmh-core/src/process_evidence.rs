@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const VERSION: &str = "PROCESS-EVIDENCE-2026-09-08.1";
+pub const VERSION: &str = "PROCESS-EVIDENCE-2026-09-09.1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageEvidence {
     pub index: usize,
@@ -31,6 +31,12 @@ pub struct StageEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessAssessment {
     pub version: String,
+    /// Recorded persistence status, not a conclusion inferred from surviving rows.
+    #[serde(default)]
+    pub data_complete: Option<bool>,
+    /// Known buffer discards; recovery/legacy records may not know the count.
+    #[serde(default)]
+    pub dropped_samples: Option<u64>,
     pub unassigned_points: usize,
     pub stages: Vec<StageEvidence>,
     pub method_conformity: String,
@@ -289,6 +295,8 @@ pub fn assess(program: &Program, samples: &[SampleRow], runtime: &Value) -> Proc
         .collect();
     ProcessAssessment {
         version: VERSION.into(),
+        data_complete: runtime["data_complete"].as_bool(),
+        dropped_samples: runtime["dropped_samples"].as_u64(),
         unassigned_points,
         stages,
         method_conformity: "not_determined".into(),
@@ -312,6 +320,24 @@ pub fn render(assessment: &ProcessAssessment) -> String {
             .map(|v| format!("{v:.2} s"))
             .unwrap_or_else(|| "缺失".into())
     }
+    let completeness = match assessment.data_complete {
+        Some(false) => "运行记录明确标记数据不完整",
+        Some(true) if assessment.dropped_samples.is_some_and(|count| count > 0) => {
+            "完整性标记与已知丢样相互冲突，不能按完整数据解释"
+        }
+        Some(true) => "运行记录标记数据完整；该标记不能替代全过程核查",
+        None => "数据完整性未知：运行记录未提供有效标记，不能确认完整",
+    };
+    let loss = match assessment.dropped_samples {
+        Some(0) => "已记录丢样：0 条；仅表示未记录缓冲丢弃，不证明全过程无缺测".into(),
+        Some(count) => format!("已知丢样：{count} 条；这是缓冲丢弃计数，缺失记录不能按阶段补齐"),
+        None => "丢样数量未知：未记录有效计数，不能按 0 条解释".into(),
+    };
+    let integrity = format!(
+        "<p><strong>数据完整性：</strong>{}。{}。</p>",
+        esc(completeness),
+        esc(&loss)
+    );
     let mut rows = String::new();
     for stage in &assessment.stages {
         let gas = stage
@@ -367,7 +393,7 @@ pub fn render(assessment: &ProcessAssessment) -> String {
         }
         rows.push_str("</tr>");
     }
-    format!("<p>记录核查版本：{}。未能归属阶段的采样：{} 条。T8 测点对应、设备校准、气体纯度/标态和外部操作仍需实验室复核；该摘要不能证明国标方法完全符合。</p><table class=\"kv3\"><thead><tr><th>阶段</th><th>采样证据</th><th>温度范围</th><th>计时</th><th>气体 PV 范围（L/min）</th><th>缺项与记录提示</th></tr></thead><tbody>{}</tbody></table><p>连续稳定计时来自控制过程记录；采样最大间隔和升温估计只覆盖已保存记录。气体设定按本次配置分辨率核对，PV 允差不由软件推测。动态或人工阶段的要求时长为 0，表示由条件/人工操作推进。</p>",esc(&assessment.version),assessment.unassigned_points,rows)
+    format!("<p>记录核查版本：{}。未能归属阶段的采样：{} 条。T8 测点对应、设备校准、气体纯度/标态和外部操作仍需实验室复核；该摘要不能证明国标方法完全符合。</p>{integrity}<table class=\"kv3\"><thead><tr><th>阶段</th><th>采样证据</th><th>温度范围</th><th>计时</th><th>气体 PV 范围（L/min）</th><th>缺项与记录提示</th></tr></thead><tbody>{}</tbody></table><p>连续稳定计时来自控制过程记录；采样最大间隔和升温估计只覆盖已保存记录。气体设定按本次配置分辨率核对，PV 允差不由软件推测。动态或人工阶段的要求时长为 0，表示由条件/人工操作推进。</p>",esc(&assessment.version),assessment.unassigned_points,rows)
 }
 
 /// Missing or invalid legacy program snapshots cannot support a stage assessment.
