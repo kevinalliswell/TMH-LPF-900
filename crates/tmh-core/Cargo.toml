@@ -12,6 +12,7 @@ description = "Core control plane: bus actors, safety clamp, sampler, storage, a
 serial = ["dep:serialport"]
 
 [dependencies]
+num-bigint = "0.5.1"
 thiserror.workspace = true
 tmh-protocols = { path = "../tmh-protocols" }
 serde = { workspace = true }
