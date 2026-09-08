@@ -46,3 +46,42 @@ fn upgrading_a_legacy_program_preserves_the_exact_unversioned_json() {
     assert_eq!(history.len(), 2);
     assert_eq!(history[1], old);
 }
+
+#[test]
+fn legacy_edits_between_migration_and_version_one_are_all_retained() {
+    let path =
+        std::env::temp_dir().join(format!("tmh_legacy_{}.db", tmh_core::auth::new_user_id()));
+    let db = Storage::open(&path).unwrap();
+    let mut p = standard_program("REDUCIBILITY").unwrap();
+    p.id = "custom-migrated".into();
+    p.source = ProgramSource::Custom;
+    let before = serde_json::to_string(&p).unwrap();
+    db.save_custom_program(&p.id, &before).unwrap();
+    drop(db);
+    let old = rusqlite::Connection::open(&path).unwrap();
+    old.execute_batch("DROP TABLE custom_program_revisions; PRAGMA user_version=6;")
+        .unwrap();
+    drop(old);
+    let mut db = Storage::open(&path).unwrap();
+    p.stages[2].target_temp = 850.0;
+    let current = serde_json::to_string(&p).unwrap();
+    db.save_custom_program(&p.id, &current).unwrap();
+    let versioned =
+        prepare_custom_revision(p.clone(), Some(&p), editor(), "Version the edited program")
+            .unwrap();
+    db.save_custom_program_revision(&versioned, Some(&current))
+        .unwrap();
+    let history = db.custom_program_revisions(&p.id).unwrap();
+    assert_eq!(
+        history,
+        vec![
+            serde_json::to_string(&versioned).unwrap(),
+            current,
+            before.clone()
+        ]
+    );
+    assert!(db.save_custom_program(&p.id, &before).is_err());
+    assert_eq!(db.custom_program_revisions(&p.id).unwrap(), history);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}

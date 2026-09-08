@@ -174,6 +174,16 @@ fn insert_sample_rows(conn: &Connection, rows: &[SampleRow]) -> Result<()> {
     Ok(())
 }
 
+/// NULL means no authenticated revision number. Row ids preserve the order of
+/// legacy edits without inventing authors, dates or formal revision numbers.
+fn retain_unversioned_program(conn: &Connection, id: &str, json: &str) -> Result<()> {
+    let latest: Option<String> = conn.query_row("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY id DESC LIMIT 1", [id], |r| r.get(0)).optional()?;
+    if latest.as_deref() != Some(json) {
+        conn.execute("INSERT INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,NULL,?2)", params![id, json])?;
+    }
+    Ok(())
+}
+
 /// Owns the SQLite connection. Single-writer by construction — hold one and route
 /// all writes through it (docs/03).
 pub struct Storage {
@@ -252,10 +262,11 @@ impl Storage {
             let tx = conn.transaction()?;
             tx.execute_batch(
                 "CREATE TABLE custom_program_revisions (
-                program_id TEXT NOT NULL, revision INTEGER NOT NULL,
-                program_json TEXT NOT NULL, PRIMARY KEY(program_id, revision));
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                program_id TEXT NOT NULL, revision INTEGER CHECK(revision > 0),
+                program_json TEXT NOT NULL, UNIQUE(program_id, revision));
                 INSERT INTO custom_program_revisions(program_id, revision, program_json)
-                SELECT id, 0, program_json FROM custom_programs;",
+                SELECT id, NULL, program_json FROM custom_programs;",
             )?;
             tx.pragma_update(None, "user_version", 7)?;
             tx.commit()?;
@@ -334,7 +345,14 @@ impl Storage {
                     .unwrap_or(0);
                 let previous_revision =
                     i64::try_from(previous_revision).map_err(|_| StorageError::ProgramConflict)?;
-                tx.execute("INSERT OR IGNORE INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,?2,?3)", params![program.id, previous_revision, raw])?;
+                if previous_revision == 0 {
+                    retain_unversioned_program(&tx, &program.id, raw)?;
+                } else {
+                    let stored: Option<String> = tx.query_row("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 AND revision=?2", params![program.id, previous_revision], |r| r.get(0)).optional()?;
+                    if stored.as_deref() != Some(raw) {
+                        return Err(StorageError::ProgramConflict);
+                    }
+                }
                 previous_revision
             }
             None => {
@@ -359,15 +377,34 @@ impl Storage {
     }
 
     pub fn custom_program_revisions(&self, id: &str) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY revision DESC")?;
+        let mut statement = self.conn.prepare("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY id DESC")?;
         let rows = statement
             .query_map([id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
+    /// Compatibility for unversioned imports and the older IPC. It cannot rewrite
+    /// a versioned program; every intervening legacy edit is preserved atomically.
     pub fn save_custom_program(&self, id: &str, json: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![id, json])?;
+        let tx = self.conn.unchecked_transaction()?;
+        let versioned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM custom_program_revisions WHERE program_id=?1 AND revision IS NOT NULL)", [id], |r| r.get(0))?;
+        if versioned {
+            return Err(StorageError::ProgramConflict);
+        }
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = current {
+            retain_unversioned_program(&tx, id, &raw)?;
+        }
+        retain_unversioned_program(&tx, id, json)?;
+        tx.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![id, json])?;
+        tx.commit()?;
         Ok(())
     }
 

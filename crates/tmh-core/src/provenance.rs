@@ -148,7 +148,11 @@ pub fn condition_changes(
 pub fn validate_executable_program(program: &Program) -> Result<(), String> {
     validate_program(program)?;
     if program.source == ProgramSource::Standard {
-        return Ok(());
+        return if standard_program(&program.id).as_ref() == Some(program) {
+            Ok(())
+        } else {
+            Err("标准程序与当前内置模板不一致，不能作为国标程序执行".into())
+        };
     }
     let provenance = program
         .provenance
