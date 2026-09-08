@@ -687,8 +687,11 @@ fn flush(
     buffer: &mut SampleBuffer,
     id: &str,
     operator: &str,
+    completing: bool,
 ) {
-    if buffer.rows.is_empty() {
+    // The terminal batch belongs to commit_completion, including when this tick
+    // happens to reach the normal periodic flush boundary.
+    if completing || buffer.rows.is_empty() {
         return;
     }
     let outcome = lock(storage).insert_samples(&buffer.rows);
@@ -1103,7 +1106,14 @@ fn spawn_experiment_task(
             }
 
             if samples_since_flush >= FLUSH_EVERY_SAMPLES {
-                flush(&storage, &audit, &mut buffer, &id, &owner_display_name);
+                flush(
+                    &storage,
+                    &audit,
+                    &mut buffer,
+                    &id,
+                    &owner_display_name,
+                    result.completed,
+                );
                 samples_since_flush = 0;
                 if buffer.consecutive_failures > 0 {
                     finalize(

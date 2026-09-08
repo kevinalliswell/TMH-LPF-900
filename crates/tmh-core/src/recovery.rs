@@ -60,14 +60,46 @@ pub fn persist(dir: &Path, completion: &RunCompletion) -> Result<PathBuf, String
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.json", completion.token));
     let bytes = serde_json::to_vec(completion).map_err(|e| e.to_string())?;
+    // A recovery payload must be readable before it can be advertised as durable.
+    serde_json::from_slice::<RunCompletion>(&bytes).map_err(|e| e.to_string())?;
     if path.exists() {
         return if std::fs::read(&path).map_err(|e| e.to_string())? == bytes {
+            sync_directory(dir)?;
             Ok(path)
         } else {
             Err("conflicting pending recovery file".into())
         };
     }
     let temporary = dir.join(format!("{}.tmp", completion.token));
+    if temporary.exists() {
+        let previous = std::fs::read(&temporary).map_err(|e| e.to_string())?;
+        match serde_json::from_slice::<RunCompletion>(&previous) {
+            Ok(existing) => {
+                if serde_json::to_vec(&existing).map_err(|e| e.to_string())? != bytes {
+                    return Err("conflicting temporary recovery file".into());
+                }
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&temporary)
+                    .and_then(|f| f.sync_all())
+                    .map_err(|e| e.to_string())?;
+                std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+                sync_directory(dir)?;
+                return Ok(path);
+            }
+            Err(_) => {
+                // A disk-full write can leave our own incomplete temp file.
+                // Preserve it for inspection without blocking a new complete copy.
+                let partial = dir.join(format!(
+                    "{}-{}.partial",
+                    completion.token,
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::rename(&temporary, partial).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -77,11 +109,16 @@ pub fn persist(dir: &Path, completion: &RunCompletion) -> Result<PathBuf, String
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    sync_directory(dir)?;
+    Ok(path)
+}
+
+fn sync_directory(_dir: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    std::fs::File::open(dir)
+    std::fs::File::open(_dir)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
-    Ok(path)
+    Ok(())
 }
 
 pub fn scan(dir: &Path) -> RecoveryScan {

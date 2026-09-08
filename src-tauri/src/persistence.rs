@@ -104,6 +104,9 @@ pub(super) fn retry_pending_completions(
     }
     let mut failed = Vec::new();
     for item in pending.drain(..) {
+        // The first failure may have left only an in-memory copy. If the disk
+        // has recovered, protect that copy before another database attempt.
+        let journal = recovery::persist(dir, &item);
         match storage.commit_completion(&item) {
             Ok(()) => {
                 if let Err(e) = recovery::clear(dir, &item.token) {
@@ -119,6 +122,9 @@ pub(super) fn retry_pending_completions(
             }
             Err(e) => {
                 errors.push(e.to_string());
+                if let Err(e) = journal {
+                    errors.push(format!("恢复文件写入失败：{e}"));
+                }
                 failed.push(item);
             }
         }

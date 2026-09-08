@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn terminal_tick_retains_the_full_batch_for_the_completion_transaction() {
+    let (dir, db, completion) = fixture();
+    let storage = Arc::new(Mutex::new(db));
+    let audit = AuditLog::new(dir.join("logs"));
+    let mut buffer = SampleBuffer {
+        rows: vec![completion.rows[0].clone(); FLUSH_EVERY_SAMPLES as usize],
+        ..SampleBuffer::default()
+    };
+    flush(&storage, &audit, &mut buffer, "run-1", "qa", true);
+    assert_eq!(
+        buffer.rows.len(),
+        5,
+        "terminal rows must stay in the atomic final commit"
+    );
+    assert_eq!(lock(&storage).count_samples("run-1").unwrap(), 0);
+    // The same non-terminal batch still flushes on the ordinary schedule.
+    flush(&storage, &audit, &mut buffer, "run-1", "qa", false);
+    assert!(buffer.rows.is_empty());
+    assert_eq!(lock(&storage).count_samples("run-1").unwrap(), 5);
+    drop(storage);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn fixture() -> (PathBuf, Storage, RunCompletion) {
     let dir = std::env::temp_dir().join(format!("tmh_recovery_{}", tmh_core::auth::new_user_id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -165,4 +189,43 @@ fn update_lease_blocks_start_and_releases_after_failure() {
     assert!(!state.exp.snapshot().updating);
     lock(&state.exp.pending).push(fixture().2);
     assert!(UpdateLease::begin(state.exp.clone()).is_err());
+}
+
+#[test]
+fn memory_only_completion_is_journaled_when_disk_recovers_before_database() {
+    let (dir, db, completion) = fixture();
+    let journal = dir.join("pending");
+    let exp = ExpControl::new();
+    lock(&exp.pending).push(completion.clone());
+    let mut unavailable = Storage::open_in_memory().unwrap();
+    assert!(retry_pending_completions(&mut unavailable, &exp, &journal).is_err());
+    assert_eq!(lock(&exp.pending).len(), 1);
+    let disk = recovery::scan(&journal);
+    assert_eq!(
+        disk.pending.len(),
+        1,
+        "recovered disk must protect memory-only data even while DB still fails"
+    );
+    assert_eq!(disk.pending[0].1.token, completion.token);
+    drop(db);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn memory_only_completion_can_recover_after_a_partial_journal_write() {
+    let (dir, db, completion) = fixture();
+    let journal = dir.join("pending");
+    std::fs::create_dir_all(&journal).unwrap();
+    std::fs::write(journal.join(format!("{}.tmp", completion.token)), b"{").unwrap();
+    let exp = ExpControl::new();
+    lock(&exp.pending).push(completion);
+    let mut unavailable = Storage::open_in_memory().unwrap();
+    assert!(retry_pending_completions(&mut unavailable, &exp, &journal).is_err());
+    assert_eq!(
+        recovery::scan(&journal).pending.len(),
+        1,
+        "partial temp file must not prevent a durable retry"
+    );
+    drop(db);
+    std::fs::remove_dir_all(dir).unwrap();
 }
