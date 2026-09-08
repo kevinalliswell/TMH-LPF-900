@@ -89,7 +89,14 @@ fn prepare(
         let analysis_revision_id = db
             .current_analysis_revision_id(&row.experiment_id)
             .map_err(|e| e.to_string())?;
+        let process_assessment = tmh_core::process_evidence::from_record(
+            &row,
+            &db.get_samples(&row.experiment_id, 0)
+                .map_err(|e| e.to_string())?,
+            &runtime,
+        );
         trials.push(FrozenTrial {
+            process_assessment,
             experiment: row,
             runtime,
             analysis_revision_id,

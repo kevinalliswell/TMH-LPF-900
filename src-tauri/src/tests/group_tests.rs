@@ -129,6 +129,17 @@ fn native_groups_enforce_session_ownership_and_record_the_actual_actor() {
     )
     .unwrap();
     assert_eq!(first.revision, 1);
+    assert_eq!(
+        first.snapshot["trials"][0]["process_assessment"]["version"],
+        tmh_core::process_evidence::VERSION
+    );
+    assert!(
+        first.snapshot["trials"][0]["process_assessment"]["stages"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 2
+    );
     assert_eq!(first.owner_user_id, alice_id);
     assert_eq!(first.recorded_by_user_id, alice_id);
     assert_eq!(
