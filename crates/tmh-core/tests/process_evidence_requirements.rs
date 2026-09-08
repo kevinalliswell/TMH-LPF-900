@@ -371,3 +371,76 @@ fn an_unrepresentable_required_duration_keeps_the_frozen_assessment_json_readabl
         serde_json::from_value(encoded).unwrap();
     assert!(optional.is_some());
 }
+
+#[test]
+fn known_dropped_samples_remain_visible_when_the_surviving_stage_records_have_no_gaps() {
+    let mut program = standard_program("FREE_SWELLING").unwrap();
+    program.stages = vec![program.stages[2].clone()];
+    let rows = [point(&program, 0, 900.0, 3600.0, 3600.0)];
+    let mut metadata = runtime();
+    metadata["data_complete"] = json!(false);
+    metadata["dropped_samples"] = json!(7);
+    let assessment = assess(&program, &rows, &metadata);
+    assert!(assessment.stages[0].notes.is_empty());
+    assert_eq!(assessment.unassigned_points, 0);
+    let frozen = serde_json::to_value(&assessment).unwrap();
+    assert_eq!(frozen["data_complete"], false);
+    assert_eq!(frozen["dropped_samples"], 7);
+    let restored: tmh_core::process_evidence::ProcessAssessment =
+        serde_json::from_value(frozen).unwrap();
+    let html = tmh_core::process_evidence::render(&restored);
+    assert!(html.contains("数据不完整"));
+    assert!(html.contains("已知丢样：7 条"));
+    assert_eq!(restored.method_conformity, "not_determined");
+}
+
+#[test]
+fn a_complete_marker_does_not_override_a_positive_dropped_sample_count() {
+    let program = standard_program("FREE_SWELLING").unwrap();
+    let mut metadata = runtime();
+    metadata["data_complete"] = json!(true);
+    metadata["dropped_samples"] = json!(12);
+    let assessment = assess(&program, &[], &metadata);
+    let frozen = serde_json::to_value(&assessment).unwrap();
+    assert_eq!(
+        frozen["data_complete"], true,
+        "preserve the recorded marker as evidence"
+    );
+    assert_eq!(frozen["dropped_samples"], 12);
+    let html = tmh_core::process_evidence::render(&assessment);
+    assert!(html.contains("相互冲突"));
+    assert!(html.contains("已知丢样：12 条"));
+}
+
+#[test]
+fn missing_or_invalid_integrity_fields_stay_unknown_in_new_and_legacy_assessments() {
+    let program = standard_program("FREE_SWELLING").unwrap();
+    for metadata in [
+        json!({}),
+        json!({"data_complete":"true","dropped_samples":-1}),
+        json!({"data_complete":1,"dropped_samples":1.5}),
+        json!({"data_complete":null,"dropped_samples":"0"}),
+    ] {
+        let assessment = assess(&program, &[], &metadata);
+        let html = tmh_core::process_evidence::render(&assessment);
+        assert!(html.contains("数据完整性未知"));
+        assert!(html.contains("丢样数量未知"));
+    }
+    // Crash recovery records data_complete=false without inventing a lost count.
+    let recovered = assess(&program, &[], &json!({"data_complete":false}));
+    let html = tmh_core::process_evidence::render(&recovered);
+    assert!(html.contains("数据不完整"));
+    assert!(html.contains("丢样数量未知"));
+
+    let mut legacy = serde_json::to_value(assess(&program, &[], &runtime())).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("data_complete");
+    object.remove("dropped_samples");
+    object.insert("version".into(), json!("PROCESS-EVIDENCE-2026-09-08.1"));
+    let restored: tmh_core::process_evidence::ProcessAssessment =
+        serde_json::from_value(legacy).expect("older frozen group summaries remain readable");
+    assert_eq!(restored.version, "PROCESS-EVIDENCE-2026-09-08.1");
+    let html = tmh_core::process_evidence::render(&restored);
+    assert!(html.contains("数据完整性未知"));
+    assert!(html.contains("丢样数量未知"));
+}
