@@ -485,3 +485,23 @@ export async function resetSafetyInterlock(): Promise<void> {
   if (isTauri()) await invoke("reset_safety_interlock");
   else mockResetSafety();
 }
+
+export async function retryPendingSave(): Promise<void> {
+  if (!isTauri())
+    throw new Error("浏览器预览没有本地数据库，请在桌面应用中重试保存");
+  await invoke("retry_pending_save");
+}
+
+export function subscribeAppNotices(cb: (message: string) => void): () => void {
+  if (!isTauri()) return () => {};
+  let cancelled = false;
+  let unlisten: (() => void) | undefined;
+  void listen<string>("app-notice", (e) => cb(e.payload)).then((stop) => {
+    if (cancelled) stop();
+    else unlisten = stop;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}

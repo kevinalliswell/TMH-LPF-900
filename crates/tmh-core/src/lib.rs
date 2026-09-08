@@ -37,3 +37,5 @@ mod tests {
         assert_eq!(err.to_string(), "device offline: temp");
     }
 }
+
+pub mod recovery;
