@@ -274,3 +274,19 @@ fn execution_limits_include_absolute_ceiling_and_wire_resolution() {
     assert!(validate_flow_resolution(&program, steps).is_ok());
     assert!(validate_flow_resolution(&program, [0.0; 4]).is_err());
 }
+
+#[test]
+fn declaring_standard_source_cannot_bypass_the_bundled_template() {
+    use tmh_core::provenance::validate_executable_program;
+    let standard = standard_program("REDUCIBILITY").unwrap();
+    assert!(validate_executable_program(&standard).is_ok());
+    let mut forged = standard.clone();
+    forged.stages[2].target_temp = 850.0;
+    assert!(validate_executable_program(&forged).is_err());
+    forged = standard.clone();
+    forged.id = "custom-disguised".into();
+    assert!(validate_executable_program(&forged).is_err());
+    forged = standard;
+    forged.template_revision = Some("outdated".into());
+    assert!(validate_executable_program(&forged).is_err());
+}
