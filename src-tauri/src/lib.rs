@@ -11,6 +11,7 @@ use tmh_core::storage::RunCompletion;
 mod auth_service;
 mod auth_session;
 mod custom_programs;
+mod groups;
 mod persistence;
 mod procedure;
 use persistence::recover_unfinished;
@@ -2296,6 +2297,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     validate_executable_program(&program)?;
 
     let now = iso_now();
+    let started_at_utc = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let id = format!("exp-{}", tmh_core::auth::new_user_id());
     let row = ExperimentRow {
         experiment_id: id.clone(),
@@ -2323,7 +2325,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         .patch_runtime_metadata(
             &id,
             &serde_json::json!({
-                "schema_version":1,"outcome":"running","device_mode":st.mode,
+                "schema_version":1,"outcome":"running","device_mode":st.mode,"started_at_utc":started_at_utc,
                 "sample_interval_s":st.cadence.sampling.as_secs_f64()*st.sim_speed,
                 "calculation_version":CALCULATION_VERSION,
                 "gas_safety_limits":{"h2":st.limit_h2,"co":st.limit_co,"flow_steps":st.flow_steps}
@@ -3001,6 +3003,45 @@ fn save_report_details(
     Ok(())
 }
 
+// ---- Repeat-test groups ---------------------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+fn preview_test_group(
+    state: State<'_, AppState>,
+    request: groups::GroupRequest,
+) -> Result<groups::GroupSnapshot, String> {
+    groups::preview(&state, request)
+}
+#[tauri::command(rename_all = "snake_case")]
+fn save_test_group(
+    state: State<'_, AppState>,
+    request: groups::GroupRequest,
+) -> Result<tmh_core::storage::TestGroupRevision, String> {
+    groups::save(&state, request)
+}
+#[tauri::command(rename_all = "snake_case")]
+fn list_test_groups(
+    state: State<'_, AppState>,
+    offset: u32,
+) -> Result<Vec<tmh_core::storage::TestGroupRevision>, String> {
+    groups::list(&state, offset)
+}
+#[tauri::command(rename_all = "snake_case")]
+fn get_test_group(
+    state: State<'_, AppState>,
+    id: String,
+    revision: Option<u64>,
+) -> Result<tmh_core::storage::TestGroupRevision, String> {
+    groups::get(&state, &id, revision)
+}
+#[tauri::command(rename_all = "snake_case")]
+fn generate_test_group_report(app: AppHandle, id: String, revision: u64) -> Result<String, String> {
+    let path = groups::export_report(&app.state::<AppState>(), &id, revision)?;
+    app.opener()
+        .open_path(path.clone(), None::<&str>)
+        .map_err(|e| format!("报告已保存到 {path}，但打开失败：{e}"))?;
+    Ok(path)
+}
+
 // ---- Report & export --------------------------------------------------------
 
 /// The reducing-stage target temperature for a mode (for report condition checks).
@@ -3444,6 +3485,11 @@ pub fn run() {
             analyze_gb13241,
             analyze_gb13242,
             analyze_gb13240,
+            preview_test_group,
+            save_test_group,
+            list_test_groups,
+            get_test_group,
+            generate_test_group_report,
             generate_report,
             save_report_details,
             export_experiment,
@@ -3466,6 +3512,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use tmh_core::auth::UserRole;
+    mod group_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
     /// below (`current_user`, `current_admin`, `authorize_experiment`,

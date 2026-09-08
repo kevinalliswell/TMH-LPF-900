@@ -72,6 +72,32 @@ import {
 } from "./mock";
 
 export * from "./types";
+export * from "./groupTypes";
+import type { GroupRequest, GroupSnapshot, TestGroupRevision } from "./groupTypes";
+
+function requireGroupDatabase(): void {
+  if (!isTauri()) throw new Error("检验组需要桌面应用的实验数据库，请在桌面应用中使用此功能");
+}
+export async function previewTestGroup(request: GroupRequest): Promise<GroupSnapshot> {
+  requireGroupDatabase();
+  return invoke("preview_test_group", { request });
+}
+export async function saveTestGroup(request: GroupRequest): Promise<TestGroupRevision> {
+  requireGroupDatabase();
+  return invoke("save_test_group", { request });
+}
+export async function listTestGroups(offset = 0): Promise<TestGroupRevision[]> {
+  requireGroupDatabase();
+  return invoke("list_test_groups", { offset });
+}
+export async function getTestGroup(id: string, revision: number | null = null): Promise<TestGroupRevision> {
+  requireGroupDatabase();
+  return invoke("get_test_group", { id, revision });
+}
+export async function generateTestGroupReport(id: string, revision: number): Promise<string> {
+  requireGroupDatabase();
+  return invoke("generate_test_group_report", { id, revision });
+}
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
