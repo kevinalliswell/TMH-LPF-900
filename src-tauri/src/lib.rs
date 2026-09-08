@@ -2893,7 +2893,17 @@ fn calculate_reduction(
                 .ok_or("人工速率曲线须按时间递增并覆盖 30% 与 60%、55% 或 50% 还原度")?,
         )
     } else {
-        reduction_rate(&points)
+        // A delayed transition sample can bracket the endpoint, but thresholds
+        // reached after the programmed hold must not affect this result.
+        let mut bounded: Vec<_> = points
+            .iter()
+            .copied()
+            .filter(|(t, _)| *t < endpoint_min)
+            .collect();
+        if let Some(value) = value_at(&points, endpoint_min) {
+            bounded.push((endpoint_min, value));
+        }
+        reduction_rate(&bounded)
     };
     let mut value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
       "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"endpoint_min":endpoint_min,
@@ -4163,6 +4173,66 @@ mod tests {
         load_comm_config()
             .validate()
             .expect("fallback config valid");
+    }
+    // Insert into src-tauri/src/lib.rs's existing `tests` module.
+    // The stage-transition sample may arrive after the configured endpoint. It is
+    // useful for interpolation at that endpoint, but later threshold crossings must
+    // not change the rate calculation for the completed program.
+    #[test]
+    fn automatic_reduction_rate_uses_only_the_saved_program_endpoint() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        let mut experiment = lock(&state.storage)
+            .list_experiments()
+            .unwrap()
+            .pop()
+            .unwrap();
+        experiment.sample_weight = 100.0;
+        let mut program = standard_program("REDUCIBILITY").unwrap();
+        program.id = "custom-ten-minute-rate".into();
+        program.source = ProgramSource::Custom;
+        program.stages[2].duration_min = 10.0;
+        experiment.program_snapshot_json = Some(serde_json::to_string(&program).unwrap());
+
+        // Include a point below 30% so the threshold is interpolated even if finite
+        // mass arithmetic returns a value infinitesimally above exactly 30%.
+        let samples: Vec<SampleRow> = [(0.0, 0.0), (1.0, 30.0), (9.0, 55.0), (11.0, 60.0)]
+            .into_iter()
+            .map(|(minutes, rt)| {
+                let mass = 100.0 - rt * 0.215;
+                let mut sample = row("REDUCING", 0, mass, false);
+                sample.experiment_id = experiment.experiment_id.clone();
+                sample.record_json = Some(
+                    serde_json::json!({
+                        "stage_elapsed_s": minutes * 60.0,
+                        "telemetry": {"health": {
+                            "balance_valid": true,
+                            "temp_valid": true,
+                            "mfc_valid": true
+                        }}
+                    })
+                    .to_string(),
+                );
+                sample
+            })
+            .collect();
+        let input: ReductionInput =
+            serde_json::from_value(serde_json::json!({"w1": 0.0, "w2": 50.0})).unwrap();
+        let metadata = serde_json::json!({
+            "reduction_m1": 100.0,
+            "sample_interval_s": 600.0
+        });
+
+        let result = calculate_reduction(&experiment, &samples, &metadata, &input).unwrap();
+        assert_eq!(result["endpoint_min"], 10.0);
+        assert_eq!(result["manual_used"], false);
+        assert!((result["rt"].as_f64().unwrap() - 57.5).abs() < 1e-10);
+        assert_eq!(
+            result["rate_evidence"]["endpoint_percent"], 55.0,
+            "60% is first reached after the program ends; the rate must use its 55% fallback"
+        );
+        assert!((result["rate_evidence"]["endpoint_min"].as_f64().unwrap() - 9.0).abs() < 1e-10);
+        assert!((result["reduction_rate_index"].as_f64().unwrap() - 26.5 / 8.0).abs() < 1e-10);
     }
     #[test]
     fn a_custom_reduction_uses_its_saved_endpoint_and_never_calls_it_r180() {
