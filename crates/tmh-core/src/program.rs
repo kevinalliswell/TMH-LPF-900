@@ -108,6 +108,13 @@ pub fn validate_program(program: &Program) -> Result<(), String> {
         if !stage.duration_min.is_finite() || stage.duration_min < 0.0 {
             return Err(format!("第 {n} 阶段时长必须为非负数"));
         }
+        let timed = matches!(
+            stage.kind,
+            StageKind::Stabilizing | StageKind::Reducing | StageKind::Purging
+        );
+        if (timed && stage.duration_min <= 0.0) || (!timed && stage.duration_min != 0.0) {
+            return Err(format!("第 {n} 阶段的类型与时长不匹配：恒温、还原、吹扫须为正时长，升温、冷却、人工确认时长须为 0"));
+        }
         if !stage.ramp_rate.is_finite() {
             return Err(format!("第 {n} 阶段升温率无效"));
         }

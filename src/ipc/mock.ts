@@ -1,3 +1,4 @@
+import { validStageDuration } from "./programRules";
 import standardPrograms from "../../config/standard_programs.json";
 // Browser-only synthetic engine (docs/08 dual-mode). Mirrors the Rust backend closely
 // enough that `pnpm dev:web` / the preview renders a faithful M4 demo without Tauri:
@@ -334,6 +335,8 @@ export function mockStartExperiment(p: ExperimentParams): string {
   if (experiment.running) throw new Error("实验已在运行");
   const program = mockListPrograms().find((pr) => pr.id === p.experiment_type);
   if (!program) throw new Error("未知实验模式");
+  if (program.stages.some((s) => !validStageDuration(s)))
+    throw new Error("阶段类型与时长不匹配");
 
   const id = `exp-${Date.now()}`;
   const started = new Date().toISOString();
@@ -849,6 +852,8 @@ function modeAdmin(): void {
 }
 export function mockSaveCustomProgram(program: ProgramDto): ProgramDto {
   modeAdmin();
+  if (program.stages.some((s) => !validStageDuration(s)))
+    throw new Error("阶段类型与时长不匹配");
   if (PROGRAMS.some((p) => p.id === program.id))
     throw new Error("标准模式不可覆盖");
   const p = structuredClone(program);
@@ -920,6 +925,11 @@ export function mockPreflightExperiment(
     });
   if (!program?.enabled)
     blocking.push({ code: "PROGRAM", message_zh: "实验模式不可用" });
+  if (program?.stages.some((s) => !validStageDuration(s)))
+    blocking.push({
+      code: "PROGRAM_INVALID",
+      message_zh: "阶段类型与时长不匹配，请明确修改后保存",
+    });
   return { ok: !blocking.length, blocking, warnings: [], program };
 }
 

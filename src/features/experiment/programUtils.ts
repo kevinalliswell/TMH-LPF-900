@@ -1,3 +1,4 @@
+import { validStageDuration } from "../../ipc/programRules";
 import type {
   GasLimits,
   ProgramDto,
@@ -185,6 +186,10 @@ export function validateProgramDraft(
       errors.push(`第 ${n} 阶段容差必须为非负数`);
     if (!Number.isFinite(stage.duration_min) || stage.duration_min < 0)
       errors.push(`第 ${n} 阶段时长必须为非负数`);
+    if (!validStageDuration(stage))
+      errors.push(
+        `第 ${n} 阶段类型与时长不匹配：恒温、还原、吹扫需正时长，升温、冷却、人工确认为 0`,
+      );
     if (!Number.isFinite(stage.ramp_rate))
       errors.push(`第 ${n} 阶段升温速率无效`);
     const gas = normalizeGas(stage.gas);

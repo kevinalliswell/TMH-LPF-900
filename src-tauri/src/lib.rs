@@ -411,7 +411,6 @@ fn read_custom_programs(storage: &Storage) -> Result<Vec<Program>, String> {
         .into_iter()
         .map(|json| {
             let p: Program = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            validate_program(&p)?;
             Ok(p)
         })
         .collect()
@@ -2175,6 +2174,9 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
 
     let program = match program_by_id(state, &params.experiment_type) {
         Ok(p) => {
+            if let Err(message) = validate_program(&p) {
+                blocking.push(PreflightIssue::blocking("PROGRAM_INVALID", message));
+            }
             if !p.enabled {
                 blocking.push(PreflightIssue::blocking(
                     "PROGRAM_DISABLED",
@@ -3783,6 +3785,25 @@ mod tests {
         for mode in ["real", "replay", "", "MOCK", "typo"] {
             assert!(validate_runtime_mode(mode).is_err(), "{mode}");
         }
+    }
+
+    #[test]
+    fn invalid_legacy_custom_duration_remains_readable_but_cannot_start() {
+        let state = test_state();
+        let mut p = standard_program("REDUCIBILITY").unwrap();
+        p.id = "custom-legacy-duration".into();
+        p.source = ProgramSource::Custom;
+        p.stages[0].duration_min = 30.0;
+        lock(&state.storage)
+            .save_custom_program(&p.id, &serde_json::to_string(&p).unwrap())
+            .unwrap();
+        assert_eq!(all_programs(&lock(&state.storage)).unwrap().len(), 4);
+        let preflight = build_preflight(&state, &params(|params| params.experiment_type = p.id));
+        assert!(preflight
+            .blocking
+            .iter()
+            .any(|e| e.code == "PROGRAM_INVALID"));
+        assert!(!preflight.ok);
     }
 
     #[test]

@@ -93,4 +93,16 @@ describe("program utilities", () => {
     expect(steps.at(-1)?.condition).toContain("停止或故障");
     expect(steps.at(-1)?.atmosphere).toBe("10.5N₂ + 4.5CO");
   });
+  it("rejects old duration combinations that would acquire different semantics", () => {
+    for (const [stageIndex, duration] of [
+      [0, 10],
+      [1, 0],
+    ]) {
+      const legacy = structuredClone(program);
+      legacy.stages[stageIndex!]!.duration_min = duration!;
+      expect(validateProgramDraft(legacy).errors.join(" ")).toContain(
+        "类型与时长不匹配",
+      );
+    }
+  });
 });
