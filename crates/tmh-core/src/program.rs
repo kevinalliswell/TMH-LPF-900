@@ -40,6 +40,8 @@ pub struct Stage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     #[serde(default)]
+    pub provenance: Option<crate::provenance::ProgramProvenance>,
+    #[serde(default)]
     pub template_revision: Option<String>,
     #[serde(default)]
     pub base_standard_id: Option<String>,

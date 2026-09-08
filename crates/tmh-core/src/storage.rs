@@ -7,7 +7,7 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -68,6 +68,8 @@ CREATE INDEX idx_experiments_owner_start ON experiments(owner_user_id, start_tim
 pub enum StorageError {
     #[error("invalid or conflicting experiment completion")]
     InvalidCompletion,
+    #[error("custom program changed or revision is invalid; reload before saving")]
+    ProgramConflict,
     #[error("invalid stored JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("storage: {0}")]
@@ -172,6 +174,16 @@ fn insert_sample_rows(conn: &Connection, rows: &[SampleRow]) -> Result<()> {
     Ok(())
 }
 
+/// NULL means no authenticated revision number. Row ids preserve the order of
+/// legacy edits without inventing authors, dates or formal revision numbers.
+fn retain_unversioned_program(conn: &Connection, id: &str, json: &str) -> Result<()> {
+    let latest: Option<String> = conn.query_row("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY id DESC LIMIT 1", [id], |r| r.get(0)).optional()?;
+    if latest.as_deref() != Some(json) {
+        conn.execute("INSERT INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,NULL,?2)", params![id, json])?;
+    }
+    Ok(())
+}
+
 /// Owns the SQLite connection. Single-writer by construction — hold one and route
 /// all writes through it (docs/03).
 pub struct Storage {
@@ -244,6 +256,20 @@ impl Storage {
             tx.execute_batch("CREATE TABLE run_completions (token TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id), completion_json TEXT NOT NULL);")?;
             tx.pragma_update(None, "user_version", 6)?;
             tx.commit()?;
+            version = 6;
+        }
+        if version == 6 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE custom_program_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                program_id TEXT NOT NULL, revision INTEGER CHECK(revision > 0),
+                program_json TEXT NOT NULL, UNIQUE(program_id, revision));
+                INSERT INTO custom_program_revisions(program_id, revision, program_json)
+                SELECT id, NULL, program_json FROM custom_programs;",
+            )?;
+            tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -272,8 +298,113 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn get_custom_program(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Store the current revision and its immutable history in one transaction.
+    /// Compare the original JSON too, so concurrent editors cannot overwrite changes.
+    pub fn save_custom_program_revision(
+        &mut self,
+        program: &crate::program::Program,
+        expected_json: Option<&str>,
+    ) -> Result<()> {
+        let revision = program
+            .provenance
+            .as_ref()
+            .map(|p| p.revision)
+            .and_then(|r| i64::try_from(r).ok())
+            .filter(|r| *r > 0)
+            .ok_or(StorageError::ProgramConflict)?;
+        let json = serde_json::to_string(program)?;
+        let tx = self.conn.transaction()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [&program.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != expected_json {
+            return Err(StorageError::ProgramConflict);
+        }
+        let previous_revision = match current.as_deref() {
+            Some(raw) => {
+                let previous: crate::program::Program = serde_json::from_str(raw)?;
+                let previous_revision = previous
+                    .provenance
+                    .as_ref()
+                    .map(|p| p.revision)
+                    .unwrap_or(0);
+                let previous_revision =
+                    i64::try_from(previous_revision).map_err(|_| StorageError::ProgramConflict)?;
+                if previous_revision == 0 {
+                    retain_unversioned_program(&tx, &program.id, raw)?;
+                } else {
+                    let stored: Option<String> = tx.query_row("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 AND revision=?2", params![program.id, previous_revision], |r| r.get(0)).optional()?;
+                    if stored.as_deref() != Some(raw) {
+                        return Err(StorageError::ProgramConflict);
+                    }
+                }
+                previous_revision
+            }
+            None => {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM custom_program_revisions WHERE program_id=?1)",
+                    [&program.id],
+                    |r| r.get(0),
+                )?;
+                if exists {
+                    return Err(StorageError::ProgramConflict);
+                }
+                0
+            }
+        };
+        if previous_revision.checked_add(1) != Some(revision) {
+            return Err(StorageError::ProgramConflict);
+        }
+        tx.execute("INSERT INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,?2,?3)", params![program.id, revision, json])?;
+        tx.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![program.id, json])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn custom_program_revisions(&self, id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY id DESC")?;
+        let rows = statement
+            .query_map([id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Compatibility for unversioned imports and the older IPC. It cannot rewrite
+    /// a versioned program; every intervening legacy edit is preserved atomically.
     pub fn save_custom_program(&self, id: &str, json: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![id, json])?;
+        let tx = self.conn.unchecked_transaction()?;
+        let versioned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM custom_program_revisions WHERE program_id=?1 AND revision IS NOT NULL)", [id], |r| r.get(0))?;
+        if versioned {
+            return Err(StorageError::ProgramConflict);
+        }
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = current {
+            retain_unversioned_program(&tx, id, &raw)?;
+        }
+        retain_unversioned_program(&tx, id, json)?;
+        tx.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![id, json])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -805,7 +936,7 @@ mod tests {
     #[test]
     fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -856,7 +987,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -969,7 +1100,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
