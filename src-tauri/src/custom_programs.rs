@@ -58,6 +58,7 @@ pub(super) fn save(
         },
         reason,
     )?;
+    validate_executable_program(&program)?;
     validate_gas(state, &program)?;
     storage
         .save_custom_program_revision(&program, previous_json.as_deref())

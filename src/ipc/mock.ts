@@ -174,8 +174,7 @@ function stageReached(s: StageDto, t8: number, elapsedS: number): boolean {
 
 function applyStage(s: StageDto, w0: number): void {
   s.gas.forEach((v, i) => (sv[i] = clampGas(i, v)));
-  if (s.kind !== "PURGING")
-    furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
+  furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
   if (s.kind === "REDUCING") weightTarget = w0 * (1 - MOCK_LOSS);
 }
 
@@ -918,6 +917,8 @@ export function mockSaveCustomProgram(
     reason: reason.trim(),
     changes: conditionChanges(p, parent),
   };
+  const executionError = executableProgramError(p);
+  if (executionError) throw new Error(executionError);
   if (i < 0) customPrograms.push(p);
   else customPrograms[i] = p;
   customRevisions.set(p.id, [

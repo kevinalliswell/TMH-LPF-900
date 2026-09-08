@@ -537,15 +537,13 @@ fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) -> Result<(),
         .blocking_recv()
         .map_err(|_| "DEVICE_OFFLINE".to_string())?
         .map_err(|_| "DEVICE_OFFLINE".to_string())?;
-    if stage.kind != StageKind::Purging {
-        hub.set_temp_target_c(
-            if matches!(stage.kind, StageKind::Cooling | StageKind::Manual) {
-                25.0
-            } else {
-                stage.target_temp
-            },
-        );
-    }
+    hub.set_temp_target_c(
+        if matches!(stage.kind, StageKind::Cooling | StageKind::Manual) {
+            25.0
+        } else {
+            stage.target_temp
+        },
+    );
     if stage.kind == StageKind::Reducing {
         // Mock only: reduction strips oxygen, so the sample loses mass over the stage.
         hub.set_balance_target_g(w0 * (1.0 - MOCK_REDUCTION_LOSS));
@@ -3578,6 +3576,138 @@ mod tests {
     // Paste inside src-tauri/src/lib.rs's existing `tests` module.
     // Reuses test_state, seed_users_and_experiments, login and params.
     // No production implementation or hardware I/O is introduced here.
+
+    // Insert into the existing src-tauri/src/lib.rs `tests` module.
+    // Uses its AppState, authentication, storage and mock-device fixtures.
+
+    #[test]
+    fn f06_review_outdated_parent_rejection_preserves_history() {
+        use tmh_core::provenance::{prepare_custom_revision, ProgramEditor};
+
+        let state = test_state();
+        let (admin_id, _, _) = seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+
+        let mut draft = standard_program("REDUCIBILITY").unwrap();
+        draft.id = "custom-outdated-parent-save".into();
+        draft.source = ProgramSource::Custom;
+        draft.stages[2].target_temp = 850.0;
+        let mut historical = prepare_custom_revision(
+            draft,
+            None,
+            ProgramEditor {
+                user_id: admin_id,
+                display_name: "Historical operator".into(),
+                edited_at: "2026-09-01T00:00:00Z".into(),
+            },
+            "Original saved conditions",
+        )
+        .unwrap();
+        // Model a previously authenticated revision whose bundled parent was later
+        // replaced. Both saved version identifiers agree with the original parent.
+        historical.template_revision = Some("GB-PROCEDURE-HISTORICAL".into());
+        historical
+            .provenance
+            .as_mut()
+            .unwrap()
+            .parent_template
+            .template_revision = historical.template_revision.clone();
+        lock(&state.storage)
+            .save_custom_program_revision(&historical, None)
+            .unwrap();
+
+        let original_json = lock(&state.storage)
+            .get_custom_program(&historical.id)
+            .unwrap()
+            .unwrap();
+        let original_history = lock(&state.storage)
+            .custom_program_revisions(&historical.id)
+            .unwrap();
+        assert_eq!(program_by_id(&state, &historical.id).unwrap(), historical);
+        assert_eq!(
+            custom_programs::history(&state, &historical.id).unwrap(),
+            vec![historical.clone()]
+        );
+
+        let mut request = historical.clone();
+        request.stages[2].target_temp = 800.0;
+        let result = custom_programs::save(&state, request, "Try another temperature");
+        assert!(
+            result.is_err(),
+            "an obsolete parent must not produce a new saved revision: {result:?}"
+        );
+        assert_eq!(
+            lock(&state.storage)
+                .get_custom_program(&historical.id)
+                .unwrap(),
+            Some(original_json)
+        );
+        assert_eq!(
+            lock(&state.storage)
+                .custom_program_revisions(&historical.id)
+                .unwrap(),
+            original_history,
+            "rejecting the save must not append or rewrite any historical JSON"
+        );
+        assert_eq!(program_by_id(&state, &historical.id).unwrap(), historical);
+    }
+
+    #[test]
+    fn f06_review_purging_temperature_follows_snapshot() {
+        let mut state = test_state();
+        let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).unwrap();
+        // Speed up device polling only; retain the real actor/transport behaviour.
+        state.hub = Arc::new(DeviceHub::spawn(
+            TempActor::new(
+                Box::new(MockTransport::temp()),
+                cfg.temp.slave_address,
+                cfg.temp.scale,
+                cfg.temp.signed_registers,
+            ),
+            MfcActor::from_config(Box::new(MockTransport::mfc()), &cfg),
+            BalanceActor::new(Box::new(MockTransport::balance(100.0))),
+            HubIntervals {
+                temp: Duration::from_millis(5),
+                mfc: Duration::from_millis(5),
+                balance: Duration::from_millis(5),
+            },
+        ));
+        let wait_for_temperature = |target: f64| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let actual = state.hub.temp_rx().borrow().temps[7];
+                if actual.is_some_and(|t| (t - target).abs() <= 0.5) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "mock furnace must follow the applied stage target {target} C; T8={actual:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        let program = standard_program("REDUCIBILITY").unwrap();
+        let mut reducing = program
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Reducing)
+            .unwrap()
+            .clone();
+        reducing.target_temp = 850.0;
+        let purging = program
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Purging)
+            .unwrap();
+        assert_ne!(reducing.target_temp, purging.target_temp);
+
+        apply_stage_atmosphere(&state.hub, &reducing, 100.0).unwrap();
+        wait_for_temperature(reducing.target_temp);
+        // This is the unchanged standard ending snapshot, not an edited purge.
+        apply_stage_atmosphere(&state.hub, purging, 100.0).unwrap();
+        wait_for_temperature(purging.target_temp);
+    }
 
     fn f06_native_draft(id: &str) -> Program {
         let mut program = standard_program("REDUCIBILITY").unwrap();
