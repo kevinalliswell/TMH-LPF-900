@@ -41,6 +41,8 @@ pub struct GroupRequest {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrozenTrial {
+    #[serde(default)]
+    pub process_assessment: Option<crate::process_evidence::ProcessAssessment>,
     pub experiment: ExperimentRow,
     pub runtime: Value,
     pub analysis_revision_id: Option<i64>,

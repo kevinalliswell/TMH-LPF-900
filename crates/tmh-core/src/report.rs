@@ -561,6 +561,13 @@ pub fn render_report_html(
     ]
     .concat();
 
+    let runtime = analysis
+        .and_then(|a| a.get("runtime_evidence"))
+        .cloned()
+        .unwrap_or_default();
+    let process = crate::process_evidence::from_record(exp, samples, &runtime)
+        .map(|e| crate::process_evidence::render(&e))
+        .unwrap_or_else(|| "<p>缺少有效执行程序快照，不能核查各阶段记录。</p>".into());
     format!(
         "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
 <title>检测报告 {id}</title><style>\
@@ -580,7 +587,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}\
 <div class=\"sub\">TMH-LPF-900 · 北京科技大学</div>\
 <h2>实验信息</h2><table class=\"kv\">{meta}</table>\
 <h2>报告信息与人工补录</h2>{report_details}<h2>结果分析</h2>{analysis}\
-<h2>流程与人工操作记录</h2>{procedure}<h2>条件核查</h2>{conditions}\
+<h2>流程与人工操作记录</h2>{procedure}<h2>全过程记录核查</h2>{process}<h2>还原段国标条件核查</h2>{conditions}\
 <h2>温度 / 质量曲线</h2>{chart}\
 <div class=\"foot\">本报告由 TMH-LPF-900 自动生成</div>\
 </body></html>",
@@ -590,6 +597,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}\
         conditions = conditions_html(exp, samples, reducing_target, analysis),
         report_details = report_details_html(analysis),
         procedure = procedure_evidence_html(exp, analysis),
+        process = process,
         chart = svg_chart(samples),
     )
 }

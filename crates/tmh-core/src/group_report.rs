@@ -166,16 +166,34 @@ pub fn render(record: &TestGroupRevision) -> Result<String, String> {
         }
         trials.push_str("</tr>");
     }
+    let mut process = String::new();
+    for trial in &snapshot.trials {
+        let summary = trial
+            .process_assessment
+            .as_ref()
+            .map(crate::process_evidence::render)
+            .unwrap_or_else(|| "<p>此组版本未保存全过程摘要，请查看原始证据。</p>".into());
+        process.push_str(&format!(
+            "<details><summary>{}</summary>{}</details>",
+            esc(trial
+                .experiment
+                .sample_id
+                .as_deref()
+                .unwrap_or(&trial.experiment.experiment_id)),
+            summary
+        ));
+    }
     let evidence = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
     let html = format!(
         r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>检验组报告 — {title}</title>
 <style>
-body{{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;color:#182532;line-height:1.65;max-width:1050px;margin:36px auto;padding:0 24px}}h1{{font-size:26px;margin-bottom:8px}}h2{{font-size:18px;margin-top:28px;border-bottom:2px solid #1e6370;padding-bottom:6px}}.notice{{padding:12px 16px;background:#eef5f6;border-left:4px solid #1e6370}}table{{width:100%;border-collapse:collapse;margin:12px 0}}th,td{{padding:8px;border:1px solid #cbd5db;text-align:left;vertical-align:top;overflow-wrap:anywhere}}th{{background:#f2f5f7;font-weight:600}}.kv th{{width:240px}}.trials{{font-size:12px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}}summary,button{{cursor:pointer}}button{{padding:8px 18px;border:1px solid #1e6370;background:white;border-radius:4px}}.muted{{font-size:12px;color:#526370}}@media print{{@page{{size:A4 landscape;margin:14mm}}body{{margin:0;padding:0;max-width:none;font-size:11px}}button{{display:none}}thead{{display:table-header-group}}tr{{break-inside:avoid}}h2{{break-after:avoid}}}}
+body{{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;color:#182532;line-height:1.65;max-width:1050px;margin:36px auto;padding:0 24px}}h1{{font-size:26px;margin-bottom:8px}}h2{{font-size:18px;margin-top:28px;border-bottom:2px solid #1e6370;padding-bottom:6px}}.notice{{padding:12px 16px;background:#eef5f6;border-left:4px solid #1e6370}}table{{width:100%;border-collapse:collapse;margin:12px 0}}th,td{{padding:8px;border:1px solid #cbd5db;text-align:left;vertical-align:top;overflow-wrap:anywhere}}th{{background:#f2f5f7;font-weight:600}}.kv th{{width:240px}}.trials{{font-size:12px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}}summary,button{{cursor:pointer}}button{{padding:8px 18px;border:1px solid #1e6370;background:white;border-radius:4px}}.muted{{font-size:12px;color:#526370}}@media print{{@page{{size:A4 landscape;margin:14mm}}body{{margin:0;padding:0;max-width:none;font-size:11px}}button{{display:none}}thead{{display:table-header-group}}tr{{break-inside:avoid}}h2{{break-after:avoid;margin-top:14px}}th,td{{padding:4px 6px}}}}
 </style><body><button onclick="window.print()">打印 / 保存为 PDF</button><h1>检验组报告</h1>
 <p class="notice">{source}</p><table class="kv">{metadata}</table>
 <h2>结果与重复性</h2><table class="kv">{results}{criteria_row}{decision_row}{formula_row}</table>
 <p>同批与独立性由录入者确认。低温粉化按一位小数单次结果参与重复性；还原性与自由膨胀保留单次计算精度至最终取值。报出值采用明确的 GB/T 8170 修约规则。</p>
 <h2>采用与排除记录</h2><table class="trials"><thead><tr><th>顺序</th><th>样品编号</th><th>试验编号</th><th>开始时间</th><th>分析版本</th><th>单次计算值</th><th>判定用值</th><th>采用 / 排除依据</th></tr></thead><tbody>{trials}</tbody></table>
+<h2>各次试验全过程记录</h2><p>展开查看已冻结的阶段采样、计时与缺项。需要打印该部分时请先展开。</p>{process}
 <h2>结论适用范围</h2><table class="kv">{conformity_row}{purchase_row}</table>
 <p class="muted">已采用记录通过软件的正常结束、完整落盘与组内制度一致性检查；这不代替全过程国标符合性复核。人工签署人姓名不等同于电子签名。自定义指标只供相同研究条件下比较。</p>
 <details><summary>查看本版本完整证据（单次输入、程序、运行和报告补录记录）</summary><pre>{evidence}</pre></details>
@@ -186,6 +204,7 @@ body{{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;color:#182532;
         results = results,
         trials = trials,
         evidence = esc(&evidence),
+        process = process,
         criteria_row = row("重复性限值与依据", &criteria),
         decision_row = row("重复性决策", &evaluation.explanation),
         formula_row = row(
