@@ -14,6 +14,7 @@ import { ExperimentBar } from "./features/control/ExperimentBar";
 import { ControlView } from "./features/control/ControlView";
 import { HomeView } from "./features/home/HomeView";
 import { ModeView } from "./features/mode/ModeView";
+import { GroupView } from "./features/groups/GroupView";
 import { HistoryView } from "./features/history/HistoryView";
 import { SettingsView } from "./features/settings/SettingsView";
 import { HelpView } from "./features/help/HelpView";
@@ -29,6 +30,7 @@ const NAV: { view: View; label: string }[] = [
   { view: "control", label: "综合控制" },
   { view: "mode", label: "实验模式" },
   { view: "history", label: "历史查询" },
+  { view: "groups", label: "检验组报告" },
   { view: "users", label: "用户管理" },
   { view: "settings", label: "通讯设置" },
   { view: "help", label: "帮助" },
@@ -40,6 +42,7 @@ const VIEWS: Record<View, FC> = {
   control: ControlView,
   mode: ModeView,
   history: HistoryView,
+  groups: GroupView,
   users: UserManagementView,
   settings: SettingsView,
   help: HelpView,
@@ -60,6 +63,7 @@ function AuthenticatedApp() {
   const setExperiment = useExperiment((s) => s.setState);
   const view = useNav((s) => s.view);
   const setView = useNav((s) => s.setView);
+  const leaveBlockReason = useNav((s) => s.leaveBlockReason);
   const auth = useAuth((s) => s.snapshot);
   const refreshAuth = useAuth((s) => s.refresh);
   useEffect(() => subscribeTelemetry(setSnapshot), [setSnapshot]);
@@ -105,8 +109,10 @@ function AuthenticatedApp() {
             return (
               <li key={n.view}>
                 <button
+                  disabled={!!leaveBlockReason && !active}
+                  title={!active ? leaveBlockReason ?? undefined : undefined}
                   onClick={() => setView(n.view)}
-                  className="w-full text-left px-4 py-2"
+                  className="w-full text-left px-4 py-2 disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{
                     color: active ? "var(--fg)" : "var(--fg-dim)",
                     background: active ? "var(--panel-2)" : "transparent",
@@ -121,6 +127,7 @@ function AuthenticatedApp() {
             );
           })}
         </ul>
+        {leaveBlockReason && <p className="px-4 text-[11px] text-[var(--warn)]">{leaveBlockReason}</p>}
         <div className="flex-1" />
         <div
           className="px-4 py-3 text-[10px]"
