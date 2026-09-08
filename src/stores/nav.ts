@@ -1,6 +1,15 @@
 import { create } from "zustand";
 
-export type View = "home" | "control" | "mode" | "groups" | "history" | "users" | "settings" | "help" | "about";
+export type View =
+  | "home"
+  | "control"
+  | "mode"
+  | "groups"
+  | "history"
+  | "users"
+  | "settings"
+  | "help"
+  | "about";
 interface NavState {
   view: View;
   leaveBlockReason: string | null;
@@ -11,5 +20,7 @@ export const useNav = create<NavState>((set, get) => ({
   view: "control",
   leaveBlockReason: null,
   setLeaveBlockReason: (leaveBlockReason) => set({ leaveBlockReason }),
-  setView: (view) => { if (!get().leaveBlockReason || get().view === view) set({ view }); },
+  setView: (view) => {
+    if (!get().leaveBlockReason || get().view === view) set({ view });
+  },
 }));

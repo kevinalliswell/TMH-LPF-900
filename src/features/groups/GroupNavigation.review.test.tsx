@@ -2,7 +2,14 @@
 // Exercises the real App navigation, GroupView and useNav store. Only IPC and
 // unrelated views are substituted; no production files are edited by this task.
 import type { ReactNode } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../../App";
 import { useAuth } from "../../stores/auth";
@@ -40,31 +47,50 @@ const snapshot: GroupSnapshot = {
   name: "Navigation test group",
   batch_id: "BATCH-NAV",
   same_batch_confirmed: true,
-  policy: { method: "REDUCIBILITY", custom: false, material: "pellet", manual_limits: null },
+  policy: {
+    method: "REDUCIBILITY",
+    custom: false,
+    material: "pellet",
+    manual_limits: null,
+  },
   report_details: {
-    lab_name: "Lab retained until save", lab_address: "", report_number: "",
-    report_date: "", reviewer: "", deviations: "",
+    lab_name: "Lab retained until save",
+    lab_address: "",
+    report_number: "",
+    report_date: "",
+    reviewer: "",
+    deviations: "",
   },
   valid_trial_indices: [],
   trials: [],
   evaluation: {
-    calculation_version: "test", rounding_version: "test",
+    calculation_version: "test",
+    rounding_version: "test",
     limits: { a: 3, b: 3.6, c: 3.9, basis: "GB/T 13241" },
-    decision_values: [], decision: { required_count: 2, selected_indices: [] },
-    reported: {}, explanation: "Awaiting a repeat",
+    decision_values: [],
+    decision: { required_count: 2, selected_indices: [] },
+    reported: {},
+    explanation: "Awaiting a repeat",
   },
-  data_source: "mock", method_conformity: "pending_process_verification",
-  recorded_by: "Alice", reason: "Create",
+  data_source: "mock",
+  method_conformity: "pending_process_verification",
+  recorded_by: "Alice",
+  reason: "Create",
 };
 const saved: TestGroupRevision = {
-  group_id: "group-navigation", revision: 1,
-  owner_user_id: "alice", recorded_by_user_id: "alice",
-  created_at: "2026-09-08T12:00:00Z", snapshot,
+  group_id: "group-navigation",
+  revision: 1,
+  owner_user_id: "alice",
+  recorded_by_user_id: "alice",
+  created_at: "2026-09-08T12:00:00Z",
+  snapshot,
 };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 function historyButton() {
@@ -75,10 +101,18 @@ async function ready() {
   await waitFor(() => expect(useNav.getState().leaveBlockReason).toBeNull());
 }
 function editDraft() {
-  fireEvent.change(screen.getByLabelText("检验组名称"), { target: { value: "Navigation test group" } });
-  fireEvent.change(screen.getByLabelText("批次 / 试样标识"), { target: { value: "BATCH-NAV" } });
-  fireEvent.change(screen.getByLabelText("实验室"), { target: { value: "Lab retained until save" } });
-  fireEvent.change(screen.getByLabelText("本次保存原因"), { target: { value: "Create" } });
+  fireEvent.change(screen.getByLabelText("检验组名称"), {
+    target: { value: "Navigation test group" },
+  });
+  fireEvent.change(screen.getByLabelText("批次 / 试样标识"), {
+    target: { value: "BATCH-NAV" },
+  });
+  fireEvent.change(screen.getByLabelText("实验室"), {
+    target: { value: "Lab retained until save" },
+  });
+  fireEvent.change(screen.getByLabelText("本次保存原因"), {
+    target: { value: "Create" },
+  });
   fireEvent.click(screen.getByLabelText("确认来自同一批试样的独立试验"));
   fireEvent.click(screen.getByLabelText("选择 A"));
 }
@@ -89,18 +123,30 @@ beforeEach(() => {
   useAuth.setState({
     loading: false,
     snapshot: {
-      status: "AUTHENTICATED", idle_timeout_s: 900,
+      status: "AUTHENTICATED",
+      idle_timeout_s: 900,
       user: {
-        user_id: "alice", username: "alice", display_name: "Alice", role: "USER",
-        is_active: true, must_change_password: false, created_at: "2026-09-01",
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        role: "USER",
+        is_active: true,
+        must_change_password: false,
+        created_at: "2026-09-01",
       },
     },
   });
   api.listTestGroups.mockResolvedValue([]);
-  api.listExperiments.mockResolvedValue([{
-    experiment_id: "a", sample_id: "A", sample_name: "Pellets",
-    start_time: "2026-09-08T08:00:00Z", end_time: "2026-09-08T12:00:00Z", has_analysis: true,
-  }]);
+  api.listExperiments.mockResolvedValue([
+    {
+      experiment_id: "a",
+      sample_id: "A",
+      sample_name: "Pellets",
+      start_time: "2026-09-08T08:00:00Z",
+      end_time: "2026-09-08T12:00:00Z",
+      has_analysis: true,
+    },
+  ]);
   api.saveTestGroup.mockResolvedValue(saved);
 });
 afterEach(() => {
@@ -117,13 +163,18 @@ it("keeps unsaved report fields when main navigation is attempted and allows lea
   fireEvent.click(historyButton());
   act(() => useNav.getState().setView("history"));
   expect(useNav.getState().view).toBe("groups");
-  expect(screen.getByLabelText("实验室")).toHaveProperty("value", "Lab retained until save");
+  expect(screen.getByLabelText("实验室")).toHaveProperty(
+    "value",
+    "Lab retained until save",
+  );
 
   fireEvent.click(screen.getByRole("button", { name: "撤销未保存修改" }));
   await waitFor(() => expect(historyButton().disabled).toBe(false));
   expect(useNav.getState().leaveBlockReason).toBeNull();
   fireEvent.click(historyButton());
-  expect(await screen.findByText("History page used for the navigation regression")).toBeTruthy();
+  expect(
+    await screen.findByText("History page used for the navigation regression"),
+  ).toBeTruthy();
 });
 
 it("blocks navigation during initial evidence loading and releases it after loading completes", async () => {
@@ -133,7 +184,9 @@ it("blocks navigation during initial evidence loading and releases it after load
   await waitFor(() => expect(historyButton().disabled).toBe(true));
   act(() => useNav.getState().setView("history"));
   expect(useNav.getState().view).toBe("groups");
-  await act(async () => { loading.resolve([]); });
+  await act(async () => {
+    loading.resolve([]);
+  });
   await ready();
   expect(historyButton().disabled).toBe(false);
 });
@@ -147,15 +200,26 @@ it("keeps a pending save on screen and releases navigation only once the saved v
   fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
   await waitFor(() => expect(api.saveTestGroup).toHaveBeenCalledOnce());
   expect(historyButton().disabled).toBe(true);
-  expect((screen.getByRole("button", { name: "撤销未保存修改" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "撤销未保存修改",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
   act(() => useNav.getState().setView("history"));
   expect(useNav.getState().view).toBe("groups");
 
-  await act(async () => { saving.resolve(saved); });
+  await act(async () => {
+    saving.resolve(saved);
+  });
   await screen.findByRole("button", { name: "导出 v1 报告" });
   await waitFor(() => expect(historyButton().disabled).toBe(false));
   expect(useNav.getState().leaveBlockReason).toBeNull();
-  expect(screen.getByLabelText("实验室")).toHaveProperty("value", "Lab retained until save");
+  expect(screen.getByLabelText("实验室")).toHaveProperty(
+    "value",
+    "Lab retained until save",
+  );
   expect(screen.queryByRole("button", { name: "撤销未保存修改" })).toBeNull();
 });
 
