@@ -22,6 +22,16 @@ pub fn build_sample_row(
     elapsed_secs: u64,
     status: &str,
 ) -> SampleRow {
+    // Keep legacy NOT NULL numeric columns finite; the full record carries the
+    // invalid-channel flags and JSON nulls rather than inventing measurements.
+    let mut snap = snap.clone();
+    snap.health.balance_valid &= snap.weight.is_some_and(f64::is_finite);
+    snap.health.temp_valid &= snap.temps[7].is_some_and(f64::is_finite);
+    snap.health.mfc_valid &= snap
+        .gas
+        .iter()
+        .all(|g| g.pv.is_finite() && g.sv.is_finite());
+    let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
     let balance_offline = !snap.health.balance_connected || !snap.health.balance_valid;
     let weight = if balance_offline {
         0.0
@@ -30,8 +40,12 @@ pub fn build_sample_row(
     };
     // Weight loss in grams (matches the report/export "失重(g)" column and the GB Rt
     // formula's ΔW = W0 − Wt). Floored at 0 so a tare/noise blip can't go negative.
-    let weight_loss = (ctx.initial_weight - weight).max(0.0);
+    let difference = ctx.initial_weight - weight;
+    let weight_loss = finite(difference.max(0.0));
     let mut issues = Vec::new();
+    if !difference.is_finite() {
+        issues.push("失重计算超出有效数值范围");
+    }
     if balance_offline {
         issues.push("天平离线");
     }
@@ -48,13 +62,13 @@ pub fn build_sample_row(
         timestamp,
         experiment_duration: Some(fmt_hms(elapsed_secs)),
         // Sample temperature is T8; unreadable -> 0.0 (never falsely "at target").
-        temperature: snap.temps[7].unwrap_or(0.0),
+        temperature: finite(snap.temps[7].unwrap_or(0.0)),
         weight,
         weight_loss,
-        h2_flow: snap.gas[0].pv,
-        n2_flow: snap.gas[1].pv,
-        co2_flow: snap.gas[2].pv,
-        co_flow: snap.gas[3].pv,
+        h2_flow: finite(snap.gas[0].pv),
+        n2_flow: finite(snap.gas[1].pv),
+        co2_flow: finite(snap.gas[2].pv),
+        co_flow: finite(snap.gas[3].pv),
         experiment_status: Some(status.to_string()),
         system_message,
     }
@@ -155,6 +169,31 @@ mod tests {
         assert_eq!(row.system_message.as_deref(), Some("天平离线"));
         // still a full row — never dropped
         assert_eq!(row.experiment_id, "e1");
+    }
+
+    #[test]
+    fn invalid_numbers_remain_annotated_and_recovery_serializable() {
+        let mut telemetry = snap(true, Some(f64::NAN));
+        telemetry.temps[7] = Some(f64::INFINITY);
+        telemetry.gas[0].pv = f64::NEG_INFINITY;
+        let row = build_sample_row(
+            &SampleContext {
+                experiment_id: "e1".into(),
+                initial_weight: 100.0,
+            },
+            &telemetry,
+            "t".into(),
+            1,
+            "REDUCING",
+        );
+        let serialized = serde_json::to_string(&row).unwrap();
+        assert!(serde_json::from_str::<SampleRow>(&serialized).is_ok());
+        let raw: serde_json::Value =
+            serde_json::from_str(row.record_json.as_ref().unwrap()).unwrap();
+        assert_eq!(raw["telemetry"]["health"]["temp_valid"], false);
+        assert_eq!(raw["telemetry"]["health"]["balance_valid"], false);
+        assert_eq!(raw["telemetry"]["health"]["mfc_valid"], false);
+        assert!(row.system_message.is_some());
     }
 
     #[test]

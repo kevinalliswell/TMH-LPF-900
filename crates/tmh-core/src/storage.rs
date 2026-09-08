@@ -7,7 +7,7 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -66,6 +66,8 @@ CREATE INDEX idx_experiments_owner_start ON experiments(owner_user_id, start_tim
 /// Storage error (wraps rusqlite).
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    #[error("invalid or conflicting experiment completion")]
+    InvalidCompletion,
     #[error("invalid stored JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("storage: {0}")]
@@ -115,7 +117,7 @@ pub struct UserRow {
 }
 
 /// An `experiment_data` sample row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SampleRow {
     pub record_json: Option<String>,
     pub experiment_id: String,
@@ -130,6 +132,44 @@ pub struct SampleRow {
     pub h2_flow: f64,
     pub experiment_status: Option<String>,
     pub system_message: Option<String>,
+}
+
+/// Final samples and terminal evidence are one atomic, replayable unit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RunCompletion {
+    pub token: String,
+    pub experiment_id: String,
+    pub end_time: String,
+    pub metadata: serde_json::Value,
+    pub rows: Vec<SampleRow>,
+}
+
+fn insert_sample_rows(conn: &Connection, rows: &[SampleRow]) -> Result<()> {
+    {
+        let mut stmt = conn.prepare(
+                "INSERT INTO experiment_data (experiment_id, timestamp, experiment_duration, \
+                 temperature, weight, weight_loss, co_flow, co2_flow, n2_flow, h2_flow, \
+                 experiment_status, system_message, record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            )?;
+        for r in rows {
+            stmt.execute(params![
+                r.experiment_id,
+                r.timestamp,
+                r.experiment_duration,
+                r.temperature,
+                r.weight,
+                r.weight_loss,
+                r.co_flow,
+                r.co2_flow,
+                r.n2_flow,
+                r.h2_flow,
+                r.experiment_status,
+                r.system_message,
+                r.record_json,
+            ])?;
+        }
+    }
+    Ok(())
 }
 
 /// Owns the SQLite connection. Single-writer by construction — hold one and route
@@ -197,6 +237,12 @@ impl Storage {
               ALTER TABLE experiments ADD COLUMN runtime_metadata TEXT NOT NULL DEFAULT '{}';
               CREATE TABLE analysis_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id), result_json TEXT NOT NULL);")?;
             tx.pragma_update(None, "user_version", 5)?;
+            tx.commit()?;
+        }
+        if version <= 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("CREATE TABLE run_completions (token TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id), completion_json TEXT NOT NULL);")?;
+            tx.pragma_update(None, "user_version", 6)?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -392,30 +438,54 @@ impl Storage {
     /// unit of work).
     pub fn insert_samples(&mut self, rows: &[SampleRow]) -> Result<()> {
         let tx = self.conn.transaction()?;
+        insert_sample_rows(&tx, rows)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Commit rows, metadata, terminal time and replay receipt together. An identical
+    /// retry is a no-op; a reused token with changed data or a second completion fails.
+    pub fn commit_completion(&mut self, completion: &RunCompletion) -> Result<()> {
+        if completion.token.is_empty()
+            || completion.end_time.is_empty()
+            || !completion.metadata.is_object()
+            || completion
+                .rows
+                .iter()
+                .any(|r| r.experiment_id != completion.experiment_id)
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO experiment_data (experiment_id, timestamp, experiment_duration, \
-                 temperature, weight, weight_loss, co_flow, co2_flow, n2_flow, h2_flow, \
-                 experiment_status, system_message, record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            )?;
-            for r in rows {
-                stmt.execute(params![
-                    r.experiment_id,
-                    r.timestamp,
-                    r.experiment_duration,
-                    r.temperature,
-                    r.weight,
-                    r.weight_loss,
-                    r.co_flow,
-                    r.co2_flow,
-                    r.n2_flow,
-                    r.h2_flow,
-                    r.experiment_status,
-                    r.system_message,
-                    r.record_json,
-                ])?;
-            }
+            return Err(StorageError::InvalidCompletion);
         }
+        let json = serde_json::to_string(completion)?;
+        let tx = self.conn.transaction()?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT completion_json FROM run_completions WHERE token=?1",
+                [&completion.token],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            return if existing == json {
+                Ok(())
+            } else {
+                Err(StorageError::InvalidCompletion)
+            };
+        }
+        let end: Option<String> = tx.query_row(
+            "SELECT end_time FROM experiments WHERE experiment_id=?1",
+            [&completion.experiment_id],
+            |r| r.get(0),
+        )?;
+        if end.is_some() {
+            return Err(StorageError::InvalidCompletion);
+        }
+        insert_sample_rows(&tx, &completion.rows)?;
+        tx.execute("UPDATE experiments SET runtime_metadata=json_patch(runtime_metadata,?2),end_time=?3 WHERE experiment_id=?1",params![completion.experiment_id,completion.metadata.to_string(),completion.end_time])?;
+        tx.execute(
+            "INSERT INTO run_completions(token,experiment_id,completion_json) VALUES (?1,?2,?3)",
+            params![completion.token, completion.experiment_id, json],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -576,19 +646,25 @@ impl Storage {
     }
 
     /// Delete an experiment and all its samples (FK order: samples first).
-    pub fn delete_experiment(&self, experiment_id: &str) -> Result<()> {
-        self.conn.execute(
+    pub fn delete_experiment(&mut self, experiment_id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM run_completions WHERE experiment_id=?1",
+            [experiment_id],
+        )?;
+        tx.execute(
             "DELETE FROM analysis_revisions WHERE experiment_id=?1",
             [experiment_id],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM experiment_data WHERE experiment_id = ?1",
             params![experiment_id],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM experiments WHERE experiment_id = ?1",
             params![experiment_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -729,7 +805,7 @@ mod tests {
     #[test]
     fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 5);
+        assert_eq!(s.user_version().unwrap(), 6);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -780,7 +856,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 5);
+        assert_eq!(s.user_version().unwrap(), 6);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -893,7 +969,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 5);
+        assert_eq!(s.user_version().unwrap(), 6);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }

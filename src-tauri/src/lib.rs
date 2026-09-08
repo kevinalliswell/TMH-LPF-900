@@ -4,8 +4,15 @@
 //! the furnace through its program stages, applies each stage's atmosphere through the
 //! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
 
+use tmh_core::recovery;
+use tmh_core::storage::RunCompletion;
+
 mod auth_service;
 mod auth_session;
+mod persistence;
+use persistence::recover_unfinished;
+#[cfg(test)]
+use persistence::retry_pending_completions;
 
 use auth_service::{AuthCode, AuthService, AuthSnapshot, AuthStatus, PublicUser};
 use std::path::PathBuf;
@@ -65,6 +72,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Managed application state.
 struct AppState {
+    _data_lock: recovery::DataDirectoryLock,
+    recovery_dir: PathBuf,
     hub: Arc<DeviceHub>,
     mode: String,
     limit_h2: f64,
@@ -119,6 +128,10 @@ fn seconds(value: f64) -> Duration {
 /// snapshot the UI polls/receives; `stop`/`skip` are one-shot signals the tick task
 /// observes on its next cycle.
 struct ExpControl {
+    lifecycle: Mutex<()>,
+    updating: AtomicBool,
+    pending: Mutex<Vec<RunCompletion>>,
+    recovery_errors: Mutex<Vec<String>>,
     status: Mutex<ExperimentStatus>,
     stop: AtomicBool,
     skip: AtomicBool,
@@ -127,13 +140,23 @@ struct ExpControl {
 impl ExpControl {
     fn new() -> Self {
         Self {
+            lifecycle: Mutex::new(()),
+            updating: AtomicBool::new(false),
+            pending: Mutex::new(Vec::new()),
+            recovery_errors: Mutex::new(Vec::new()),
             status: Mutex::new(ExperimentStatus::idle()),
             stop: AtomicBool::new(false),
             skip: AtomicBool::new(false),
         }
     }
     fn snapshot(&self) -> ExperimentStatus {
-        lock(&self.status).clone()
+        let mut status = lock(&self.status).clone();
+        status.persistence_pending = self.persistence_pending();
+        status.updating = self.updating.load(Ordering::SeqCst);
+        status
+    }
+    fn persistence_pending(&self) -> bool {
+        !lock(&self.pending).is_empty() || !lock(&self.recovery_errors).is_empty()
     }
     fn is_running(&self) -> bool {
         lock(&self.status).running
@@ -147,6 +170,8 @@ impl ExpControl {
 /// bindings; `phase`/`stage_kind` render as SCREAMING_SNAKE_CASE via their own attrs).
 #[derive(Clone, serde::Serialize)]
 struct ExperimentStatus {
+    updating: bool,
+    persistence_pending: bool,
     running: bool,
     experiment_id: Option<String>,
     mode: Option<String>,
@@ -170,6 +195,8 @@ struct ExperimentStatus {
 impl ExperimentStatus {
     fn idle() -> Self {
         Self {
+            updating: false,
+            persistence_pending: false,
             running: false,
             experiment_id: None,
             mode: None,
@@ -275,6 +302,9 @@ fn may_access_experiment(role: UserRole, user_id: &str, owner_user_id: Option<&s
 }
 
 fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
+    if state.exp.updating.load(Ordering::SeqCst) {
+        return Err("正在安装更新，暂不能修改设备或实验".into());
+    }
     let user = current_user(state)?;
     let status = state.exp.snapshot();
     if !status.running
@@ -600,6 +630,8 @@ fn status_running(
 ) -> ExperimentStatus {
     let stage = engine.current_stage();
     ExperimentStatus {
+        updating: false,
+        persistence_pending: false,
         running: true,
         experiment_id: Some(id.to_string()),
         mode: Some(mode.to_string()),
@@ -655,8 +687,11 @@ fn flush(
     buffer: &mut SampleBuffer,
     id: &str,
     operator: &str,
+    completing: bool,
 ) {
-    if buffer.rows.is_empty() {
+    // The terminal batch belongs to commit_completion, including when this tick
+    // happens to reach the normal periodic flush boundary.
+    if completing || buffer.rows.is_empty() {
         return;
     }
     let outcome = lock(storage).insert_samples(&buffer.rows);
@@ -766,18 +801,29 @@ fn finalize(
     total_s: f64,
 ) {
     let safety_result = apply_safety_atmosphere(hub); // hard invariant — every exit path
-    flush(storage, audit, buffer, id, operator);
     let end = iso_now();
-    // Poison-tolerant: a panic elsewhere must not leave the run permanently "unfinished",
-    // which would make crash recovery re-close it on every later start (#47).
-    let data_ok = buffer.rows.is_empty() && buffer.dropped == 0;
-    let persisted = if data_ok {
-        let db = lock(storage);
-        db.patch_runtime_metadata(id, &serde_json::json!({"outcome":outcome,"data_complete":true,"safety_confirmed":safety_result.is_ok()}).to_string())
-            .and_then(|_| db.finish_experiment(id,&end)).is_ok()
-    } else {
-        false
+    let completion = RunCompletion {
+        token: tmh_core::auth::new_user_id(),
+        experiment_id: id.into(),
+        end_time: end,
+        rows: std::mem::take(&mut buffer.rows),
+        metadata: serde_json::json!({"outcome":outcome,"data_complete":buffer.dropped==0,"safety_confirmed":safety_result.is_ok(),"dropped_samples":buffer.dropped}),
     };
+    let recovery_dir = app.state::<AppState>().recovery_dir.clone();
+    let journal = recovery::persist(&recovery_dir, &completion);
+    let committed = lock(storage).commit_completion(&completion);
+    let persisted = committed.is_ok();
+    if persisted {
+        // A leftover receipt is harmless: startup replay is idempotent.
+        if let Err(error) = recovery::clear(&recovery_dir, &completion.token) {
+            lock(&exp.recovery_errors).push(error);
+        }
+    } else {
+        lock(&exp.pending).push(completion.clone());
+    }
+    if committed.is_err() || journal.is_err() {
+        audit.write(&AuditEntry::new(Category::Experiment,"completion_persistence",if persisted {AuditResult::Success}else{AuditResult::Failure}).operator(operator).detail(serde_json::json!({"id":id,"database_error":committed.err().map(|e|e.to_string()),"journal_error":journal.err(),"retained_rows":if persisted {0}else{completion.rows.len()}})));
+    }
     let safety_ok = safety_result.is_ok();
     audit.write(
         &AuditEntry::new(
@@ -796,7 +842,7 @@ fn finalize(
         &AuditEntry::new(
             Category::Experiment,
             outcome,
-            if safety_ok {
+            if safety_ok && persisted {
                 AuditResult::Success
             } else {
                 AuditResult::Failure
@@ -807,16 +853,17 @@ fn finalize(
             "id": id,
             "elapsed_s": total_s,
             "safety_atmosphere_confirmed": safety_ok,
-            "unwritten_samples": buffer.rows.len(),
+            "unwritten_samples": if persisted {0} else {completion.rows.len()},
             "persistence_confirmed": persisted,
             "dropped_samples": buffer.dropped
         })),
     );
-    let final_status = if safety_ok && persisted {
+    let mut final_status = if safety_ok && persisted {
         ExperimentStatus::idle()
     } else {
         ExperimentStatus::safety_error(id, total_s)
     };
+    final_status.persistence_pending = exp.persistence_pending();
     exp.set_status(final_status.clone());
     emit_experiment_status(app, &final_status);
 }
@@ -1059,8 +1106,30 @@ fn spawn_experiment_task(
             }
 
             if samples_since_flush >= FLUSH_EVERY_SAMPLES {
-                flush(&storage, &audit, &mut buffer, &id, &owner_display_name);
+                flush(
+                    &storage,
+                    &audit,
+                    &mut buffer,
+                    &id,
+                    &owner_display_name,
+                    result.completed,
+                );
                 samples_since_flush = 0;
+                if buffer.consecutive_failures > 0 {
+                    finalize(
+                        &app,
+                        &hub,
+                        &storage,
+                        &audit,
+                        &exp,
+                        &mut buffer,
+                        &id,
+                        &owner_display_name,
+                        "error",
+                        engine.total_elapsed_s(),
+                    );
+                    break;
+                }
             }
 
             if result.completed {
@@ -1094,31 +1163,34 @@ fn spawn_experiment_task(
     });
 }
 
-/// Startup crash recovery (docs/05 §5.5): any experiment left open (no `end_time`) by a
-/// crash gets the safety atmosphere and is closed out before the UI comes up.
-fn recover_unfinished(hub: &DeviceHub, storage: &Storage, audit: &AuditLog) {
-    let unfinished = storage.unfinished_experiments().unwrap_or_default();
-    if unfinished.is_empty() {
-        return;
+#[tauri::command]
+fn retry_pending_save(app: AppHandle) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let user = current_user(&st)?;
+    if st.exp.is_running() {
+        return Err("请等待实验停止".into());
     }
-    if let Err(error) = apply_safety_atmosphere(hub) {
-        audit.write(
-            &AuditEntry::new(Category::Experiment, "crash_recovery", AuditResult::Failure)
-                .detail(serde_json::json!({ "error": error, "recovered": [] })),
-        );
-        return;
-    }
-    let now = iso_now();
-    let ids: Vec<String> = unfinished.iter().map(|e| e.experiment_id.clone()).collect();
-    for id in &ids {
-        let _ = storage
-            .patch_runtime_metadata(id, "{\"outcome\":\"recovered\",\"data_complete\":false}")
-            .and_then(|_| storage.finish_experiment(id, &now));
-    }
-    audit.write(
-        &AuditEntry::new(Category::Experiment, "crash_recovery", AuditResult::Success)
-            .detail(serde_json::json!({ "recovered": ids })),
+    let result = recover_unfinished(
+        &st.hub,
+        &mut lock(&st.storage),
+        &st.audit,
+        &st.exp,
+        &st.recovery_dir,
     );
+    st.audit.write(
+        &AuditEntry::new(
+            Category::Experiment,
+            "retry_pending_save",
+            if result.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .operator(user.display_name),
+    );
+    emit_experiment_status(&app, &st.exp.snapshot());
+    result
 }
 
 // ---- DTOs -------------------------------------------------------------------
@@ -1539,8 +1611,11 @@ fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
 async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     let user = current_user(&st)?;
-    if st.exp.is_running() {
-        return Err("实验仍在结束，暂不能复位".into());
+    if st.exp.updating.load(Ordering::SeqCst) {
+        return Err("更新期间不能复位保护".into());
+    }
+    if st.exp.is_running() || st.exp.persistence_pending() {
+        return Err("实验仍在结束或数据待保存，暂不能复位".into());
     }
     if !lock(&st.storage)
         .unfinished_experiments()
@@ -1930,6 +2005,19 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
     }
     let mut warnings = Vec::new();
 
+    if state.exp.updating.load(Ordering::SeqCst) {
+        blocking.push(PreflightIssue::blocking(
+            "UPDATE_IN_PROGRESS",
+            "正在安装更新，不能开始实验",
+        ));
+    }
+
+    if state.exp.persistence_pending() {
+        blocking.push(PreflightIssue::blocking(
+            "PERSISTENCE_PENDING",
+            "存在待恢复实验数据，请先重试保存",
+        ));
+    }
     if state.exp.is_running() {
         blocking.push(PreflightIssue::blocking(
             "EXPERIMENT_RUNNING",
@@ -2067,6 +2155,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     validate_experiment_params(&params)?;
 
     let st = app.state::<AppState>();
+    let _lifecycle = lock(&st.exp.lifecycle);
     let user = current_user(&st)?;
     if st.exp.is_running() {
         return Err("实验已在运行".into());
@@ -2119,6 +2208,8 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     st.exp.skip.store(false, Ordering::Relaxed);
     let first = program.stages.first();
     let initial = ExperimentStatus {
+        updating: false,
+        persistence_pending: false,
         running: true,
         experiment_id: Some(id.clone()),
         mode: Some(params.experiment_type.clone()),
@@ -2499,13 +2590,22 @@ fn get_experiment_samples(
 #[tauri::command]
 fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
     let actor = current_admin(&state)?;
+    if state.exp.persistence_pending() {
+        return Err("存在尚未保存的数据，请先重试保存".into());
+    }
     // Never delete the run currently in progress.
     if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
         return Err("无法删除正在运行的实验".into());
     }
-    lock(&state.storage)
-        .delete_experiment(&id)
-        .map_err(|e| e.to_string())?;
+    let mut storage = lock(&state.storage);
+    if storage
+        .get_experiment(&id)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|r| r.end_time.is_none())
+    {
+        return Err("实验尚未完成保存，不能删除".into());
+    }
+    storage.delete_experiment(&id).map_err(|e| e.to_string())?;
     state.audit.write(
         &AuditEntry::new(Category::Experiment, "delete", AuditResult::Success)
             .operator(actor.display_name)
@@ -2959,21 +3059,65 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateCheck, String> {
 /// Download + verify (minisign) + install the update, then restart. Gated.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
-    let operator = current_admin(&app.state::<AppState>())?.display_name;
-    if !app.state::<AppState>().updater_enabled {
+    let st = app.state::<AppState>();
+    let operator = current_admin(&st)?.display_name;
+    if !st.updater_enabled {
         return Err("更新功能未启用".into());
     }
+    let lease = UpdateLease::begin(st.exp.clone())?;
+    emit_experiment_status(&app, &st.exp.snapshot());
+    let result = perform_update(&app, operator).await;
+    drop(lease);
+    emit_experiment_status(&app, &st.exp.snapshot());
+    result
+}
+
+struct UpdateLease(Arc<ExpControl>);
+impl UpdateLease {
+    fn begin(exp: Arc<ExpControl>) -> Result<Self, String> {
+        {
+            let _lifecycle = lock(&exp.lifecycle);
+            if exp.is_running() || exp.persistence_pending() || exp.updating.load(Ordering::SeqCst)
+            {
+                return Err("请先停止实验并完成数据保存，且不能重复安装更新".into());
+            }
+            exp.updating.store(true, Ordering::SeqCst);
+        }
+        Ok(Self(exp))
+    }
+}
+impl Drop for UpdateLease {
+    fn drop(&mut self) {
+        self.0.updating.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn perform_update(app: &AppHandle, operator: String) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    // Latch before the first await: no queued/manual gas command may reopen gas
+    // while the installer runs; update restart bypasses Tauri's prevent_exit.
+    st.hub
+        .request_shutoff_flammable()
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = updater
         .check()
         .await
         .map_err(|e| e.to_string())?
         .ok_or("已是最新版本")?;
+    if st.exp.is_running() || st.exp.persistence_pending() {
+        return Err("实验或保存尚未结束".into());
+    }
     update
-        .download_and_install(|_chunk, _total| {}, || {})
+        .download_and_install(|_, _| {}, || {})
         .await
         .map_err(|e| e.to_string())?;
-    app.state::<AppState>().audit.write(
+    if st.exp.is_running() || st.exp.persistence_pending() {
+        return Err("数据未保存，不能重启".into());
+    }
+    st.audit.write(
         &AuditEntry::new(Category::App, "install_update", AuditResult::Success).operator(operator),
     );
     app.restart();
@@ -2981,8 +3125,43 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 
 // ---- App entrypoint ---------------------------------------------------------
 
-/// Build and run the Tauri application.
-pub fn run() {
+/// Return true while stopping, protecting, or saving still requires a live window.
+fn prepare_exit(app: &AppHandle) -> bool {
+    let Some(st) = app.try_state::<AppState>() else {
+        return false;
+    };
+    st.exp.stop.store(true, Ordering::SeqCst);
+    let protection = apply_safety_atmosphere_blocking(&st.hub);
+    let blocked = protection.is_err()
+        || st.exp.is_running()
+        || st.exp.persistence_pending()
+        || st.exp.updating.load(Ordering::SeqCst);
+    if blocked {
+        let message = if st.exp.updating.load(Ordering::SeqCst) {
+            "正在安装更新，请等待安装结束。"
+        } else if st.exp.persistence_pending() {
+            "数据尚未保存，已阻止退出。请在实验栏重试保存后再关闭。"
+        } else if protection.is_err() {
+            "保护气氛未确认，已阻止退出。请检查设备并重试保护操作。"
+        } else {
+            "正在停止实验并保存数据，请待实验停止后再次关闭。"
+        };
+        let _ = app.emit("app-notice", message);
+    }
+    st.audit.write(&AuditEntry::new(
+        Category::App,
+        "exit",
+        if blocked {
+            AuditResult::Failure
+        } else {
+            AuditResult::Success
+        },
+    ));
+    blocked
+}
+
+/// Called only after single-instance plugin initialization.
+fn initialize_state() -> AppState {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
     if let Err(message) = validate_runtime_mode(&mode) {
         eprintln!("TMH 启动失败: {message}");
@@ -2994,25 +3173,26 @@ pub fn run() {
         std::env::var("TMH_UPDATER").as_deref(),
         Ok("1" | "on" | "true")
     );
-    // Low-end 工控核显 escape hatch (docs/09 §9.1): disable GPU accel on demand.
-    if std::env::var("TMH_DISABLE_GPU").is_ok() {
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
-    }
     // Persistent per-user data dir (Windows %APPDATA%, Linux ~/.local/share, etc.);
-    // falls back to a temp dir only if the platform dir is unavailable. Experiment
-    // history and the 180-day audit trail must survive OS temp cleanup (issue #6).
-    let data_root = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("tmh-lpf-900");
+    // TMH_DATA_DIR selects an isolated test profile. Never silently store durable
+    // experiment history in a temporary directory.
+    let data_root = std::env::var_os("TMH_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_dir().map(|dir| dir.join("tmh-lpf-900")))
+        .expect("无法确定持久数据目录，请设置 TMH_DATA_DIR");
     let audit_dir = data_root.join("logs");
+    let data_lock = recovery::DataDirectoryLock::acquire(&data_root).expect("无法独占实验数据目录");
     let db_dir = data_root.join("data");
     let exports_dir = data_root.join("exports");
+    let recovery_dir = data_root.join("recovery");
+    let exp = Arc::new(ExpControl::new());
     let _ = std::fs::create_dir_all(&audit_dir);
     let _ = std::fs::create_dir_all(&db_dir);
     let _ = std::fs::create_dir_all(&exports_dir);
     // Pay the Argon2 cost once here, before any login can be attempted.
     warm_password_hashing();
-    let storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
+    let mut storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
     let comm_config = load_comm_config();
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
@@ -3020,10 +3200,12 @@ pub fn run() {
     audit.prune(180);
 
     // Crash recovery before the UI comes up (safety atmosphere for any open run).
-    recover_unfinished(&hub, &storage, &audit);
+    let _ = recover_unfinished(&hub, &mut storage, &audit, &exp, &recovery_dir);
 
     let idle_timeout_s = idle_timeout_s();
-    let state = AppState {
+    AppState {
+        _data_lock: data_lock,
+        recovery_dir,
         hub,
         mode,
         limit_h2: comm_config.gas_safety_limits.h2,
@@ -3031,15 +3213,22 @@ pub fn run() {
         audit,
         storage: Arc::new(Mutex::new(storage)),
         auth: Arc::new(AuthService::new(idle_timeout_s)),
-        exp: Arc::new(ExpControl::new()),
+        exp,
         sim_speed,
         exports_dir,
         updater_enabled,
         telemetry_gen: Arc::new(AtomicU64::new(0)),
         cadence: Cadence::from_config(&comm_config),
         idle_timeout_s,
-    };
+    }
+}
 
+/// Build and run the Tauri application.
+pub fn run() {
+    // Low-end 工控核显 escape hatch (docs/09 §9.1): disable GPU accel on demand.
+    if std::env::var("TMH_DISABLE_GPU").is_ok() {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
+    }
     tauri::Builder::default()
         // Single-instance MUST be registered first (serial-port exclusivity, docs/03).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -3047,16 +3236,28 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-            app.state::<AppState>().audit.write(&AuditEntry::new(
-                Category::App,
-                "start_blocked",
-                AuditResult::Rejected,
-            ));
+            if let Some(state) = app.try_state::<AppState>() {
+                state.audit.write(&AuditEntry::new(
+                    Category::App,
+                    "start_blocked",
+                    AuditResult::Rejected,
+                ));
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(state)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if prepare_exit(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
+        })
+        .setup(|app| {
+            app.manage(initialize_state());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_auth_state,
             bootstrap_admin,
@@ -3073,6 +3274,7 @@ pub fn run() {
             get_public_safety_status,
             emergency_safe_shutdown,
             reset_safety_interlock,
+            retry_pending_save,
             get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,
@@ -3113,28 +3315,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Every application-exit path must leave the furnace in the protective
-            // atmosphere (docs/05 §5.5, issue #1). `ExitRequested` fires before teardown;
-            // apply the safety atmosphere synchronously here so gas is never left flowing
-            // after the window closes. The MFC bus thread also zeroes flammables on stop.
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let st = app.state::<AppState>();
-                let result = apply_safety_atmosphere_blocking(&st.hub);
-                if result.is_err() {
-                    // A normal window-close must not tear the process down after the
-                    // protective atmosphere failed. Keep the actor alive for retry/operator
-                    // intervention; OS-forced termination still falls back to Drop's best effort.
+                if prepare_exit(app) {
                     api.prevent_exit();
                 }
-                st.audit.write(&AuditEntry::new(
-                    Category::App,
-                    "exit",
-                    if result.is_ok() {
-                        AuditResult::Success
-                    } else {
-                        AuditResult::Failure
-                    },
-                ));
             }
         });
 }
@@ -3149,11 +3333,13 @@ mod tests {
     /// `require_experiment_controller`) are the single enforcement point every protected
     /// command funnels through, so exercising them here covers the matrix the spec promises
     /// even though the `#[tauri::command]` wrappers themselves need a running app (#45).
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("built-in config");
         let dir = std::env::temp_dir().join(format!("tmh_state_{}", tmh_core::auth::new_user_id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         AppState {
+            _data_lock: recovery::DataDirectoryLock::acquire(&dir).unwrap(),
+            recovery_dir: dir.join("recovery"),
             hub: Arc::new(build_mock_hub(&cfg)),
             mode: "mock".into(),
             limit_h2: cfg.gas_safety_limits.h2,
@@ -3628,3 +3814,6 @@ mod tests {
         assert!(calculate_reduction(&row, &[], &serde_json::json!({}), &input).is_err());
     }
 }
+
+#[cfg(test)]
+mod persistence_tests;

@@ -71,6 +71,8 @@ export type Phase =
 export type StageKind = "HEATING" | "STABILIZING" | "REDUCING" | "COOLING";
 
 export interface ExperimentState {
+  updating?: boolean;
+  persistence_pending?: boolean;
   running: boolean;
   experiment_id?: string | null;
   mode?: string | null;

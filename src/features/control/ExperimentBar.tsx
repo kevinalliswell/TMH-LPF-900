@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   EXPERIMENT_MODES,
   resetSafetyInterlock,
+  retryPendingSave,
   getExperimentDetail,
   skipStage,
   stopExperiment,
@@ -27,6 +28,7 @@ export function ExperimentBar() {
     useTelemetry((s) => s.snapshot?.health.safety_latched) ||
     ex.phase === "ERROR";
   const [showDialog, setShowDialog] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
   const [skipReason, setSkipReason] = useState("");
@@ -77,6 +79,34 @@ export function ExperimentBar() {
 
   return (
     <>
+      {ex.updating && (
+        <div role="status" className="px-4 py-2 text-[13px]">
+          正在安装更新，实验与设备修改暂不可用。
+        </div>
+      )}
+      {ex.persistence_pending && (
+        <div
+          role="alert"
+          className="flex items-center gap-3 px-4 py-2 text-[13px]"
+          style={{ color: "var(--danger)", background: "var(--panel-2)" }}
+        >
+          <span>
+            实验数据尚未保存。请保持应用打开，检查磁盘空间或写入权限后重试。保存完成前不能开始实验或安装更新。
+          </span>
+          <button
+            disabled={retrying || ex.running}
+            onClick={() => {
+              setRetrying(true);
+              void retryPendingSave()
+                .then(() => push("保存已恢复，请确认保护状态后复位", "info"))
+                .catch(toastError)
+                .finally(() => setRetrying(false));
+            }}
+          >
+            {retrying ? "保存中…" : "重试保存"}
+          </button>
+        </div>
+      )}
       <div
         className="flex items-center gap-3 px-4 h-9 border-b text-[12px]"
         style={{
@@ -145,6 +175,7 @@ export function ExperimentBar() {
             </span>
             {latched && (
               <button
+                disabled={!!ex.persistence_pending}
                 onClick={() => {
                   void resetSafetyInterlock()
                     .then(() => push("保护已复位", "info"))
@@ -156,7 +187,7 @@ export function ExperimentBar() {
             )}
             <div className="flex-1" />
             <button
-              disabled={!!latched}
+              disabled={!!latched || !!ex.persistence_pending || !!ex.updating}
               onClick={() => setShowDialog(true)}
               className="px-2.5 py-1 rounded text-[12px] font-medium"
               style={{ background: "var(--ok)", color: "#04140a" }}
