@@ -59,7 +59,13 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function ResultBlock({ analysis }: { analysis: Record<string, unknown> }) {
   const metrics = [
-    ["ri", "还原性 RI（R₁₈₀）", "%"],
+    [
+      analysis.ri !== undefined ? "ri" : "rt",
+      analysis.ri !== undefined
+        ? "还原性 RI（R₁₈₀）"
+        : `还原度 Rₜ（${analysis.endpoint_min ?? "终点未记录"} min）`,
+      "%",
+    ],
     ["reduction_rate_index", "还原速率指数", "%/min"],
     ["rdi_plus_6_3", "RDI +6.3", "%"],
     ["rdi_plus_3_15", "RDI +3.15", "%"],
@@ -94,7 +100,7 @@ const initialFields: Record<string, string> = {
   w1: "",
   w2: "",
   manual_m1: "",
-  manual_m180: "",
+  manual_mt: "",
   manual_rate_points: "",
   source_record: "",
   m0: "",
@@ -127,6 +133,9 @@ export function AnalyzePanel({
   const push = useToasts((s) => s.push);
   const type =
     detail.program_snapshot?.base_standard_id ?? detail.experiment_type;
+  const endpoint =
+    detail.program_snapshot?.stages.find((s) => s.kind === "REDUCING")
+      ?.duration_min ?? 180;
   const field = (key: string, label: string, suffix?: string) => (
     <Field
       key={key}
@@ -154,7 +163,7 @@ export function AnalyzePanel({
           w1: n("w1"),
           w2: n("w2"),
           manual_m1: fields.manual_m1?.trim() ? n("manual_m1") : null,
-          manual_m180: fields.manual_m180?.trim() ? n("manual_m180") : null,
+          manual_mt: fields.manual_mt?.trim() ? n("manual_mt") : null,
           manual_rate_points: points,
           source_record: fields.source_record,
         });
@@ -205,7 +214,7 @@ export function AnalyzePanel({
             <summary>人工补录缺失称量或速率数据（可选）</summary>
             <div className="grid grid-cols-2 gap-3 mt-2">
               {field("manual_m1", "m₁ 还原开始前总称量", "g")}
-              {field("manual_m180", "m₁₈₀ 还原 180 分钟总称量", "g")}
+              {field("manual_mt", `mₜ 还原 ${endpoint} 分钟总称量`, "g")}
               {field(
                 "manual_rate_points",
                 "速率数据：时间(min),还原度(%)；分号分隔",
@@ -213,8 +222,7 @@ export function AnalyzePanel({
               {field("source_record", "原始记录编号 / 来源说明")}
             </div>
             <p className="text-[12px]">
-              人工值优先于自动值，并在报告中标明。m₁ 与 m₁₈₀
-              必须包含同一还原管。
+              人工值优先于自动值，并在报告中标明。m₁ 与 mₜ 必须包含同一还原管。
             </p>
           </details>
         </>

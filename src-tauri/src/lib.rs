@@ -10,11 +10,13 @@ use tmh_core::storage::RunCompletion;
 
 mod auth_service;
 mod auth_session;
+mod custom_programs;
 mod persistence;
 mod procedure;
 use persistence::recover_unfinished;
 #[cfg(test)]
 use persistence::retry_pending_completions;
+use tmh_core::provenance::validate_executable_program;
 
 use auth_service::{AuthCode, AuthService, AuthSnapshot, AuthStatus, PublicUser};
 use std::path::PathBuf;
@@ -31,8 +33,8 @@ use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
-    standard_program, validate_program, ExperimentEngine, Phase, Program, ProgramSource, Stage,
-    StageKind, STANDARD_MODES,
+    standard_program, ExperimentEngine, Phase, Program, ProgramSource, Stage, StageKind,
+    STANDARD_MODES,
 };
 use tmh_core::gb::{
     free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput, SwellingInput,
@@ -80,6 +82,7 @@ struct AppState {
     mode: String,
     limit_h2: f64,
     limit_co: f64,
+    flow_steps: [f64; 4],
     audit: Arc<AuditLog>,
     storage: Arc<Mutex<Storage>>,
     auth: Arc<AuthService>,
@@ -437,35 +440,6 @@ fn program_by_id(state: &AppState, id: &str) -> Result<Program, String> {
         .into_iter()
         .find(|p| p.id == id)
         .ok_or_else(|| "未知实验模式".to_string())
-}
-
-fn flammable_warnings(program: &Program, h2_limit: f64, co_limit: f64) -> Vec<PreflightIssue> {
-    let mut warnings = Vec::new();
-    for (i, stage) in program.stages.iter().enumerate() {
-        if stage.gas[0] > h2_limit {
-            warnings.push(PreflightIssue::warning(
-                "H2_LIMIT",
-                format!(
-                    "第 {} 阶段 H₂ 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
-                    i + 1,
-                    stage.gas[0],
-                    h2_limit
-                ),
-            ));
-        }
-        if stage.gas[3] > co_limit {
-            warnings.push(PreflightIssue::warning(
-                "CO_LIMIT",
-                format!(
-                    "第 {} 阶段 CO 设定 {:.1} L/min 超过安全上限 {:.1} L/min，执行时会被钳制",
-                    i + 1,
-                    stage.gas[3],
-                    co_limit
-                ),
-            ));
-        }
-    }
-    warnings
 }
 
 /// Phase → stable string for the `experiment_status` sample column.
@@ -1352,6 +1326,7 @@ struct AppInfo {
 struct GasLimits {
     h2: f64,
     co: f64,
+    flow_steps: [f64; 4],
 }
 
 /// Cadences the UI needs to mirror the backend (docs/06 §6.3), so the staleness threshold
@@ -1709,6 +1684,7 @@ fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
     Ok(GasLimits {
         h2: state.limit_h2,
         co: state.limit_co,
+        flow_steps: state.flow_steps,
     })
 }
 
@@ -2174,7 +2150,7 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
 
     let program = match program_by_id(state, &params.experiment_type) {
         Ok(p) => {
-            if let Err(message) = validate_program(&p) {
+            if let Err(message) = validate_executable_program(&p) {
                 blocking.push(PreflightIssue::blocking("PROGRAM_INVALID", message));
             }
             if !p.enabled {
@@ -2183,7 +2159,9 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
                     "实验模式已停用，无法启动",
                 ));
             }
-            warnings.extend(flammable_warnings(&p, state.limit_h2, state.limit_co));
+            if let Err(message) = custom_programs::validate_gas(state, &p) {
+                blocking.push(PreflightIssue::blocking("PROGRAM_GAS_INVALID", message));
+            }
             Some(p)
         }
         Err(e) => {
@@ -2315,7 +2293,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         return Err(issue.message_zh.clone());
     }
     let program = preflight.program.ok_or("未知实验模式")?;
-    validate_program(&program)?;
+    validate_executable_program(&program)?;
 
     let now = iso_now();
     let id = format!("exp-{}", tmh_core::auth::new_user_id());
@@ -2347,7 +2325,8 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
             &serde_json::json!({
                 "schema_version":1,"outcome":"running","device_mode":st.mode,
                 "sample_interval_s":st.cadence.sampling.as_secs_f64()*st.sim_speed,
-                "calculation_version":CALCULATION_VERSION
+                "calculation_version":CALCULATION_VERSION,
+                "gas_safety_limits":{"h2":st.limit_h2,"co":st.limit_co,"flow_steps":st.flow_steps}
             })
             .to_string(),
         )
@@ -2495,73 +2474,25 @@ fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
 }
 
 #[tauri::command]
-fn save_custom_program(state: State<AppState>, program: Program) -> Result<Program, String> {
-    let user = current_admin(&state)?;
-    if state.exp.is_running() {
-        return Err("实验运行中不可修改模式".into());
-    }
-    let mut program = program;
-    let replacing_existing = !program.id.trim().is_empty();
-    if program.id.trim().is_empty() {
-        program.id = custom_program_id();
-    } else {
-        program.id = program.id.trim().to_string();
-    }
-    normalize_custom_program(&mut program);
-    if STANDARD_MODES.contains(&program.id.as_str()) {
-        return Err("标准模式不可覆盖，请复制为自定义模式".into());
-    }
-    validate_program(&program)?;
-    let base = program
-        .base_standard_id
-        .as_deref()
-        .and_then(standard_program)
-        .ok_or("自定义实验须从国标模板复制")?;
-    program.base_standard_version = base.base_standard_version;
+fn save_custom_program(
+    state: State<AppState>,
+    program: Program,
+    reason: String,
+) -> Result<Program, String> {
+    custom_programs::save(&state, program, &reason)
+}
 
-    lock(&state.storage)
-        .save_custom_program(
-            &program.id,
-            &serde_json::to_string(&program).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Config,
-            "save_custom_program",
-            AuditResult::Success,
-        )
-        .operator(user.display_name)
-        .detail(serde_json::json!({ "id": program.id, "updated": replacing_existing })),
-    );
-    Ok(program)
+#[tauri::command]
+fn list_custom_program_revisions(
+    state: State<AppState>,
+    id: String,
+) -> Result<Vec<Program>, String> {
+    custom_programs::history(&state, &id)
 }
 
 #[tauri::command]
 fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), String> {
-    if STANDARD_MODES.contains(&id.as_str()) {
-        return Err("标准模式不可删除".into());
-    }
-    let user = current_admin(&state)?;
-    if state.exp.is_running() {
-        return Err("实验运行中不可删除模式".into());
-    }
-    if !lock(&state.storage)
-        .delete_custom_program(&id)
-        .map_err(|e| e.to_string())?
-    {
-        return Err("自定义模式不存在".into());
-    }
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Config,
-            "delete_custom_program",
-            AuditResult::Success,
-        )
-        .operator(user.display_name)
-        .detail(serde_json::json!({ "id": id })),
-    );
-    Ok(())
+    custom_programs::delete(&state, &id)
 }
 
 // ---- History query ----------------------------------------------------------
@@ -2883,13 +2814,44 @@ fn analyze_gb13241(
     persist_analysis(&state, &id, "GB/T 13241", &user.display_name, &value)?;
     Ok(value)
 }
+fn reduction_endpoint(row: &ExperimentRow) -> Result<(f64, bool), String> {
+    let Some(raw) = &row.program_snapshot_json else {
+        if row
+            .experiment_type
+            .as_deref()
+            .is_some_and(|id| id.starts_with("custom-"))
+        {
+            return Err("缺少自定义程序快照，不能确定还原终点".into());
+        }
+        return Ok((180.0, false));
+    };
+    let program: Program = serde_json::from_str(raw).map_err(|_| "执行程序快照损坏")?;
+    let stages: Vec<_> = program
+        .stages
+        .iter()
+        .filter(|s| s.kind == StageKind::Reducing)
+        .collect();
+    if stages.len() != 1 || !stages[0].duration_min.is_finite() || stages[0].duration_min <= 0.0 {
+        return Err("还原段时长或数量不受当前分析方法支持".into());
+    }
+    Ok((
+        stages[0].duration_min,
+        program.source == ProgramSource::Custom,
+    ))
+}
+
 fn calculate_reduction(
     row: &ExperimentRow,
     samples: &[SampleRow],
     meta: &serde_json::Value,
     input: &ReductionInput,
 ) -> Result<serde_json::Value, String> {
+    let (endpoint_min, custom) = reduction_endpoint(row)?;
+    if input.manual_m180.is_some() && (endpoint_min != 180.0 || input.manual_mt.is_some()) {
+        return Err("m₁₈₀ 仅适用于 180 分钟终点且不能与 mₜ 重复补录".into());
+    }
     let manual_used = input.manual_m1.is_some()
+        || input.manual_mt.is_some()
         || input.manual_m180.is_some()
         || input.manual_rate_points.is_some();
     if manual_used
@@ -2911,25 +2873,45 @@ fn calculate_reduction(
         * 1.5;
     reducibility(row.sample_weight, m1, m1, input.w1, input.w2).ok_or("亚铁/全铁含量或称量无效")?;
     let points = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
-    let rt = if let Some(m180) = input.manual_m180 {
-        reducibility(row.sample_weight, m1, m180, input.w1, input.w2)
-            .ok_or("180 分钟总称量无效")?
+    let rt = if let Some(mt) = input.manual_mt.or(input.manual_m180) {
+        reducibility(row.sample_weight, m1, mt, input.w1, input.w2)
+            .ok_or("还原终点总称量无效")?
             .rt
     } else {
-        value_at(&points, 180.0).ok_or("180 分钟处没有连续有效称量，可依据原始记录人工补录 m₁₈₀")?
+        value_at(&points, endpoint_min).ok_or_else(|| {
+            format!("{endpoint_min} 分钟处没有连续有效称量，可依据原始记录人工补录 mₜ")
+        })?
     };
     let rate = if let Some(manual) = &input.manual_rate_points {
+        if manual.iter().any(|(t, _)| *t > endpoint_min) {
+            return Err("人工速率曲线时间不能超出本次程序的还原终点".into());
+        }
         Some(
             reduction_rate(manual)
                 .ok_or("人工速率曲线须按时间递增并覆盖 30% 与 60%、55% 或 50% 还原度")?,
         )
     } else {
-        reduction_rate(&points)
+        // A delayed transition sample can bracket the endpoint, but thresholds
+        // reached after the programmed hold must not affect this result.
+        let mut bounded: Vec<_> = points
+            .iter()
+            .copied()
+            .filter(|(t, _)| *t < endpoint_min)
+            .collect();
+        if let Some(value) = value_at(&points, endpoint_min) {
+            bounded.push((endpoint_min, value));
+        }
+        reduction_rate(&bounded)
     };
-    let value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
-      "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"ri":rt,
+    let mut value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
+      "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"endpoint_min":endpoint_min,
       "reduction_rate_index":rate.as_ref().map(|r|r.index),"rate_evidence":rate,
       "runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
+    if custom {
+        value["standard_conformity"] = serde_json::json!("custom_conditions");
+    } else if endpoint_min == 180.0 {
+        value["ri"] = serde_json::json!(rt);
+    }
     Ok(value)
 }
 
@@ -3356,8 +3338,15 @@ fn initialize_state() -> AppState {
         recovery_dir,
         hub,
         mode,
-        limit_h2: comm_config.gas_safety_limits.h2,
-        limit_co: comm_config.gas_safety_limits.co,
+        limit_h2: comm_config
+            .gas_safety_limits
+            .h2
+            .min(tmh_core::clamp::H2_ABS_MAX),
+        limit_co: comm_config
+            .gas_safety_limits
+            .co
+            .min(tmh_core::clamp::CO_ABS_MAX),
+        flow_steps: custom_programs::flow_steps(&comm_config),
         audit,
         storage: Arc::new(Mutex::new(storage)),
         auth: Arc::new(AuthService::new(idle_timeout_s)),
@@ -3446,6 +3435,7 @@ pub fn run() {
             generate_sample_id,
             get_experiment_start_defaults,
             save_custom_program,
+            list_custom_program_revisions,
             delete_custom_program,
             list_experiments,
             get_experiment_detail,
@@ -3493,6 +3483,7 @@ mod tests {
             mode: "mock".into(),
             limit_h2: cfg.gas_safety_limits.h2,
             limit_co: cfg.gas_safety_limits.co,
+            flow_steps: custom_programs::flow_steps(&cfg),
             audit: Arc::new(AuditLog::new(dir.join("logs"))),
             storage: Arc::new(Mutex::new(Storage::open_in_memory().expect("db"))),
             auth: Arc::new(AuthService::new(900)),
@@ -3582,6 +3573,320 @@ mod tests {
             .expect("login");
     }
 
+    // Paste inside src-tauri/src/lib.rs's existing `tests` module.
+    // Reuses test_state, seed_users_and_experiments, login and params.
+    // No production implementation or hardware I/O is introduced here.
+
+    // Insert into the existing src-tauri/src/lib.rs `tests` module.
+    // Uses its AppState, authentication, storage and mock-device fixtures.
+
+    #[test]
+    fn f06_review_outdated_parent_rejection_preserves_history() {
+        use tmh_core::provenance::{prepare_custom_revision, ProgramEditor};
+
+        let state = test_state();
+        let (admin_id, _, _) = seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+
+        let mut draft = standard_program("REDUCIBILITY").unwrap();
+        draft.id = "custom-outdated-parent-save".into();
+        draft.source = ProgramSource::Custom;
+        draft.stages[2].target_temp = 850.0;
+        let mut historical = prepare_custom_revision(
+            draft,
+            None,
+            ProgramEditor {
+                user_id: admin_id,
+                display_name: "Historical operator".into(),
+                edited_at: "2026-09-01T00:00:00Z".into(),
+            },
+            "Original saved conditions",
+        )
+        .unwrap();
+        // Model a previously authenticated revision whose bundled parent was later
+        // replaced. Both saved version identifiers agree with the original parent.
+        historical.template_revision = Some("GB-PROCEDURE-HISTORICAL".into());
+        historical
+            .provenance
+            .as_mut()
+            .unwrap()
+            .parent_template
+            .template_revision = historical.template_revision.clone();
+        lock(&state.storage)
+            .save_custom_program_revision(&historical, None)
+            .unwrap();
+
+        let original_json = lock(&state.storage)
+            .get_custom_program(&historical.id)
+            .unwrap()
+            .unwrap();
+        let original_history = lock(&state.storage)
+            .custom_program_revisions(&historical.id)
+            .unwrap();
+        assert_eq!(program_by_id(&state, &historical.id).unwrap(), historical);
+        assert_eq!(
+            custom_programs::history(&state, &historical.id).unwrap(),
+            vec![historical.clone()]
+        );
+
+        let mut request = historical.clone();
+        request.stages[2].target_temp = 800.0;
+        let result = custom_programs::save(&state, request, "Try another temperature");
+        assert!(
+            result.is_err(),
+            "an obsolete parent must not produce a new saved revision: {result:?}"
+        );
+        assert_eq!(
+            lock(&state.storage)
+                .get_custom_program(&historical.id)
+                .unwrap(),
+            Some(original_json)
+        );
+        assert_eq!(
+            lock(&state.storage)
+                .custom_program_revisions(&historical.id)
+                .unwrap(),
+            original_history,
+            "rejecting the save must not append or rewrite any historical JSON"
+        );
+        assert_eq!(program_by_id(&state, &historical.id).unwrap(), historical);
+    }
+
+    #[test]
+    fn f06_review_purging_temperature_follows_snapshot() {
+        let mut state = test_state();
+        let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).unwrap();
+        // Speed up device polling only; retain the real actor/transport behaviour.
+        state.hub = Arc::new(DeviceHub::spawn(
+            TempActor::new(
+                Box::new(MockTransport::temp()),
+                cfg.temp.slave_address,
+                cfg.temp.scale,
+                cfg.temp.signed_registers,
+            ),
+            MfcActor::from_config(Box::new(MockTransport::mfc()), &cfg),
+            BalanceActor::new(Box::new(MockTransport::balance(100.0))),
+            HubIntervals {
+                temp: Duration::from_millis(5),
+                mfc: Duration::from_millis(5),
+                balance: Duration::from_millis(5),
+            },
+        ));
+        let wait_for_temperature = |target: f64| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let actual = state.hub.temp_rx().borrow().temps[7];
+                if actual.is_some_and(|t| (t - target).abs() <= 0.5) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "mock furnace must follow the applied stage target {target} C; T8={actual:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        let program = standard_program("REDUCIBILITY").unwrap();
+        let mut reducing = program
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Reducing)
+            .unwrap()
+            .clone();
+        reducing.target_temp = 850.0;
+        let purging = program
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Purging)
+            .unwrap();
+        assert_ne!(reducing.target_temp, purging.target_temp);
+
+        apply_stage_atmosphere(&state.hub, &reducing, 100.0).unwrap();
+        wait_for_temperature(reducing.target_temp);
+        // This is the unchanged standard ending snapshot, not an edited purge.
+        apply_stage_atmosphere(&state.hub, purging, 100.0).unwrap();
+        wait_for_temperature(purging.target_temp);
+    }
+
+    fn f06_native_draft(id: &str) -> Program {
+        let mut program = standard_program("REDUCIBILITY").unwrap();
+        program.id = id.into();
+        program.name = "Native custom-program boundary test".into();
+        program.source = ProgramSource::Custom;
+        program.category = "custom".into();
+        program.stages[2].target_temp = 850.0;
+        program
+    }
+
+    #[test]
+    fn f06_native_permissions_identity_conflicts_and_retained_history() {
+        let state = test_state();
+        let (admin_id, alice_id, _) = seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+
+        // A structurally valid client provenance still cannot choose its audit actor.
+        let forged = tmh_core::provenance::prepare_custom_revision(
+            f06_native_draft("custom-native-access"),
+            None,
+            tmh_core::provenance::ProgramEditor {
+                user_id: "forged-user".into(),
+                display_name: "Forged operator".into(),
+                edited_at: "1900-01-01T00:00:00Z".into(),
+            },
+            "Client-supplied reason",
+        )
+        .unwrap();
+        let first =
+            custom_programs::save(&state, forged, "Create shared research template").unwrap();
+        let first_provenance = first.provenance.as_ref().unwrap();
+        assert_eq!(first_provenance.revision, 1);
+        assert_eq!(first_provenance.edited_by_user_id, admin_id);
+        assert_eq!(first_provenance.edited_by, "管理员");
+        assert_ne!(first_provenance.edited_at, "1900-01-01T00:00:00Z");
+        assert_eq!(first_provenance.reason, "Create shared research template");
+
+        let assert_mutations_denied = || {
+            let mut update = first.clone();
+            update.stages[2].target_temp = 825.0;
+            assert!(custom_programs::save(&state, update, "Attempt restricted update").is_err());
+            assert!(custom_programs::delete(&state, &first.id).is_err());
+            let raw = lock(&state.storage)
+                .get_custom_program(&first.id)
+                .unwrap()
+                .expect("a rejected mutation must leave the shared template intact");
+            assert_eq!(serde_json::from_str::<Program>(&raw).unwrap(), first);
+        };
+
+        state.auth.logout();
+        assert_mutations_denied();
+        assert_eq!(
+            custom_programs::history(&state, &first.id).unwrap_err(),
+            "AUTH_REQUIRED"
+        );
+
+        login(&state, "alice", "temp-password");
+        assert_mutations_denied();
+        assert_eq!(
+            custom_programs::history(&state, &first.id).unwrap(),
+            vec![first.clone()]
+        );
+        state.auth.lock();
+        assert_mutations_denied();
+        assert_eq!(
+            custom_programs::history(&state, &first.id).unwrap_err(),
+            "AUTH_REQUIRED"
+        );
+
+        login(&state, "admin", "admin-password");
+        state.exp.updating.store(true, Ordering::SeqCst);
+        assert_mutations_denied();
+        state.exp.updating.store(false, Ordering::SeqCst);
+        state.exp.set_status(ExperimentStatus {
+            running: true,
+            phase: Phase::Running,
+            experiment_id: Some("exp-alice".into()),
+            owner_user_id: Some(alice_id),
+            ..ExperimentStatus::idle()
+        });
+        assert_mutations_denied();
+        state.exp.set_status(ExperimentStatus::idle());
+
+        let mut update = first.clone();
+        update.stages[2].target_temp = 800.0;
+        update.provenance.as_mut().unwrap().edited_by_user_id = "forged-user".into();
+        let second = custom_programs::save(&state, update, "Compare the next temperature").unwrap();
+        assert_eq!(second.provenance.as_ref().unwrap().revision, 2);
+        assert_eq!(
+            second.provenance.as_ref().unwrap().edited_by_user_id,
+            admin_id
+        );
+
+        // A stale editor must not replace revision 2 or append a spurious revision.
+        let mut stale = first.clone();
+        stale.stages[2].target_temp = 775.0;
+        assert!(custom_programs::save(&state, stale, "Stale editor submission").is_err());
+        let history = custom_programs::history(&state, &first.id).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history.contains(&first),
+            "the original revision was overwritten"
+        );
+        assert!(history.contains(&second), "the current revision was lost");
+
+        custom_programs::delete(&state, &first.id).unwrap();
+        assert!(lock(&state.storage)
+            .get_custom_program(&first.id)
+            .unwrap()
+            .is_none());
+        login(&state, "alice", "temp-password");
+        assert_eq!(
+            custom_programs::history(&state, &first.id).unwrap(),
+            history,
+            "deleting the current shared template must preserve readable revision evidence"
+        );
+    }
+
+    #[test]
+    fn f06_native_preflight_rejects_unversioned_templates_and_rechecks_changed_gas_limits() {
+        let mut state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+
+        // A structurally valid legacy template is readable, but has no provenance.
+        let mut legacy = f06_native_draft("custom-native-legacy");
+        legacy.provenance = None;
+        lock(&state.storage)
+            .save_custom_program(&legacy.id, &serde_json::to_string(&legacy).unwrap())
+            .unwrap();
+        let check = build_preflight(&state, &params(|p| p.experiment_type = legacy.id.clone()));
+        assert!(
+            check.program.is_some(),
+            "legacy history must remain readable"
+        );
+        assert!(!check.ok);
+        assert!(
+            check
+                .blocking
+                .iter()
+                .any(|issue| issue.code == "PROGRAM_INVALID"),
+            "unready mock devices alone must not make this test pass"
+        );
+
+        // Save under the original valid limits, then lower one live limit. This
+        // catches execution paths that trust a past successful save indefinitely.
+        for (channel, id) in [(0, "custom-native-h2"), (3, "custom-native-co")] {
+            let mut draft = f06_native_draft(id);
+            draft.stages[2].gas[channel] = 1.0;
+            let saved =
+                custom_programs::save(&state, draft, "Prepare a changed-limit scenario").unwrap();
+            let old_h2 = state.limit_h2;
+            let old_co = state.limit_co;
+            if channel == 0 {
+                state.limit_h2 = 0.5;
+            } else {
+                state.limit_co = 0.5;
+            }
+            let check = build_preflight(&state, &params(|p| p.experiment_type = saved.id.clone()));
+            assert!(!check.ok);
+            assert!(
+                check
+                    .blocking
+                    .iter()
+                    .any(|issue| issue.code == "PROGRAM_GAS_INVALID"),
+                "channel {channel}: excessive gas must block execution, not only warn or clamp"
+            );
+            assert!(
+            !check
+                .blocking
+                .iter()
+                .any(|issue| issue.code == "PROGRAM_INVALID"),
+            "channel {channel}: the saved provenance is valid; only the new limit is incompatible"
+        );
+            state.limit_h2 = old_h2;
+            state.limit_co = old_co;
+        }
+    }
     #[test]
     fn anonymous_session_is_refused_by_every_guard() {
         let state = test_state();
@@ -3902,6 +4207,7 @@ mod tests {
                 w2: 60.0,
                 manual_m1: None,
                 manual_m180: None,
+                manual_mt: None,
                 manual_rate_points: None,
                 source_record: None,
             },
@@ -3998,6 +4304,90 @@ mod tests {
             .validate()
             .expect("fallback config valid");
     }
+    // Insert into src-tauri/src/lib.rs's existing `tests` module.
+    // The stage-transition sample may arrive after the configured endpoint. It is
+    // useful for interpolation at that endpoint, but later threshold crossings must
+    // not change the rate calculation for the completed program.
+    #[test]
+    fn automatic_reduction_rate_uses_only_the_saved_program_endpoint() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        let mut experiment = lock(&state.storage)
+            .list_experiments()
+            .unwrap()
+            .pop()
+            .unwrap();
+        experiment.sample_weight = 100.0;
+        let mut program = standard_program("REDUCIBILITY").unwrap();
+        program.id = "custom-ten-minute-rate".into();
+        program.source = ProgramSource::Custom;
+        program.stages[2].duration_min = 10.0;
+        experiment.program_snapshot_json = Some(serde_json::to_string(&program).unwrap());
+
+        // Include a point below 30% so the threshold is interpolated even if finite
+        // mass arithmetic returns a value infinitesimally above exactly 30%.
+        let samples: Vec<SampleRow> = [(0.0, 0.0), (1.0, 30.0), (9.0, 55.0), (11.0, 60.0)]
+            .into_iter()
+            .map(|(minutes, rt)| {
+                let mass = 100.0 - rt * 0.215;
+                let mut sample = row("REDUCING", 0, mass, false);
+                sample.experiment_id = experiment.experiment_id.clone();
+                sample.record_json = Some(
+                    serde_json::json!({
+                        "stage_elapsed_s": minutes * 60.0,
+                        "telemetry": {"health": {
+                            "balance_valid": true,
+                            "temp_valid": true,
+                            "mfc_valid": true
+                        }}
+                    })
+                    .to_string(),
+                );
+                sample
+            })
+            .collect();
+        let input: ReductionInput =
+            serde_json::from_value(serde_json::json!({"w1": 0.0, "w2": 50.0})).unwrap();
+        let metadata = serde_json::json!({
+            "reduction_m1": 100.0,
+            "sample_interval_s": 600.0
+        });
+
+        let result = calculate_reduction(&experiment, &samples, &metadata, &input).unwrap();
+        assert_eq!(result["endpoint_min"], 10.0);
+        assert_eq!(result["manual_used"], false);
+        assert!((result["rt"].as_f64().unwrap() - 57.5).abs() < 1e-10);
+        assert_eq!(
+            result["rate_evidence"]["endpoint_percent"], 55.0,
+            "60% is first reached after the program ends; the rate must use its 55% fallback"
+        );
+        assert!((result["rate_evidence"]["endpoint_min"].as_f64().unwrap() - 9.0).abs() < 1e-10);
+        assert!((result["reduction_rate_index"].as_f64().unwrap() - 26.5 / 8.0).abs() < 1e-10);
+    }
+    #[test]
+    fn a_custom_reduction_uses_its_saved_endpoint_and_never_calls_it_r180() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        let mut row = lock(&state.storage)
+            .list_experiments()
+            .unwrap()
+            .pop()
+            .unwrap();
+        row.sample_weight = 500.0;
+        let mut program = standard_program("REDUCIBILITY").unwrap();
+        program.source = ProgramSource::Custom;
+        program.id = "custom-sixty".into();
+        program.stages[2].duration_min = 60.0;
+        row.program_snapshot_json = Some(serde_json::to_string(&program).unwrap());
+        let input: ReductionInput=serde_json::from_value(serde_json::json!({"w1":10.0,"w2":60.0,"manual_m1":1500.0,"manual_mt":1450.0,"source_record":"60 min source"})).unwrap();
+        let value = calculate_reduction(&row, &[], &serde_json::json!({}), &input).unwrap();
+        assert_eq!(value["endpoint_min"], 60.0);
+        assert!(value.get("ri").is_none());
+        assert!((value["rt"].as_f64().unwrap() - 43.06201550387597).abs() < 1e-10);
+        assert_eq!(value["standard_conformity"], "custom_conditions");
+        let legacy: ReductionInput=serde_json::from_value(serde_json::json!({"w1":10.0,"w2":60.0,"manual_m1":1500.0,"manual_m180":1450.0,"source_record":"wrong endpoint"})).unwrap();
+        assert!(calculate_reduction(&row, &[], &serde_json::json!({}), &legacy).is_err());
+    }
     #[test]
     fn manual_missing_data_can_produce_a_traceable_standard_calculation() {
         let state = test_state();
@@ -4013,6 +4403,7 @@ mod tests {
             w2: 60.0,
             manual_m1: Some(1500.0),
             manual_m180: Some(1450.0),
+            manual_mt: None,
             manual_rate_points: Some(vec![(0.0, 30.0), (10.0, 60.0)]),
             source_record: Some("原始记录 LAB-001".into()),
         };

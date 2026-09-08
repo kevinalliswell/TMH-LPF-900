@@ -1,4 +1,8 @@
-import { validStageDuration } from "../../ipc/programRules";
+import {
+  programValueErrors,
+  customShapeError,
+  gasConditionErrors,
+} from "../../ipc/programRules";
 import type {
   GasLimits,
   ProgramDto,
@@ -95,7 +99,7 @@ export function gasSummary(gas: number[]): string {
 }
 
 export function formatNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return String(Number(value.toFixed(6)));
 }
 
 export function fixedDurationMin(program: ProgramDto): number {
@@ -145,6 +149,7 @@ export function copyAsCustom(program: ProgramDto): ProgramDto {
   return {
     ...cloneProgram(program),
     id: "",
+    provenance: null,
     name: `自定义_${program.name}`,
     description: `从 ${program.name} 复制的自定义实验模式`,
     category: "custom",
@@ -170,41 +175,16 @@ export function validateProgramDraft(
   program: ProgramDto,
   limits?: GasLimits | null,
 ): ProgramValidation {
-  const errors: string[] = [];
+  const errors = programValueErrors(program);
   const warnings: string[] = [];
-  if (!program.name.trim()) errors.push("模式名称必填");
-  if (!/^[A-Z0-9]{2,8}$/.test(program.sample_prefix))
-    errors.push("样品编号前缀需为 2-8 位字母或数字");
-  if (program.stages.length === 0) errors.push("至少需要一个阶段");
-
-  program.stages.forEach((stage, i) => {
-    const n = i + 1;
-    if (!stage.name.trim()) errors.push(`第 ${n} 阶段名称必填`);
-    if (!Number.isFinite(stage.target_temp))
-      errors.push(`第 ${n} 阶段目标温度无效`);
-    if (!Number.isFinite(stage.tolerance) || stage.tolerance < 0)
-      errors.push(`第 ${n} 阶段容差必须为非负数`);
-    if (!Number.isFinite(stage.duration_min) || stage.duration_min < 0)
-      errors.push(`第 ${n} 阶段时长必须为非负数`);
-    if (!validStageDuration(stage))
-      errors.push(
-        `第 ${n} 阶段类型与时长不匹配：恒温、还原、吹扫需正时长，升温、冷却、人工确认为 0`,
-      );
-    if (!Number.isFinite(stage.ramp_rate))
-      errors.push(`第 ${n} 阶段升温速率无效`);
-    const gas = normalizeGas(stage.gas);
-    if (gas.some((v) => !Number.isFinite(v) || v < 0))
-      errors.push(`第 ${n} 阶段气体流量必须为非负数`);
-    if (stage.kind !== "MANUAL" && gas.reduce((a, b) => a + b, 0) <= 0)
-      errors.push(`第 ${n} 阶段总流量必须大于 0`);
-    const h2 = gas[0] ?? 0;
-    const co = gas[3] ?? 0;
-    if (limits && h2 > limits.h2)
-      warnings.push(`第 ${n} 阶段 H₂ 超过安全上限 ${limits.h2} L/min`);
-    if (limits && co > limits.co)
-      warnings.push(`第 ${n} 阶段 CO 超过安全上限 ${limits.co} L/min`);
-  });
-
+  if (program.source === "custom") {
+    const error = customShapeError(
+      program,
+      program.provenance?.parent_template,
+    );
+    if (error) errors.push(error);
+  }
+  if (limits) errors.push(...gasConditionErrors(program, limits));
   return { errors, warnings };
 }
 

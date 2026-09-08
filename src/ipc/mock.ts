@@ -1,4 +1,12 @@
-import { validStageDuration } from "./programRules";
+import { programSnapshotHtml } from "./reportPreview";
+import {
+  programValueErrors,
+  customShapeError,
+  gasConditionErrors,
+  executableProgramError,
+  standardParent,
+  conditionChanges,
+} from "./programRules";
 import standardPrograms from "../../config/standard_programs.json";
 // Browser-only synthetic engine (docs/08 dual-mode). Mirrors the Rust backend closely
 // enough that `pnpm dev:web` / the preview renders a faithful M4 demo without Tauri:
@@ -127,6 +135,8 @@ export function mockTelemetry(cb: (s: TelemetrySnapshot) => void): () => void {
 
 // ---- program tables (mirror tmh_core::engine::standard_program) ----
 const customPrograms: ProgramDto[] = [];
+const customRevisions = new Map<string, ProgramDto[]>();
+const programGasLimits = { h2: 5, co: 5, flow_steps: [0.01, 0.1, 0.01, 0.01] };
 const PROGRAMS = standardPrograms as ProgramDto[];
 
 export function mockListPrograms(): ProgramDto[] {
@@ -335,8 +345,11 @@ export function mockStartExperiment(p: ExperimentParams): string {
   if (experiment.running) throw new Error("实验已在运行");
   const program = mockListPrograms().find((pr) => pr.id === p.experiment_type);
   if (!program) throw new Error("未知实验模式");
-  if (program.stages.some((s) => !validStageDuration(s)))
-    throw new Error("阶段类型与时长不匹配");
+  const error =
+    executableProgramError(program) ??
+    gasConditionErrors(program, programGasLimits)[0];
+  if (error) throw new Error(error);
+  if (!program.enabled) throw new Error("实验模式已停用");
 
   const id = `exp-${Date.now()}`;
   const started = new Date().toISOString();
@@ -668,7 +681,7 @@ h1{font-size:20px}h2{font-size:14px;border-bottom:2px solid #d9631f;padding-bott
 table{border-collapse:collapse}th,td{border:1px solid #e2e2e2;padding:5px 10px;text-align:left}th{background:#f6f6f6}\
 pre{background:#f6f6f6;padding:10px;border-radius:4px;font-size:12px}</style></head><body>\
 <h1>铁矿石冶金性能检测报告</h1><div style="color:#666;font-size:12px">TMH-LPF-900 · 北京科技大学（浏览器预览）</div>\
-<h2>实验信息</h2><table>${meta}</table><h2>报告人工补录（浏览器模拟）</h2><pre>${esc(JSON.stringify(d.runtime?.report_details ?? "待补录", null, 2))}</pre><h2>结果分析</h2>${analysis}</body></html>`;
+<h2>实验信息</h2><table>${meta}</table><h2>报告人工补录（浏览器模拟）</h2><pre>${esc(JSON.stringify(d.runtime?.report_details ?? "待补录", null, 2))}</pre>${programSnapshotHtml(d.program_snapshot)}<h2>结果分析</h2>${analysis}</body></html>`;
 }
 
 // ---- GB analyses (mirror tmh_core::gb) ----
@@ -683,10 +696,19 @@ export function mockAnalyze13241(
       h.detail.experiment_type) !== "REDUCIBILITY"
   )
     throw new Error("分析方法不匹配");
-  const { manual_m1: m1, manual_m180: m180, w1, w2 } = input;
+  const endpoint =
+    h.detail.program_snapshot?.stages.find((s) => s.kind === "REDUCING")
+      ?.duration_min ?? 180;
+  if (
+    input.manual_m180 != null &&
+    (endpoint !== 180 || input.manual_mt != null)
+  )
+    throw new Error("m₁₈₀ 仅适用于 180 分钟终点且不能与 mₜ 重复补录");
+  const { manual_m1: m1, w1, w2 } = input;
+  const m180 = input.manual_mt ?? input.manual_m180;
   if (m1 == null || m180 == null)
     throw new Error(
-      "浏览器旧模拟记录缺少还原称量，请依据原始记录补录 m₁ 和 m₁₈₀",
+      "浏览器旧模拟记录缺少还原称量，请依据原始记录补录 m₁ 和 mₜ",
     );
   if (!input.source_record?.trim())
     throw new Error("人工补录须填写原始记录编号或来源说明");
@@ -711,6 +733,7 @@ export function mockAnalyze13241(
           !Number.isFinite(t) ||
           !Number.isFinite(y) ||
           t < 0 ||
+          t > endpoint ||
           (i > 0 && points[i - 1]![0] >= t),
       )
     )
@@ -759,12 +782,16 @@ export function mockAnalyze13241(
     m0,
     m1,
     rt,
-    ri: rt,
+    ...(h.detail.program_snapshot?.source === "custom" ? {} : { ri: rt }),
+    endpoint_min: endpoint,
     reduction_rate_index: rate?.index ?? null,
     rate_evidence: rate,
     manual_used: true,
     result_scope: "single_trial",
-    standard_conformity: "pending_group_and_process_verification",
+    standard_conformity:
+      h.detail.program_snapshot?.source === "custom"
+        ? "custom_conditions"
+        : "pending_group_and_process_verification",
     computed_by: mockCurrentUser()?.display_name,
     computed_at: new Date().toISOString(),
   };
@@ -850,19 +877,60 @@ function modeAdmin(): void {
   if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
   if (run) throw new Error("实验运行中不可修改模式");
 }
-export function mockSaveCustomProgram(program: ProgramDto): ProgramDto {
+export function mockSaveCustomProgram(
+  program: ProgramDto,
+  reason: string,
+): ProgramDto {
   modeAdmin();
-  if (program.stages.some((s) => !validStageDuration(s)))
-    throw new Error("阶段类型与时长不匹配");
+  if (!reason?.trim() || reason.length > 4096)
+    throw new Error("请填写修改原因（1—4096 字）");
   if (PROGRAMS.some((p) => p.id === program.id))
     throw new Error("标准模式不可覆盖");
   const p = structuredClone(program);
   p.id ||= `custom-${crypto.randomUUID()}`;
+  if (!p.id.startsWith("custom-")) throw new Error("自定义程序编号无效");
   p.source = "custom";
   const i = customPrograms.findIndex((x) => x.id === p.id);
+  const previous = customPrograms[i];
+  if (!previous && customRevisions.has(p.id))
+    throw new Error("已删除程序不能复用编号");
+  if (
+    previous &&
+    (previous.base_standard_id !== p.base_standard_id ||
+      previous.provenance?.revision !== p.provenance?.revision)
+  )
+    throw new Error("程序版本已变化或基础标准不匹配，请重新读取后编辑");
+  const parent = previous?.provenance?.parent_template ?? standardParent(p);
+  const error =
+    programValueErrors(p)[0] ??
+    customShapeError(p, parent) ??
+    gasConditionErrors(p, programGasLimits)[0];
+  if (error) throw new Error(error);
+  if (!parent) throw new Error("基础国标未知");
+  const user = mockCurrentUser()!;
+  p.provenance = {
+    revision: (previous?.provenance?.revision ?? 0) + 1,
+    parent_template: structuredClone(parent),
+    edited_by_user_id: user.user_id,
+    edited_by: user.display_name,
+    edited_at: new Date().toISOString(),
+    reason: reason.trim(),
+    changes: conditionChanges(p, parent),
+  };
+  const executionError = executableProgramError(p);
+  if (executionError) throw new Error(executionError);
   if (i < 0) customPrograms.push(p);
   else customPrograms[i] = p;
+  customRevisions.set(p.id, [
+    structuredClone(p),
+    ...(customRevisions.get(p.id) ??
+      (previous ? [structuredClone(previous)] : [])),
+  ]);
   return structuredClone(p);
+}
+export function mockListCustomProgramRevisions(id: string): ProgramDto[] {
+  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
+  return structuredClone(customRevisions.get(id) ?? []);
 }
 export function mockDeleteCustomProgram(id: string): void {
   modeAdmin();
@@ -925,11 +993,12 @@ export function mockPreflightExperiment(
     });
   if (!program?.enabled)
     blocking.push({ code: "PROGRAM", message_zh: "实验模式不可用" });
-  if (program?.stages.some((s) => !validStageDuration(s)))
-    blocking.push({
-      code: "PROGRAM_INVALID",
-      message_zh: "阶段类型与时长不匹配，请明确修改后保存",
-    });
+  if (program) {
+    const error = executableProgramError(program);
+    if (error) blocking.push({ code: "PROGRAM_INVALID", message_zh: error });
+    for (const message_zh of gasConditionErrors(program, programGasLimits))
+      blocking.push({ code: "PROGRAM_GAS_INVALID", message_zh });
+  }
   return { ok: !blocking.length, blocking, warnings: [], program };
 }
 

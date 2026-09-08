@@ -42,6 +42,7 @@ export interface TareResult {
 export interface GasLimits {
   h2: number;
   co: number;
+  flow_steps?: number[];
 }
 
 /** Cadences the backend loaded from `comm_config.json` (docs/06 §6.3). The UI mirrors
@@ -139,7 +140,25 @@ export interface StageDto {
 
 export type ProgramSource = "standard" | "custom";
 
+export interface ProgramChange {
+  stage_index: number;
+  field: keyof StageDto;
+  before: string | number | number[];
+  after: string | number | number[];
+}
+
+export interface ProgramProvenance {
+  revision: number;
+  parent_template: ProgramDto;
+  edited_by_user_id: string;
+  edited_by: string;
+  edited_at: string;
+  reason: string;
+  changes: ProgramChange[];
+}
+
 export interface ProgramDto {
+  provenance?: ProgramProvenance | null;
   template_revision?: string | null;
   base_standard_id?: string | null;
   base_standard_version?: string | null;
@@ -270,6 +289,7 @@ export interface ReductionInput {
   w2: number;
   manual_m1?: number | null;
   manual_m180?: number | null;
+  manual_mt?: number | null;
   manual_rate_points?: [number, number][] | null;
   source_record?: string | null;
 }

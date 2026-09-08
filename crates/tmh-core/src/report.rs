@@ -140,6 +140,9 @@ fn analysis_html(analysis: Option<&serde_json::Value>) -> String {
         "GB/T 13241" => {
             if let Some(v) = f("rt") {
                 push("还原度 Rt", format!("{v:.2} %"));
+                if let Some(t) = f("endpoint_min") {
+                    push("计算终点", format!("{t} min"));
+                }
             }
             if let Some(v) = f("delta_w") {
                 push("失重 ΔW", format!("{v:.3} g"));
@@ -205,6 +208,15 @@ fn conditions_html(
         .program_snapshot_json
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
+    let target = program
+        .as_ref()
+        .and_then(|p| {
+            p.stages
+                .iter()
+                .find(|s| s.kind == crate::engine::StageKind::Reducing)
+        })
+        .map(|s| s.target_temp)
+        .or(target);
     let method = program
         .as_ref()
         .and_then(|p| p.base_standard_id.as_deref())
@@ -320,6 +332,62 @@ fn conditions_html(
       meta_row("执行程序还原目标",&target.map(|v|format!("{v} ℃")).unwrap_or_else(||"待确认".into())))
 }
 
+fn custom_program_evidence_html(program: &crate::engine::Program) -> String {
+    if program.source != crate::engine::ProgramSource::Custom {
+        return String::new();
+    }
+    let mut html = String::from(
+        "<h3>自定义程序依据</h3><p>自定义结果用于研究比较，不能据此声明符合国标方法。</p>",
+    );
+    let Some(p) = &program.provenance else {
+        html.push_str(
+            "<p>历史程序没有保存版本依据、编辑者及条件差异；不能推定与当前模板一致。</p>",
+        );
+        return html;
+    };
+    html.push_str(&format!(
+        "<table class=\"kv\">{}{}{}{}{}</table>",
+        meta_row("自定义版本", &p.revision.to_string()),
+        meta_row("基础国标", &p.parent_template.name),
+        meta_row("保存人", &p.edited_by),
+        meta_row("保存时间", &p.edited_at),
+        meta_row("修改原因", &p.reason)
+    ));
+    if p.changes.is_empty() {
+        html.push_str("<p>实验条件与保存的基础国标模板一致。</p>");
+        return html;
+    }
+    html.push_str("<table class=\"kv3\"><tr><th>阶段 / 条件</th><th>基础国标条件</th><th>自定义条件</th></tr>");
+    for c in &p.changes {
+        let label = match c.field.as_str() {
+            "target_temp" => "温度 (℃)",
+            "tolerance" => "容差 (℃)",
+            "duration_min" => "时长 (min)",
+            "ramp_rate" => "升温率 (℃/min)",
+            "gas" => "气体 [H₂, N₂, CO₂, CO] (L/min)",
+            "name" => "阶段名称",
+            "description" => "说明",
+            "kind" => "类型",
+            _ => &c.field,
+        };
+        let display = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string())
+        };
+        html.push_str(&format!(
+            "<tr><td>{} / {}</td><td>{}</td><td>{}</td></tr>",
+            c.stage_index + 1,
+            esc(label),
+            esc(&display(&c.before)),
+            esc(&display(&c.after))
+        ));
+    }
+    html.push_str("</table>");
+    html
+}
+
 fn procedure_evidence_html(exp: &ExperimentRow, analysis: Option<&serde_json::Value>) -> String {
     let runtime = analysis.and_then(|a| a.get("runtime_evidence"));
     let program: Option<crate::engine::Program> = exp
@@ -354,6 +422,9 @@ fn procedure_evidence_html(exp: &ExperimentRow, analysis: Option<&serde_json::Va
                 .unwrap_or("未记录")
         )
     );
+    if let Some(program) = &program {
+        html.push_str(&custom_program_evidence_html(program));
+    }
     let events = runtime.and_then(|r| r["stage_actions"].as_array());
     if let Some(events) = events.filter(|events| !events.is_empty()) {
         html.push_str("<table class=\"kv3\"><tr><th>步骤</th><th>操作</th><th>确认人 / 时间</th><th>备注</th></tr>");
@@ -737,6 +808,37 @@ mod tests {
         assert!(html.contains("30.00 min"));
         assert!(html.contains("180 min"));
         assert!(html.contains("操作员提前取样"));
+    }
+    #[test]
+    fn custom_report_preserves_executed_revision_reason_and_condition_changes() {
+        use crate::provenance::{prepare_custom_revision, ProgramEditor};
+        let mut p = crate::engine::standard_program("REDUCIBILITY").unwrap();
+        p.id = "custom-report".into();
+        p.stages[2].target_temp = 850.0;
+        let saved = prepare_custom_revision(
+            p,
+            None,
+            ProgramEditor {
+                user_id: "a".into(),
+                display_name: "Lab <A>".into(),
+                edited_at: "2026-09-08T12:00:00Z".into(),
+            },
+            "Compare <850>",
+        )
+        .unwrap();
+        let mut row = exp();
+        row.program_snapshot_json = Some(serde_json::to_string(&saved).unwrap());
+        let html = render_report_html(&row, &[], None, None);
+        assert!(html.contains("自定义版本"));
+        assert!(html.contains("Compare &lt;850&gt;"));
+        assert!(html.contains("Lab &lt;A&gt;"));
+        assert!(html.contains("基础国标条件"));
+        assert!(html.contains("850"));
+        assert!(html.contains("不能据此声明符合国标方法"));
+        let mut point = sample(850.0, 99.0);
+        point.experiment_status = Some("REDUCING".into());
+        let conditions = conditions_html(&row, &[point], Some(900.0), None);
+        assert!(conditions.contains("<th>执行程序还原目标</th><td>850 ℃</td>"));
     }
     #[test]
     fn manual_operation_evidence_is_visible_and_escaped() {

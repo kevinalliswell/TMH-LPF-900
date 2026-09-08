@@ -137,6 +137,9 @@ pub struct ReductionInput {
     pub manual_m1: Option<f64>,
     #[serde(default)]
     pub manual_m180: Option<f64>,
+    /// Total mass at the endpoint stored in the executed program snapshot.
+    #[serde(default)]
+    pub manual_mt: Option<f64>,
     #[serde(default)]
     pub manual_rate_points: Option<Vec<(f64, f64)>>,
     #[serde(default)]

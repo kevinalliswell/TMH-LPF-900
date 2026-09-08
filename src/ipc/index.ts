@@ -51,6 +51,7 @@ import {
   mockListExperiments,
   mockListPrograms,
   mockSaveCustomProgram,
+  mockListCustomProgramRevisions,
   mockDeleteCustomProgram,
   mockPreflightExperiment,
   mockGenerateSampleId,
@@ -207,7 +208,9 @@ export async function getRuntimeMode(): Promise<RuntimeMode> {
 }
 
 export async function getGasSafetyLimits(): Promise<GasLimits> {
-  return isTauri() ? invoke("get_gas_safety_limits") : { h2: 5, co: 5 };
+  return isTauri()
+    ? invoke("get_gas_safety_limits")
+    : { h2: 5, co: 5, flow_steps: [0.01, 0.1, 0.01, 0.01] };
 }
 
 /** Cadences from the backend's loaded config; the browser mock mirrors docs/06 §6.3. */
@@ -448,10 +451,19 @@ export function subscribeTelemetry(
 
 export async function saveCustomProgram(
   program: ProgramDto,
+  reason: string,
 ): Promise<ProgramDto> {
   return isTauri()
-    ? invoke("save_custom_program", { program })
-    : mockSaveCustomProgram(program);
+    ? invoke("save_custom_program", { program, reason })
+    : mockSaveCustomProgram(program, reason);
+}
+
+export async function listCustomProgramRevisions(
+  id: string,
+): Promise<ProgramDto[]> {
+  return isTauri()
+    ? invoke("list_custom_program_revisions", { id })
+    : mockListCustomProgramRevisions(id);
 }
 
 export async function deleteCustomProgram(id: string): Promise<void> {
