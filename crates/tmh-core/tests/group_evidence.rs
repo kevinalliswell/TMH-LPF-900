@@ -80,3 +80,25 @@ fn frozen_report_preserves_exclusions_and_requires_valid_evidence() {
     moved.batch_id = "Other batch".into();
     assert!(build_snapshot(&moved, Some(&snapshot), snapshot.trials.clone(), "Operator").is_err());
 }
+
+#[test]
+fn later_snapshot_reuses_original_members_even_if_the_caller_reloads_new_evidence() {
+    let request = request();
+    let first = build_snapshot(
+        &request,
+        None,
+        vec![trial("a", 1), trial("bad", 2), trial("b", 3)],
+        "Alice",
+    )
+    .unwrap();
+    let mut reloaded = first.trials.clone();
+    reloaded[0].experiment.analysis_results_json = Some(json!({"ri":99}).to_string());
+    reloaded[0].analysis_revision_id = Some(900);
+    reloaded[0].runtime["report_details"] = json!({"lab_name":"Changed after v1"});
+    let second = build_snapshot(&request, Some(&first), reloaded, "Bob").unwrap();
+    assert_eq!(
+        serde_json::to_value(&second.trials).unwrap(),
+        serde_json::to_value(&first.trials).unwrap()
+    );
+    assert_eq!(second.evaluation.reported["RI"].as_deref(), Some("42.0"));
+}

@@ -241,6 +241,15 @@ pub fn build_snapshot(
         }
     }
     for trial in &mut trials {
+        // Freeze is a domain invariant, even if a caller has reloaded a newer
+        // single-trial analysis. Only the explicit exclusion choice may change.
+        if let Some(frozen) = previous.and_then(|p| {
+            p.trials
+                .iter()
+                .find(|old| old.experiment.experiment_id == trial.experiment.experiment_id)
+        }) {
+            *trial = frozen.clone();
+        }
         trial.exclusion_reason = request
             .trials
             .iter()
