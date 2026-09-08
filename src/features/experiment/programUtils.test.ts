@@ -64,7 +64,7 @@ describe("program utilities", () => {
     expect(normalizeSamplePrefix("", "LOW_TEMP_DEGRADATION")).toBe("RDI");
   });
 
-  it("validates blocking errors separately from flammable warnings", () => {
+  it("blocks excessive flammable setpoints before saving", () => {
     const warning = validateProgramDraft(
       {
         ...program,
@@ -74,9 +74,9 @@ describe("program utilities", () => {
       },
       { h2: 5, co: 5 },
     );
-    expect(warning.errors).toHaveLength(0);
-    expect(warning.warnings.join(" ")).toContain("H₂");
-    expect(warning.warnings.join(" ")).toContain("CO");
+    expect(warning.warnings).toHaveLength(0);
+    expect(warning.errors.join(" ")).toContain("H₂");
+    expect(warning.errors.join(" ")).toContain("CO");
 
     const invalid = validateProgramDraft({
       ...program,

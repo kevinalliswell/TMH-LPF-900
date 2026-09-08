@@ -46,3 +46,30 @@ fn upgrading_a_legacy_program_preserves_the_exact_unversioned_json() {
     assert_eq!(history.len(), 2);
     assert_eq!(history[1], old);
 }
+
+#[test]
+fn a_failed_history_insert_rolls_back_the_current_program_and_old_baseline() {
+    let path =
+        std::env::temp_dir().join(format!("tmh_revision_{}.db", tmh_core::auth::new_user_id()));
+    let mut db = Storage::open(&path).unwrap();
+    let mut p = standard_program("REDUCIBILITY").unwrap();
+    p.id = "custom-atomic".into();
+    p.source = ProgramSource::Custom;
+    let raw = serde_json::to_string(&p).unwrap();
+    db.save_custom_program(&p.id, &raw).unwrap();
+    let first = prepare_custom_revision(p, None, editor(), "Initial").unwrap();
+    let fault = rusqlite::Connection::open(&path).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_revision BEFORE INSERT ON custom_program_revisions WHEN NEW.revision=1 BEGIN SELECT RAISE(ABORT,'test write failure'); END;").unwrap();
+    assert!(db.save_custom_program_revision(&first, Some(&raw)).is_err());
+    assert_eq!(
+        db.get_custom_program(&first.id).unwrap().as_deref(),
+        Some(raw.as_str())
+    );
+    assert!(db.custom_program_revisions(&first.id).unwrap().is_empty());
+    fault.execute_batch("DROP TRIGGER fail_revision;").unwrap();
+    db.save_custom_program_revision(&first, Some(&raw)).unwrap();
+    assert_eq!(db.custom_program_revisions(&first.id).unwrap().len(), 2);
+    drop(fault);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}

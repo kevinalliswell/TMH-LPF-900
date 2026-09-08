@@ -1,3 +1,4 @@
+import { ProgramProvenance } from "./ProgramProvenance";
 import type { ProgramDto } from "../../ipc/types";
 import {
   STAGE_KIND_COLOR,
@@ -54,6 +55,7 @@ export function ProgramPreview({
         </div>
       </div>
 
+      <ProgramProvenance program={program} />
       <div className="overflow-x-auto">
         <table className="w-full text-[12px] border-collapse">
           <thead>
