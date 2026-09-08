@@ -59,7 +59,7 @@ fn legacy_edits_between_migration_and_version_one_are_all_retained() {
     db.save_custom_program(&p.id, &before).unwrap();
     drop(db);
     let old = rusqlite::Connection::open(&path).unwrap();
-    old.execute_batch("DROP TABLE custom_program_revisions; PRAGMA user_version=6;")
+    old.execute_batch("DROP TABLE test_group_revisions; DROP TABLE custom_program_revisions; PRAGMA user_version=6;")
         .unwrap();
     drop(old);
     let mut db = Storage::open(&path).unwrap();
