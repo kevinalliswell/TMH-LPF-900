@@ -2,7 +2,8 @@
 //! to the webview through typed commands + a telemetry Channel, and hardens the shell
 //! (single-instance). M4 runs the real experiment engine: a per-run tick task drives
 //! the furnace through its program stages, applies each stage's atmosphere through the
-//! safety clamp, samples to SQLite, and guarantees the safety atmosphere on every exit.
+//! safety clamp and samples to SQLite. Normal endings follow the selected procedure;
+//! stops and faults apply the protective atmosphere.
 
 use tmh_core::recovery;
 use tmh_core::storage::RunCompletion;
@@ -10,6 +11,7 @@ use tmh_core::storage::RunCompletion;
 mod auth_service;
 mod auth_session;
 mod persistence;
+mod procedure;
 use persistence::recover_unfinished;
 #[cfg(test)]
 use persistence::retry_pending_completions;
@@ -134,7 +136,7 @@ struct ExpControl {
     recovery_errors: Mutex<Vec<String>>,
     status: Mutex<ExperimentStatus>,
     stop: AtomicBool,
-    skip: AtomicBool,
+    stage_action: Mutex<Option<procedure::StageAction>>,
 }
 
 impl ExpControl {
@@ -146,7 +148,7 @@ impl ExpControl {
             recovery_errors: Mutex::new(Vec::new()),
             status: Mutex::new(ExperimentStatus::idle()),
             stop: AtomicBool::new(false),
-            skip: AtomicBool::new(false),
+            stage_action: Mutex::new(None),
         }
     }
     fn snapshot(&self) -> ExperimentStatus {
@@ -185,6 +187,7 @@ struct ExperimentStatus {
     target_temp: f64,
     tolerance: f64,
     stage_elapsed_s: f64,
+    stable_elapsed_s: f64,
     total_elapsed_s: f64,
     owner_user_id: Option<String>,
     owner_display_name: Option<String>,
@@ -210,6 +213,7 @@ impl ExperimentStatus {
             target_temp: 0.0,
             tolerance: 0.0,
             stage_elapsed_s: 0.0,
+            stable_elapsed_s: 0.0,
             total_elapsed_s: 0.0,
             owner_user_id: None,
             owner_display_name: None,
@@ -407,7 +411,6 @@ fn read_custom_programs(storage: &Storage) -> Result<Vec<Program>, String> {
         .into_iter()
         .map(|json| {
             let p: Program = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            validate_program(&p)?;
             Ok(p)
         })
         .collect()
@@ -472,6 +475,8 @@ fn kind_str(k: StageKind) -> &'static str {
         StageKind::Stabilizing => "STABILIZING",
         StageKind::Reducing => "REDUCING",
         StageKind::Cooling => "COOLING",
+        StageKind::Purging => "PURGING",
+        StageKind::Manual => "MANUAL",
     }
 }
 
@@ -558,7 +563,13 @@ fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) -> Result<(),
         .blocking_recv()
         .map_err(|_| "DEVICE_OFFLINE".to_string())?
         .map_err(|_| "DEVICE_OFFLINE".to_string())?;
-    hub.set_temp_target_c(stage.target_temp);
+    hub.set_temp_target_c(
+        if matches!(stage.kind, StageKind::Cooling | StageKind::Manual) {
+            25.0
+        } else {
+            stage.target_temp
+        },
+    );
     if stage.kind == StageKind::Reducing {
         // Mock only: reduction strips oxygen, so the sample loses mass over the stage.
         hub.set_balance_target_g(w0 * (1.0 - MOCK_REDUCTION_LOSS));
@@ -566,7 +577,7 @@ fn apply_stage_atmosphere(hub: &DeviceHub, stage: &Stage, w0: f64) -> Result<(),
     Ok(())
 }
 
-/// The safety atmosphere (docs/05 §5.5): N2=5.0, H2=CO2=CO=0. Applied on EVERY exit.
+/// Protective atmosphere for stop/fault/exit: N2=5.0, H2=CO2=CO=0.
 fn apply_safety_atmosphere(hub: &DeviceHub) -> Result<(), String> {
     let result = hub
         .request_shutoff_flammable()
@@ -645,6 +656,7 @@ fn status_running(
         target_temp: stage.map(|s| s.target_temp).unwrap_or(0.0),
         tolerance: stage.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: engine.stage_elapsed_s(),
+        stable_elapsed_s: engine.stable_elapsed_s(),
         total_elapsed_s: engine.total_elapsed_s(),
         owner_user_id: Some(owner_user_id.to_string()),
         owner_display_name: Some(owner_display_name.to_string()),
@@ -799,15 +811,45 @@ fn finalize(
     operator: &str,
     outcome: &str,
     total_s: f64,
+    normal_gas: Option<[f64; 4]>,
 ) {
-    let safety_result = apply_safety_atmosphere(hub); // hard invariant — every exit path
+    let normal =
+        outcome == "completed" && !exp.stop.load(Ordering::SeqCst) && !hub.safety_latched();
+    let outcome = if outcome == "completed" && !normal {
+        "stopped"
+    } else {
+        outcome
+    };
+    let normal_result = if normal {
+        normal_gas
+            .ok_or_else(|| "结束气氛缺失".into())
+            .and_then(|gas| procedure::confirm_normal_ending(hub, gas))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = &normal_result {
+        let _ = app.emit(
+            "app-notice",
+            format!("正常结束未确认，已请求保护气氛：{error}"),
+        );
+    }
+    let outcome = if normal_result.is_err() {
+        "error"
+    } else {
+        outcome
+    };
+    let safety_result = if normal && normal_result.is_ok() {
+        Ok(())
+    } else {
+        apply_safety_atmosphere(hub)
+    };
     let end = iso_now();
     let completion = RunCompletion {
         token: tmh_core::auth::new_user_id(),
         experiment_id: id.into(),
         end_time: end,
         rows: std::mem::take(&mut buffer.rows),
-        metadata: serde_json::json!({"outcome":outcome,"data_complete":buffer.dropped==0,"safety_confirmed":safety_result.is_ok(),"dropped_samples":buffer.dropped}),
+        metadata: serde_json::json!({"outcome":outcome,"data_complete":buffer.dropped==0,"safety_confirmed":safety_result.is_ok(),"dropped_samples":buffer.dropped,"ending_action":if normal && normal_result.is_ok() {"normal"} else {"protective"},"normal_ending_error":normal_result.err()}),
     };
     let recovery_dir = app.state::<AppState>().recovery_dir.clone();
     let journal = recovery::persist(&recovery_dir, &completion);
@@ -821,6 +863,22 @@ fn finalize(
     } else {
         lock(&exp.pending).push(completion.clone());
     }
+    if normal && committed.is_err() {
+        let protection = apply_safety_atmosphere(hub);
+        audit.write(
+            &AuditEntry::new(
+                Category::Experiment,
+                "persistence_fault_protection",
+                if protection.is_ok() {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Failure
+                },
+            )
+            .operator(operator)
+            .detail(serde_json::json!({"id":id,"error":protection.err()})),
+        );
+    }
     if committed.is_err() || journal.is_err() {
         audit.write(&AuditEntry::new(Category::Experiment,"completion_persistence",if persisted {AuditResult::Success}else{AuditResult::Failure}).operator(operator).detail(serde_json::json!({"id":id,"database_error":committed.err().map(|e|e.to_string()),"journal_error":journal.err(),"retained_rows":if persisted {0}else{completion.rows.len()}})));
     }
@@ -828,7 +886,11 @@ fn finalize(
     audit.write(
         &AuditEntry::new(
             Category::Experiment,
-            "safety_atmosphere",
+            if normal && outcome == "completed" {
+                "normal_ending"
+            } else {
+                "safety_atmosphere"
+            },
             if safety_ok {
                 AuditResult::Success
             } else {
@@ -890,8 +952,10 @@ fn spawn_experiment_task(
     sample_period: Duration,
 ) {
     std::thread::spawn(move || {
+        let ending_gas = program.stages.last().map(|s| s.gas);
         let mut engine = ExperimentEngine::start(program);
         let mut buffer = SampleBuffer::default();
+        let initial_switch = Instant::now();
         if let Some(s) = engine.current_stage() {
             if apply_stage_atmosphere(&hub, s, w0).is_err() {
                 audit.write(
@@ -914,10 +978,12 @@ fn spawn_experiment_task(
                     &owner_display_name,
                     "error",
                     0.0,
+                    None,
                 );
                 return;
             }
         }
+        engine.confirm_stage_started(initial_switch.elapsed().as_secs_f64() * sim_speed);
         publish_running(
             &app,
             &exp,
@@ -967,6 +1033,7 @@ fn spawn_experiment_task(
                     &owner_display_name,
                     "stopped",
                     engine.total_elapsed_s(),
+                    None,
                 );
                 break;
             }
@@ -998,6 +1065,7 @@ fn spawn_experiment_task(
                     &owner_display_name,
                     "error",
                     engine.total_elapsed_s(),
+                    None,
                 );
                 break;
             }
@@ -1007,7 +1075,7 @@ fn spawn_experiment_task(
                 .current_stage()
                 .map(|s| kind_str(s.kind))
                 .unwrap_or("UNKNOWN");
-            let measured = timed_sample(
+            let mut measured = timed_sample(
                 &hub,
                 &id,
                 w0,
@@ -1015,17 +1083,82 @@ fn spawn_experiment_task(
                 engine.stage_elapsed_s() + dt,
                 previous_kind,
             );
-            let result = if exp.skip.swap(false, Ordering::Relaxed) {
-                audit.write(
-                    &AuditEntry::new(Category::Experiment, "skip_stage", AuditResult::Success)
-                        .operator(owner_display_name.clone())
-                        .detail(
-                            serde_json::json!({ "id": id, "from_stage": engine.stage_index() }),
-                        ),
-                );
-                engine.skip_stage()
-            } else {
-                engine.tick(t8, dt)
+            if let Some(raw) = measured.record_json.as_mut() {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(raw).expect("sample JSON was just serialized");
+                value["stage_index"] = serde_json::json!(engine.stage_index());
+                let stable = if engine
+                    .current_stage()
+                    .is_some_and(|s| t8.is_finite() && (t8 - s.target_temp).abs() <= s.tolerance)
+                {
+                    engine.stable_elapsed_s() + dt
+                } else {
+                    0.0
+                };
+                value["stable_elapsed_s"] = serde_json::json!(stable);
+                *raw = value.to_string();
+            }
+            let action = lock(&exp.stage_action).take();
+            let cycle = procedure::tick_cycle(
+                &mut engine,
+                action.as_ref(),
+                &mut lock(&storage),
+                &id,
+                t8,
+                dt,
+            );
+            let result = match cycle {
+                Ok(cycle) => {
+                    if let Some(action) = &action {
+                        audit.write(
+                            &AuditEntry::new(
+                                Category::Experiment,
+                                "stage_action",
+                                if cycle.action_applied {
+                                    AuditResult::Success
+                                } else {
+                                    AuditResult::Failure
+                                },
+                            )
+                            .operator(&action.operator)
+                            .detail(serde_json::json!({"action":action,"error":cycle.rejected})),
+                        );
+                    }
+                    if let Some(error) = cycle.rejected {
+                        let _ = app.emit("app-notice", format!("阶段操作未执行：{error}"));
+                    }
+                    cycle.transition
+                }
+                Err(error) => {
+                    buffer.push(measured);
+                    audit.write(
+                        &AuditEntry::new(
+                            Category::Experiment,
+                            "stage_action_persistence",
+                            AuditResult::Failure,
+                        )
+                        .operator(&owner_display_name)
+                        .detail(serde_json::json!({"id":id,"error":error})),
+                    );
+                    let _ = app.emit(
+                        "app-notice",
+                        format!("阶段操作记录保存失败，实验停止：{error}"),
+                    );
+                    finalize(
+                        &app,
+                        &hub,
+                        &storage,
+                        &audit,
+                        &exp,
+                        &mut buffer,
+                        &id,
+                        &owner_display_name,
+                        "error",
+                        engine.total_elapsed_s(),
+                        None,
+                    );
+                    break;
+                }
             };
 
             if since_sample >= sample_period_s || result.apply_stage.is_some() || result.completed {
@@ -1034,6 +1167,17 @@ fn spawn_experiment_task(
                 samples_since_flush += 1;
             }
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
+                publish_running(
+                    &app,
+                    &exp,
+                    &engine,
+                    &id,
+                    &mode,
+                    &sample,
+                    &started,
+                    &owner_user_id,
+                    &owner_display_name,
+                );
                 if let Some(s) = engine.current_stage() {
                     if s.kind == StageKind::Reducing {
                         let mut baseline =
@@ -1075,6 +1219,7 @@ fn spawn_experiment_task(
                             &owner_display_name,
                             "error",
                             engine.total_elapsed_s(),
+                            None,
                         );
                         break;
                     }
@@ -1127,6 +1272,7 @@ fn spawn_experiment_task(
                         &owner_display_name,
                         "error",
                         engine.total_elapsed_s(),
+                        None,
                     );
                     break;
                 }
@@ -1144,6 +1290,7 @@ fn spawn_experiment_task(
                     &owner_display_name,
                     "completed",
                     engine.total_elapsed_s(),
+                    ending_gas,
                 );
                 break;
             }
@@ -2027,6 +2174,9 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
 
     let program = match program_by_id(state, &params.experiment_type) {
         Ok(p) => {
+            if let Err(message) = validate_program(&p) {
+                blocking.push(PreflightIssue::blocking("PROGRAM_INVALID", message));
+            }
             if !p.enabled {
                 blocking.push(PreflightIssue::blocking(
                     "PROGRAM_DISABLED",
@@ -2205,7 +2355,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
 
     // Reset signals and publish the initial running status before the task spins up.
     st.exp.stop.store(false, Ordering::Relaxed);
-    st.exp.skip.store(false, Ordering::Relaxed);
+    *lock(&st.exp.stage_action) = None;
     let first = program.stages.first();
     let initial = ExperimentStatus {
         updating: false,
@@ -2215,7 +2365,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         mode: Some(params.experiment_type.clone()),
         sample_name: Some(params.sample_name.clone()),
         started_at: Some(now.clone()),
-        phase: Phase::Running,
+        phase: Phase::StageTransition,
         stage_index: 0,
         total_stages: program.stages.len(),
         stage_name: first.map(|s| s.name.clone()),
@@ -2223,6 +2373,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
         target_temp: first.map(|s| s.target_temp).unwrap_or(0.0),
         tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
         stage_elapsed_s: 0.0,
+        stable_elapsed_s: 0.0,
         total_elapsed_s: 0.0,
         owner_user_id: Some(user.user_id.clone()),
         owner_display_name: Some(user.display_name.clone()),
@@ -2304,39 +2455,36 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
     safety_result
 }
 
-#[tauri::command]
-fn skip_stage(state: State<AppState>, reason: String) -> Result<(), String> {
-    let user = require_experiment_controller(&state)?;
-    let status = state.exp.snapshot();
-    if !status.running {
-        return Err("没有正在运行的实验".into());
-    }
-    if reason.trim().is_empty() {
-        return Err("跳段原因必填".into());
-    }
-    if let Some(id) = &status.experiment_id {
-        lock(&state.storage)
-            .patch_runtime_metadata(
-                id,
-                &serde_json::json!({"skipped":true,"skip_reason":reason}).to_string(),
-            )
-            .map_err(|e| e.to_string())?;
-    }
-    state.exp.skip.store(true, Ordering::Relaxed);
-    // The requester is not always the run's owner (an admin may take over), so record who
-    // asked here; the tick task audits the skip it actually performs.
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "skip_stage_requested",
-            AuditResult::Success,
-        )
-        .operator(user.display_name)
-        .detail(serde_json::json!({
-            "id": status.experiment_id, "from_stage": status.stage_index, "reason": reason
-        })),
-    );
-    Ok(())
+#[tauri::command(rename_all = "snake_case")]
+fn skip_stage(
+    state: State<AppState>,
+    experiment_id: String,
+    stage_index: usize,
+    reason: String,
+) -> Result<(), String> {
+    procedure::queue_action(
+        &state,
+        experiment_id,
+        stage_index,
+        procedure::ActionKind::Skip,
+        reason,
+    )
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn acknowledge_stage(
+    state: State<AppState>,
+    experiment_id: String,
+    stage_index: usize,
+    notes: String,
+) -> Result<(), String> {
+    procedure::queue_action(
+        &state,
+        experiment_id,
+        stage_index,
+        procedure::ActionKind::Confirm,
+        notes,
+    )
 }
 
 /// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
@@ -3292,6 +3440,7 @@ pub fn run() {
             start_experiment,
             stop_experiment,
             skip_stage,
+            acknowledge_stage,
             list_programs,
             preflight_experiment,
             generate_sample_id,
@@ -3498,6 +3647,49 @@ mod tests {
     }
 
     #[test]
+    fn stage_actions_enforce_anonymous_owner_other_admin_locked_and_update_permissions() {
+        let state = test_state();
+        let (_, alice_id, _) = seed_users_and_experiments(&state);
+        let status = ExperimentStatus {
+            running: true,
+            phase: Phase::Running,
+            experiment_id: Some("exp-alice".into()),
+            owner_user_id: Some(alice_id),
+            stage_kind: Some(StageKind::Manual),
+            stage_index: 3,
+            ..ExperimentStatus::idle()
+        };
+        state.exp.set_status(status);
+        let request = || {
+            procedure::queue_action(
+                &state,
+                "exp-alice".into(),
+                3,
+                procedure::ActionKind::Confirm,
+                "checked".into(),
+            )
+        };
+        assert_eq!(request().unwrap_err(), "AUTH_REQUIRED");
+        login(&state, "bob", "temp-password");
+        assert_eq!(request().unwrap_err(), "FORBIDDEN");
+        login(&state, "alice", "temp-password");
+        assert!(request().is_ok());
+        assert!(
+            request().is_err(),
+            "duplicate pending action must not replace evidence"
+        );
+        let first = lock(&state.exp.stage_action).take().unwrap();
+        assert_eq!(first.operator, "爱丽丝");
+        state.auth.lock();
+        assert_eq!(request().unwrap_err(), "AUTH_REQUIRED");
+        login(&state, "admin", "admin-password");
+        assert!(request().is_ok());
+        lock(&state.exp.stage_action).take();
+        state.exp.updating.store(true, Ordering::SeqCst);
+        assert!(request().is_err());
+    }
+
+    #[test]
     fn a_running_experiment_is_controlled_by_its_owner_or_an_admin_only() {
         let state = test_state();
         let (_admin_id, alice_id, _bob_id) = seed_users_and_experiments(&state);
@@ -3593,6 +3785,25 @@ mod tests {
         for mode in ["real", "replay", "", "MOCK", "typo"] {
             assert!(validate_runtime_mode(mode).is_err(), "{mode}");
         }
+    }
+
+    #[test]
+    fn invalid_legacy_custom_duration_remains_readable_but_cannot_start() {
+        let state = test_state();
+        let mut p = standard_program("REDUCIBILITY").unwrap();
+        p.id = "custom-legacy-duration".into();
+        p.source = ProgramSource::Custom;
+        p.stages[0].duration_min = 30.0;
+        lock(&state.storage)
+            .save_custom_program(&p.id, &serde_json::to_string(&p).unwrap())
+            .unwrap();
+        assert_eq!(all_programs(&lock(&state.storage)).unwrap().len(), 4);
+        let preflight = build_preflight(&state, &params(|params| params.experiment_type = p.id));
+        assert!(preflight
+            .blocking
+            .iter()
+            .any(|e| e.code == "PROGRAM_INVALID"));
+        assert!(!preflight.ok);
     }
 
     #[test]

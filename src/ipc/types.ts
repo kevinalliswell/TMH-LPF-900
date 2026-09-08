@@ -68,7 +68,13 @@ export type Phase =
   | "STOPPING"
   | "ERROR";
 
-export type StageKind = "HEATING" | "STABILIZING" | "REDUCING" | "COOLING";
+export type StageKind =
+  | "HEATING"
+  | "STABILIZING"
+  | "REDUCING"
+  | "COOLING"
+  | "PURGING"
+  | "MANUAL";
 
 export interface ExperimentState {
   updating?: boolean;
@@ -86,6 +92,7 @@ export interface ExperimentState {
   target_temp?: number;
   tolerance?: number;
   stage_elapsed_s?: number;
+  stable_elapsed_s?: number;
   total_elapsed_s?: number;
   owner_user_id?: string | null;
   owner_display_name?: string | null;
@@ -133,6 +140,7 @@ export interface StageDto {
 export type ProgramSource = "standard" | "custom";
 
 export interface ProgramDto {
+  template_revision?: string | null;
   base_standard_id?: string | null;
   base_standard_version?: string | null;
   description: string;

@@ -6,9 +6,10 @@ import {
   retryPendingSave,
   getExperimentDetail,
   skipStage,
+  acknowledgeStage,
   stopExperiment,
 } from "../../ipc";
-import type { ProgramDto } from "../../ipc/types";
+import type { ProgramDto, StageDto } from "../../ipc/types";
 import { Modal } from "../../components/Modal";
 import { useExperiment } from "../../stores/experiment";
 import { toastError, useToasts } from "../../stores/toast";
@@ -31,6 +32,14 @@ export function ExperimentBar() {
   const [retrying, setRetrying] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
+  const [actionTarget, setActionTarget] = useState<{
+    id: string;
+    index: number;
+    stage: StageDto;
+  } | null>(null);
+  const [confirmManual, setConfirmManual] = useState(false);
+  const [manualNotes, setManualNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [skipReason, setSkipReason] = useState("");
   const [program, setProgram] = useState<ProgramDto | null>(null);
   const push = useToasts((s) => s.push);
@@ -66,14 +75,46 @@ export function ExperimentBar() {
     }
   };
 
+  const beginAction = (manual: boolean) => {
+    if (!curStage || !ex.experiment_id) return;
+    setActionTarget({
+      id: ex.experiment_id,
+      index: ex.stage_index ?? 0,
+      stage: curStage,
+    });
+    if (manual) {
+      setManualNotes("");
+      setConfirmManual(true);
+    } else {
+      setSkipReason("");
+      setConfirmSkip(true);
+    }
+  };
+  const doManual = async () => {
+    if (!actionTarget) return;
+    setSubmitting(true);
+    try {
+      await acknowledgeStage(actionTarget.id, actionTarget.index, manualNotes);
+      push("人工确认已提交，执行结果以当前流程为准", "info");
+      setConfirmManual(false);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setSubmitting(false);
+    }
+  };
   const doSkip = async () => {
     try {
-      await skipStage(skipReason);
-      push("已跳至下一阶段", "info");
+      if (!actionTarget) return;
+      setSubmitting(true);
+      await skipStage(actionTarget.id, actionTarget.index, skipReason);
+      push("跳段请求已提交，执行结果以当前流程为准", "info");
       setSkipReason("");
       setConfirmSkip(false);
     } catch (e) {
       toastError(e);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -137,25 +178,49 @@ export function ExperimentBar() {
                 className="px-2 py-0.5 rounded"
                 style={{ background: "var(--panel-2)", color: "var(--heat)" }}
               >
-                阶段 {stageNo}/{ex.total_stages ?? "-"} · {ex.stage_name} →{" "}
-                {ex.target_temp ?? 0}℃
+                阶段 {stageNo}/{ex.total_stages ?? "-"} · {ex.stage_name}
+                {ex.stage_kind === "MANUAL"
+                  ? " · 等待人工确认"
+                  : ` → ${ex.target_temp ?? 0}℃`}
               </span>
             )}
             <span className="mono" style={{ color: "var(--fg-faint)" }}>
               时长 {fmtHms(ex.total_elapsed_s)}
             </span>
             <div className="flex-1" />
-            <button
-              onClick={() => setConfirmSkip(true)}
-              className="px-2.5 py-1 rounded text-[12px]"
-              style={{
-                background: "var(--panel-2)",
-                border: "1px solid var(--border-bright)",
-                color: "var(--fg)",
-              }}
-            >
-              跳过阶段
-            </button>
+            {ex.stage_kind === "MANUAL" ? (
+              <button
+                disabled={
+                  !curStage ||
+                  ex.can_control === false ||
+                  ex.phase !== "RUNNING" ||
+                  latched
+                }
+                onClick={() => beginAction(true)}
+                className="px-2.5 py-1 rounded"
+                style={{ background: "var(--warn)", color: "#1a1204" }}
+              >
+                确认人工步骤
+              </button>
+            ) : (
+              ["HEATING", "STABILIZING", "REDUCING"].includes(
+                ex.stage_kind ?? "",
+              ) && (
+                <button
+                  disabled={
+                    !curStage ||
+                    ex.can_control === false ||
+                    ex.phase !== "RUNNING" ||
+                    latched
+                  }
+                  onClick={() => beginAction(false)}
+                  className="px-2.5 py-1 rounded"
+                  style={{ background: "var(--panel-2)", color: "var(--fg)" }}
+                >
+                  跳过阶段
+                </button>
+              )
+            )}
             <button
               onClick={() => setConfirmStop(true)}
               className="px-2.5 py-1 rounded text-[12px]"
@@ -232,7 +297,7 @@ export function ExperimentBar() {
                 {nextStage
                   ? `${nextStage.name} · ${stageCondition(nextStage)} · ${gasSummary(nextStage.gas)}`
                   : program
-                    ? "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）"
+                    ? "完成实验并保留程序规定的末阶段气氛"
                     : "程序快照未取得，暂不可跳段"}
               </div>
             </div>
@@ -268,7 +333,10 @@ export function ExperimentBar() {
             <button
               onClick={doSkip}
               disabled={
-                !skipReason.trim() || !program || ex.can_control === false
+                submitting ||
+                !skipReason.trim() ||
+                !program ||
+                ex.can_control === false
               }
               className="px-3 py-1.5 rounded text-[13px]"
               style={{
@@ -278,6 +346,46 @@ export function ExperimentBar() {
               }}
             >
               确认跳过
+            </button>
+          </div>
+        </Modal>
+      )}
+      {confirmManual && actionTarget && (
+        <Modal
+          title={`人工确认 · ${actionTarget.stage.name}`}
+          onClose={() => setConfirmManual(false)}
+        >
+          <div className="text-[13px] flex flex-col gap-3">
+            <p>{actionTarget.stage.description}</p>
+            <p>
+              程序气氛：
+              {actionTarget.stage.gas.every((v) => v === 0)
+                ? "四路停气"
+                : `${gasSummary(actionTarget.stage.gas)} L/min`}
+              。请完成上述实际操作后确认；系统将记录确认人和时间。
+            </p>
+            <label>
+              操作备注（可补充外部测量记录）
+              <textarea
+                aria-label="人工步骤备注"
+                maxLength={4096}
+                value={manualNotes}
+                onChange={(e) => setManualNotes(e.target.value)}
+                className="w-full mt-1 p-2 rounded min-h-20"
+                style={{
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  color: "var(--fg)",
+                }}
+              />
+            </label>
+            <button
+              disabled={submitting || ex.can_control === false}
+              onClick={doManual}
+              className="px-3 py-2 rounded self-end"
+              style={{ background: "var(--warn)", color: "#1a1204" }}
+            >
+              {submitting ? "提交中…" : "已完成上述操作，确认继续"}
             </button>
           </div>
         </Modal>

@@ -6,9 +6,7 @@
 use std::thread::sleep;
 use std::time::Duration;
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
-use tmh_core::engine::{
-    standard_program, ExperimentEngine, Phase, Stage, StageKind, SAFETY_ATMOSPHERE,
-};
+use tmh_core::engine::{standard_program, ExperimentEngine, Phase, Stage, StageKind};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage};
 use tmh_core::transport::MockTransport;
 
@@ -35,9 +33,10 @@ fn mock_hub() -> DeviceHub {
 }
 
 fn apply_stage(hub: &DeviceHub, stage: &Stage, w0: f64) {
-    for (gas, &v) in stage.gas.iter().enumerate() {
-        drop(hub.request_set_flow(gas, v));
-    }
+    hub.request_set_atmosphere(stage.gas)
+        .blocking_recv()
+        .unwrap()
+        .unwrap();
     hub.set_temp_target_c(stage.target_temp);
     if stage.kind == StageKind::Reducing {
         hub.set_balance_target_g(w0 * 0.88);
@@ -72,6 +71,7 @@ fn reducibility_run_drives_devices_and_persists() {
 
     let mut engine = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
     apply_stage(&hub, engine.current_stage().unwrap(), w0);
+    engine.confirm_stage_started(0.0);
 
     let mut samples: Vec<SampleRow> = Vec::new();
     let mut peak_temp = 0.0f64;
@@ -96,13 +96,18 @@ fn reducibility_run_drives_devices_and_persists() {
         min_weight = min_weight.min(w);
 
         // Advance a full simulated hour per tick to clear the holds quickly.
-        let r = engine.tick(t8, 3600.0);
+        let r = if engine.current_stage().unwrap().kind == StageKind::Manual {
+            engine.acknowledge_manual(engine.stage_index()).unwrap()
+        } else {
+            engine.tick(t8, 3600.0)
+        };
         if r.apply_stage.is_some() {
             if let Some(s) = engine.current_stage() {
                 apply_stage(&hub, s, w0);
                 if s.kind == StageKind::Reducing {
                     reached_reducing = true;
                 }
+                engine.confirm_stage_started(0.0);
             }
         }
         if engine.current_stage().map(|s| s.kind) == Some(StageKind::Reducing) {
@@ -132,11 +137,7 @@ fn reducibility_run_drives_devices_and_persists() {
         }
     }
 
-    // Completion exit path → safety atmosphere.
-    for (gas, &v) in SAFETY_ATMOSPHERE.iter().enumerate() {
-        drop(hub.request_set_flow(gas, v));
-    }
-    sleep(Duration::from_millis(20));
+    // Normal RI ending retains the acknowledged nitrogen-off stage.
     let final_gas = hub.mfc_rx().borrow().gas;
 
     storage.insert_samples(&samples).unwrap();
@@ -153,8 +154,8 @@ fn reducibility_run_drives_devices_and_persists() {
     );
     assert!(min_weight < 99.0, "sample lost mass (min {min_weight} g)");
     assert!(
-        (final_gas[GAS_N2].sv - 5.0).abs() < 1e-6,
-        "safety N2=5 (got {})",
+        final_gas[GAS_N2].sv.abs() < 1e-6,
+        "normal RI N2=0 (got {})",
         final_gas[GAS_N2].sv
     );
     assert!(

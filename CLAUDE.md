@@ -39,8 +39,7 @@ tmh-protocols (pure frame codecs, NO I/O — golden-tested against docs/golden_v
 
 - H2/CO setpoint clamp lives in the MFC bus actor at frame-build time — the ONLY choke point.
   Frontend displays limits, never enforces them. Compiled-in absolute ceiling backs the config.
-- Every experiment exit path (complete/stop/error/crash-recovery) sets safety atmosphere:
-  N2=5.0 L/min, CO=CO2=H2=0.
+- Normal completion follows the selected standard's acknowledged final atmosphere (RI: all zero; RDI/FSI: N2=5.0, others zero). See docs/16. Stops, errors, crash recovery and application exit request protective N2=5.0 L/min, CO=CO2=H2=0.
 - Audit log writes must never throw into control flow.
 - Zero setpoint always passes the clamp (emergency shutoff must never be blocked).
 

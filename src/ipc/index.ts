@@ -61,6 +61,7 @@ import {
   mockShutoff,
   mockResetSafety,
   mockSkipStage,
+  mockAcknowledgeStage,
   mockStartExperiment,
   mockStopExperiment,
   mockSetExperimentOwner,
@@ -269,9 +270,22 @@ export async function stopExperiment(reason: string): Promise<void> {
   await invoke("stop_experiment", { reason });
 }
 
-export async function skipStage(reason: string): Promise<void> {
-  if (!isTauri()) return void mockSkipStage(reason);
-  await invoke("skip_stage", { reason });
+export async function skipStage(
+  experiment_id: string,
+  stage_index: number,
+  reason: string,
+): Promise<void> {
+  if (!isTauri()) return void mockSkipStage(experiment_id, stage_index, reason);
+  await invoke("skip_stage", { experiment_id, stage_index, reason });
+}
+export async function acknowledgeStage(
+  experiment_id: string,
+  stage_index: number,
+  notes: string,
+): Promise<void> {
+  if (!isTauri())
+    return void mockAcknowledgeStage(experiment_id, stage_index, notes);
+  await invoke("acknowledge_stage", { experiment_id, stage_index, notes });
 }
 
 export async function listPrograms(): Promise<ProgramDto[]> {

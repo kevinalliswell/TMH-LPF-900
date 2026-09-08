@@ -58,7 +58,9 @@ describe("program utilities", () => {
   });
 
   it("normalizes sample prefixes for generated sample ids", () => {
-    expect(normalizeSamplePrefix("rdi-01", "LOW_TEMP_DEGRADATION")).toBe("RDI01");
+    expect(normalizeSamplePrefix("rdi-01", "LOW_TEMP_DEGRADATION")).toBe(
+      "RDI01",
+    );
     expect(normalizeSamplePrefix("", "LOW_TEMP_DEGRADATION")).toBe("RDI");
   });
 
@@ -76,13 +78,31 @@ describe("program utilities", () => {
     expect(warning.warnings.join(" ")).toContain("H₂");
     expect(warning.warnings.join(" ")).toContain("CO");
 
-    const invalid = validateProgramDraft({ ...program, name: "", sample_prefix: "X", stages: [] });
+    const invalid = validateProgramDraft({
+      ...program,
+      name: "",
+      sample_prefix: "X",
+      stages: [],
+    });
     expect(invalid.errors.length).toBeGreaterThan(0);
   });
 
-  it("dry-run preview ends with protective atmosphere", () => {
+  it("dry-run preview explains normal and interrupted endings", () => {
     const steps = simulateProgram(program);
     expect(steps.at(-1)?.stage).toBe("完成");
-    expect(steps.at(-1)?.atmosphere).toContain("H₂/CO₂/CO 0");
+    expect(steps.at(-1)?.condition).toContain("停止或故障");
+    expect(steps.at(-1)?.atmosphere).toBe("10.5N₂ + 4.5CO");
+  });
+  it("rejects old duration combinations that would acquire different semantics", () => {
+    for (const [stageIndex, duration] of [
+      [0, 10],
+      [1, 0],
+    ]) {
+      const legacy = structuredClone(program);
+      legacy.stages[stageIndex!]!.duration_min = duration!;
+      expect(validateProgramDraft(legacy).errors.join(" ")).toContain(
+        "类型与时长不匹配",
+      );
+    }
   });
 });
