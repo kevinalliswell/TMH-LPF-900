@@ -1,3 +1,4 @@
+import standardPrograms from "../../config/standard_programs.json";
 // Browser-only synthetic engine (docs/08 dual-mode). Mirrors the Rust backend closely
 // enough that `pnpm dev:web` / the preview renders a faithful M4 demo without Tauri:
 // a target-driven furnace/balance, the experiment stage engine (heat → hold → reduce →
@@ -18,7 +19,6 @@ import type {
   ExperimentStartDefaults,
   SampleDto,
   StageDto,
-  StageKind,
   TareResult,
   TelemetrySnapshot,
 } from "./types";
@@ -125,130 +125,8 @@ export function mockTelemetry(cb: (s: TelemetrySnapshot) => void): () => void {
 }
 
 // ---- program tables (mirror tmh_core::engine::standard_program) ----
-function st(
-  name: string,
-  kind: StageKind,
-  gas: number[],
-  target_temp: number,
-  tolerance: number,
-  duration_min: number,
-  ramp_rate: number,
-  description: string,
-): StageDto {
-  return {
-    name,
-    kind,
-    gas,
-    target_temp,
-    tolerance,
-    duration_min,
-    ramp_rate,
-    description,
-  };
-}
-
 const customPrograms: ProgramDto[] = [];
-const PROGRAMS: ProgramDto[] = [
-  {
-    id: "REDUCIBILITY",
-    description: "",
-    category: "standard",
-    enabled: true,
-    sample_prefix: "RED",
-    source: "standard",
-    name: "GB/T 13241 还原性",
-    stages: [
-      st("升温", "HEATING", [0, 5, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
-      st(
-        "恒温",
-        "STABILIZING",
-        [0, 15, 0, 0],
-        900,
-        5,
-        30,
-        0,
-        "900℃恒温30min,N₂气氛",
-      ),
-      st(
-        "还原",
-        "REDUCING",
-        [0, 10.5, 0, 4.5],
-        900,
-        5,
-        180,
-        0,
-        "还原180min,30%CO+70%N₂",
-      ),
-      st("冷却", "COOLING", [0, 5, 0, 0], 25, 0, 0, -10, "N₂保护冷却至室温"),
-    ],
-  },
-  {
-    id: "LOW_TEMP_DEGRADATION",
-    description: "",
-    category: "standard",
-    enabled: true,
-    sample_prefix: "RDI",
-    source: "standard",
-    name: "GB/T 13242 低温粉化",
-    stages: [
-      st("升温", "HEATING", [0, 5, 0, 0], 500, 5, 0, 10, "升温至500℃,N₂保护"),
-      st(
-        "恒温",
-        "STABILIZING",
-        [0, 15, 0, 0],
-        500,
-        5,
-        30,
-        0,
-        "500℃恒温30min,N₂气氛",
-      ),
-      st(
-        "还原",
-        "REDUCING",
-        [0, 9, 3, 3],
-        500,
-        5,
-        60,
-        0,
-        "还原60min,20%CO+20%CO₂+60%N₂",
-      ),
-      st("冷却", "COOLING", [0, 5, 0, 0], 25, 0, 0, -10, "N₂保护冷却至室温"),
-    ],
-  },
-  {
-    id: "FREE_SWELLING",
-    description: "",
-    category: "standard",
-    enabled: true,
-    sample_prefix: "FSI",
-    source: "standard",
-    name: "GB/T 13240 自由膨胀",
-    stages: [
-      st("升温", "HEATING", [0, 10, 0, 0], 900, 5, 0, 10, "升温至900℃,N₂保护"),
-      st(
-        "恒温",
-        "STABILIZING",
-        [0, 15, 0, 0],
-        900,
-        5,
-        15,
-        0,
-        "900℃恒温15min,N₂气氛",
-      ),
-      st(
-        "还原",
-        "REDUCING",
-        [0, 10.5, 0, 4.5],
-        900,
-        5,
-        60,
-        0,
-        "还原60min,30%CO+70%N₂",
-      ),
-      st("冷却", "COOLING", [0, 5, 0, 0], 50, 0, 0, -10, "N₂保护冷却至50℃"),
-    ],
-  },
-];
+const PROGRAMS = standardPrograms as ProgramDto[];
 
 export function mockListPrograms(): ProgramDto[] {
   return structuredClone([...PROGRAMS, ...customPrograms]);
@@ -266,15 +144,26 @@ function fmtHms(totalS: number): string {
 }
 
 function stageReached(s: StageDto, t8: number, elapsedS: number): boolean {
+  if (!Number.isFinite(t8)) return false;
   const atTemp = Math.abs(t8 - s.target_temp) <= s.tolerance;
-  if (s.duration_min > 0) return atTemp && elapsedS >= s.duration_min * 60;
-  if (s.kind === "COOLING") return t8 <= s.target_temp + 5;
-  return atTemp;
+  switch (s.kind) {
+    case "MANUAL":
+      return false;
+    case "COOLING":
+      return t8 < s.target_temp;
+    case "PURGING":
+    case "REDUCING":
+      return elapsedS >= s.duration_min * 60;
+    case "STABILIZING":
+      return atTemp && elapsedS >= s.duration_min * 60;
+    case "HEATING":
+      return atTemp;
+  }
 }
 
 function applyStage(s: StageDto, w0: number): void {
   s.gas.forEach((v, i) => (sv[i] = clampGas(i, v)));
-  furnaceTarget = s.target_temp;
+  furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
   if (s.kind === "REDUCING") weightTarget = w0 * (1 - MOCK_LOSS);
 }
 
@@ -292,10 +181,12 @@ interface MockRun {
   w0: number;
   stageIndex: number;
   stageElapsedS: number;
+  stableElapsedS: number;
+  actions: Record<string, unknown>[];
+  skipped: boolean;
   totalElapsedS: number;
   samples: SampleDto[];
   timer: ReturnType<typeof setInterval> | null;
-  skip: boolean;
 }
 
 let run: MockRun | null = null;
@@ -319,6 +210,7 @@ function runningState(r: MockRun): ExperimentState {
     target_temp: s?.target_temp ?? 0,
     tolerance: s?.tolerance ?? 0,
     stage_elapsed_s: r.stageElapsedS,
+    stable_elapsed_s: r.stableElapsedS,
     total_elapsed_s: r.totalElapsedS,
     owner_user_id: r.ownerUserId,
     owner_display_name: r.operator,
@@ -338,11 +230,11 @@ function sampleNow(r: MockRun, t8: number): SampleDto {
     co2_flow: sv[2] ?? 0,
     n2_flow: sv[1] ?? 0,
     h2_flow: sv[0] ?? 0,
-    experiment_status: "RUNNING",
+    experiment_status: r.program.stages[r.stageIndex]?.kind ?? "UNKNOWN",
   };
 }
 
-function archive(r: MockRun, completed = true): void {
+function archive(r: MockRun, completed = true, outcome = "completed"): void {
   const detail: ExperimentDetail = {
     experiment_id: r.id,
     experiment_name: r.sample,
@@ -360,6 +252,12 @@ function archive(r: MockRun, completed = true): void {
     analysis: null,
     created_at: r.started,
     sample_count: r.samples.length,
+    runtime: {
+      device_mode: "browser-mock",
+      outcome,
+      skipped: r.skipped,
+      stage_actions: structuredClone(r.actions),
+    },
     owner_user_id: r.ownerUserId,
   };
   history.set(r.id, { detail, samples: r.samples });
@@ -382,28 +280,42 @@ function expTick(): void {
   const t8 = temps[7] ?? furnaceTarget;
   run.samples.push(sampleNow(run, t8));
 
-  if (run.skip || stageReached(stage, t8, run.stageElapsedS)) {
-    run.skip = false;
-    run.stageIndex += 1;
-    run.stageElapsedS = 0;
-    const next = run.program.stages[run.stageIndex];
-    if (!next) {
-      completeRun();
-      return;
-    }
-    applyStage(next, run.w0);
+  run.stableElapsedS =
+    Number.isFinite(t8) && Math.abs(t8 - stage.target_temp) <= stage.tolerance
+      ? run.stableElapsedS + SIM_DT
+      : 0;
+  if (
+    stageReached(
+      stage,
+      t8,
+      stage.kind === "STABILIZING" ? run.stableElapsedS : run.stageElapsedS,
+    )
+  ) {
+    advanceRun();
+    return;
   }
+  experiment = runningState(run);
+  notify();
+}
+
+function advanceRun(): void {
+  if (!run) return;
+  run.stageIndex += 1;
+  run.stageElapsedS = 0;
+  run.stableElapsedS = 0;
+  const next = run.program.stages[run.stageIndex];
+  if (!next) {
+    completeRun();
+    return;
+  }
+  applyStage(next, run.w0);
   experiment = runningState(run);
   notify();
 }
 
 function completeRun(): void {
   if (!run) return;
-  // Safety atmosphere on completion.
-  sv[0] = 0;
-  sv[1] = 5;
-  sv[2] = 0;
-  sv[3] = 0;
+  // The last acknowledged standard stage defines the normal ending atmosphere.
   furnaceTarget = 25;
   weightTarget = weight;
   archive(run);
@@ -439,10 +351,12 @@ export function mockStartExperiment(p: ExperimentParams): string {
     w0: p.sample_weight,
     stageIndex: 0,
     stageElapsedS: 0,
+    stableElapsedS: 0,
+    actions: [],
+    skipped: false,
     totalElapsedS: 0,
     samples: [],
     timer: null,
-    skip: false,
   };
   weight = p.sample_weight;
   weightTarget = p.sample_weight;
@@ -462,16 +376,61 @@ export function mockStopExperiment(): void {
   sv[3] = 0;
   furnaceTarget = 25;
   if (run) {
-    archive(run); // stopped runs still land in history (end_time stamped)
+    archive(run, true, "stopped"); // interrupted records must not claim normal completion
     stopRun();
   }
   experiment = { running: false };
   notify();
 }
 
-export function mockSkipStage(reason: string): void {
-  if (!reason.trim()) throw new Error("跳段原因必填");
-  if (run) run.skip = true;
+function applyOperatorAction(
+  experiment_id: string,
+  stage_index: number,
+  notes: string,
+  kind: "skip" | "confirm",
+): void {
+  const user = mockCurrentUser();
+  if (!user) throw new Error("AUTH_REQUIRED");
+  if (!run || experiment_id !== run.id || stage_index !== run.stageIndex)
+    throw new Error("实验或阶段已变化");
+  if (user.role !== "ADMIN" && user.user_id !== run.ownerUserId)
+    throw new Error("FORBIDDEN");
+  if (notes.length > 4096) throw new Error("操作备注不能超过 4096 字");
+  if (kind === "skip" && !notes.trim()) throw new Error("跳段原因必填");
+  const stage = run.program.stages[stage_index]!;
+  if (
+    kind === "confirm"
+      ? stage.kind !== "MANUAL"
+      : !["HEATING", "STABILIZING", "REDUCING"].includes(stage.kind) ||
+        !notes.trim()
+  )
+    throw new Error("此阶段不能执行该操作");
+  run.actions.push({
+    experiment_id,
+    stage_index,
+    kind,
+    notes: notes.trim(),
+    user_id: user.user_id,
+    operator: user.display_name,
+    confirmed_at: new Date().toISOString(),
+    elapsed_s: run.totalElapsedS,
+  });
+  if (kind === "skip") run.skipped = true;
+  advanceRun();
+}
+export function mockSkipStage(
+  experiment_id: string,
+  stage_index: number,
+  reason: string,
+): void {
+  applyOperatorAction(experiment_id, stage_index, reason, "skip");
+}
+export function mockAcknowledgeStage(
+  experiment_id: string,
+  stage_index: number,
+  notes: string,
+): void {
+  applyOperatorAction(experiment_id, stage_index, notes, "confirm");
 }
 
 export function mockSubscribeExperiment(
@@ -510,13 +469,15 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
   let wt = w0;
   let stageIndex = 0;
   let stageEl = 0;
+  let stableEl = 0;
   let totalEl = 0;
   const samples: SampleDto[] = [];
   let guard = 0;
   while (stageIndex < program.stages.length && guard++ < 5000) {
     const s = program.stages[stageIndex];
     if (!s) break;
-    t += (s.target_temp - t) * 0.1;
+    t +=
+      ((["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp) - t) * 0.1;
     if (s.kind === "REDUCING") wt += (w0 * (1 - MOCK_LOSS) - wt) * 0.06;
     stageEl += 60;
     totalEl += 60;
@@ -534,9 +495,14 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
       h2_flow: s.gas[0] ?? 0,
       experiment_status: "RUNNING",
     });
-    if (stageReached(s, t, stageEl)) {
+    stableEl = Math.abs(t - s.target_temp) <= s.tolerance ? stableEl + 60 : 0;
+    if (
+      s.kind === "MANUAL" ||
+      stageReached(s, t, s.kind === "STABILIZING" ? stableEl : stageEl)
+    ) {
       stageIndex += 1;
       stageEl = 0;
+      stableEl = 0;
     }
   }
   return samples;

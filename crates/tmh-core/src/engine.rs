@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Protection atmosphere applied on EVERY experiment exit (docs/05 §5.5).
+/// Protective atmosphere for interrupted or failed experiments. Normal completion
+/// retains the final stage atmosphere defined by the selected standard.
 /// Order [H2, N2, CO2, CO] L/min.
 pub const SAFETY_ATMOSPHERE: [f64; 4] = [0.0, 5.0, 0.0, 0.0];
 
@@ -30,6 +31,7 @@ pub fn is_legal_transition(from: Phase, to: Phase) -> bool {
         (from, to),
         (Idle, Configuring)
             | (Configuring, Running)
+            | (Configuring, StageTransition)
             | (Configuring, Idle)
             | (Running, StageTransition)
             | (Running, Completing)
@@ -45,308 +47,9 @@ pub fn is_legal_transition(from: Phase, to: Phase) -> bool {
     )
 }
 
-/// Stage type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum StageKind {
-    Heating,
-    Stabilizing,
-    Reducing,
-    Cooling,
-}
-
-/// One program stage (docs/05 §5.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProgramSource {
-    Standard,
-    Custom,
-}
-
-/// One program stage (docs/05 §5.3).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Stage {
-    pub name: String,
-    pub kind: StageKind,
-    /// Gas setpoints [H2, N2, CO2, CO] L/min.
-    pub gas: [f64; 4],
-    pub target_temp: f64,
-    pub tolerance: f64,
-    /// Hold duration (min); 0 = dynamic stage.
-    pub duration_min: f64,
-    pub ramp_rate: f64,
-    pub description: String,
-}
-
-/// A full experiment program.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Program {
-    #[serde(default)]
-    pub base_standard_id: Option<String>,
-    #[serde(default)]
-    pub base_standard_version: Option<String>,
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default = "default_program_category")]
-    pub category: String,
-    #[serde(default = "default_program_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub sample_prefix: String,
-    #[serde(default = "default_program_source")]
-    pub source: ProgramSource,
-    pub stages: Vec<Stage>,
-}
-
-fn default_program_category() -> String {
-    "custom".into()
-}
-
-fn default_program_enabled() -> bool {
-    true
-}
-
-fn default_program_source() -> ProgramSource {
-    ProgramSource::Custom
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stage(
-    name: &str,
-    kind: StageKind,
-    gas: [f64; 4],
-    target: f64,
-    tol: f64,
-    dur: f64,
-    ramp: f64,
-    desc: &str,
-) -> Stage {
-    Stage {
-        name: name.into(),
-        kind,
-        gas,
-        target_temp: target,
-        tolerance: tol,
-        duration_min: dur,
-        ramp_rate: ramp,
-        description: desc.into(),
-    }
-}
-
-/// The three GB standard programs (docs/05 §5.3), by mode id.
-pub fn standard_program(mode_id: &str) -> Option<Program> {
-    use StageKind::*;
-    let p = match mode_id {
-        "REDUCIBILITY" => Program {
-            base_standard_id: Some("REDUCIBILITY".into()),
-            base_standard_version: Some("2017".into()),
-            id: "REDUCIBILITY".into(),
-            name: "GB/T 13241 还原性".into(),
-            description: "GB/T 13241-2017 铁矿石还原性的测定方法".into(),
-            category: "standard".into(),
-            enabled: true,
-            sample_prefix: "RED".into(),
-            source: ProgramSource::Standard,
-            stages: vec![
-                stage(
-                    "升温",
-                    Heating,
-                    [0.0, 5.0, 0.0, 0.0],
-                    900.0,
-                    5.0,
-                    0.0,
-                    10.0,
-                    "升温至900℃,N₂保护",
-                ),
-                stage(
-                    "恒温",
-                    Stabilizing,
-                    [0.0, 15.0, 0.0, 0.0],
-                    900.0,
-                    5.0,
-                    30.0,
-                    0.0,
-                    "900℃恒温30min,N₂气氛",
-                ),
-                stage(
-                    "还原",
-                    Reducing,
-                    [0.0, 10.5, 0.0, 4.5],
-                    900.0,
-                    5.0,
-                    180.0,
-                    0.0,
-                    "还原180min,30%CO+70%N₂",
-                ),
-                stage(
-                    "冷却",
-                    Cooling,
-                    [0.0, 5.0, 0.0, 0.0],
-                    25.0,
-                    0.0,
-                    0.0,
-                    -10.0,
-                    "N₂保护冷却至室温",
-                ),
-            ],
-        },
-        "LOW_TEMP_DEGRADATION" => Program {
-            base_standard_id: Some("LOW_TEMP_DEGRADATION".into()),
-            base_standard_version: Some("2017".into()),
-            id: "LOW_TEMP_DEGRADATION".into(),
-            name: "GB/T 13242 低温粉化".into(),
-            description: "GB/T 13242-2017 铁矿石低温粉化试验方法".into(),
-            category: "standard".into(),
-            enabled: true,
-            sample_prefix: "RDI".into(),
-            source: ProgramSource::Standard,
-            stages: vec![
-                stage(
-                    "升温",
-                    Heating,
-                    [0.0, 5.0, 0.0, 0.0],
-                    500.0,
-                    5.0,
-                    0.0,
-                    10.0,
-                    "升温至500℃,N₂保护",
-                ),
-                stage(
-                    "恒温",
-                    Stabilizing,
-                    [0.0, 15.0, 0.0, 0.0],
-                    500.0,
-                    5.0,
-                    30.0,
-                    0.0,
-                    "500℃恒温30min,N₂气氛",
-                ),
-                stage(
-                    "还原",
-                    Reducing,
-                    [0.0, 9.0, 3.0, 3.0],
-                    500.0,
-                    5.0,
-                    60.0,
-                    0.0,
-                    "还原60min,20%CO+20%CO₂+60%N₂",
-                ),
-                stage(
-                    "冷却",
-                    Cooling,
-                    [0.0, 5.0, 0.0, 0.0],
-                    25.0,
-                    0.0,
-                    0.0,
-                    -10.0,
-                    "N₂保护冷却至室温",
-                ),
-            ],
-        },
-        "FREE_SWELLING" => Program {
-            base_standard_id: Some("FREE_SWELLING".into()),
-            base_standard_version: Some("2018".into()),
-            id: "FREE_SWELLING".into(),
-            name: "GB/T 13240 自由膨胀".into(),
-            description: "GB/T 13240-2018 球团矿自由膨胀指数测定方法".into(),
-            category: "standard".into(),
-            enabled: true,
-            sample_prefix: "FSI".into(),
-            source: ProgramSource::Standard,
-            stages: vec![
-                stage(
-                    "升温",
-                    Heating,
-                    [0.0, 10.0, 0.0, 0.0],
-                    900.0,
-                    5.0,
-                    0.0,
-                    10.0,
-                    "升温至900℃,N₂保护",
-                ),
-                stage(
-                    "恒温",
-                    Stabilizing,
-                    [0.0, 15.0, 0.0, 0.0],
-                    900.0,
-                    5.0,
-                    15.0,
-                    0.0,
-                    "900℃恒温15min,N₂气氛",
-                ),
-                stage(
-                    "还原",
-                    Reducing,
-                    [0.0, 10.5, 0.0, 4.5],
-                    900.0,
-                    5.0,
-                    60.0,
-                    0.0,
-                    "还原60min,30%CO+70%N₂",
-                ),
-                stage(
-                    "冷却",
-                    Cooling,
-                    [0.0, 5.0, 0.0, 0.0],
-                    50.0,
-                    0.0,
-                    0.0,
-                    -10.0,
-                    "N₂保护冷却至50℃",
-                ),
-            ],
-        },
-        _ => return None,
-    };
-    Some(p)
-}
-
-/// All standard mode ids.
-pub const STANDARD_MODES: [&str; 3] = ["REDUCIBILITY", "LOW_TEMP_DEGRADATION", "FREE_SWELLING"];
-
-/// Validate an operator-defined program before saving or running it.
-pub fn validate_program(program: &Program) -> Result<(), String> {
-    if program.id.trim().is_empty() {
-        return Err("模式 ID 必填".into());
-    }
-    if program.name.trim().is_empty() {
-        return Err("模式名称必填".into());
-    }
-    if program.stages.is_empty() {
-        return Err("至少需要一个阶段".into());
-    }
-    for (i, stage) in program.stages.iter().enumerate() {
-        let n = i + 1;
-        if stage.name.trim().is_empty() {
-            return Err(format!("第 {n} 阶段名称必填"));
-        }
-        if !stage.target_temp.is_finite() {
-            return Err(format!("第 {n} 阶段目标温度无效"));
-        }
-        if !stage.tolerance.is_finite() || stage.tolerance < 0.0 {
-            return Err(format!("第 {n} 阶段容差必须为非负数"));
-        }
-        if !stage.duration_min.is_finite() || stage.duration_min < 0.0 {
-            return Err(format!("第 {n} 阶段时长必须为非负数"));
-        }
-        if !stage.ramp_rate.is_finite() {
-            return Err(format!("第 {n} 阶段升温率无效"));
-        }
-        let mut total_flow = 0.0;
-        for (gas, value) in stage.gas.iter().enumerate() {
-            if !value.is_finite() || *value < 0.0 {
-                return Err(format!("第 {n} 阶段第 {} 路气体流量必须为非负数", gas + 1));
-            }
-            total_flow += value;
-        }
-        if total_flow <= 0.0 {
-            return Err(format!("第 {n} 阶段总流量必须大于 0"));
-        }
-    }
-    Ok(())
-}
+pub use crate::program::{
+    standard_program, validate_program, Program, ProgramSource, Stage, StageKind, STANDARD_MODES,
+};
 
 /// A running experiment. Tick it once per second with the current T8.
 pub struct ExperimentEngine {
@@ -354,6 +57,7 @@ pub struct ExperimentEngine {
     phase: Phase,
     stage_index: usize,
     stage_elapsed_s: f64,
+    stable_elapsed_s: f64,
     total_elapsed_s: f64,
 }
 
@@ -362,7 +66,7 @@ pub struct ExperimentEngine {
 pub struct TickResult {
     /// The stage just changed (or the run just started): apply this stage's atmosphere.
     pub apply_stage: Option<usize>,
-    /// The run completed on this tick (apply the safety atmosphere).
+    /// The run completed on this tick; retain the validated final stage atmosphere.
     pub completed: bool,
 }
 
@@ -371,9 +75,10 @@ impl ExperimentEngine {
     pub fn start(program: Program) -> Self {
         Self {
             program,
-            phase: Phase::Running,
+            phase: Phase::StageTransition,
             stage_index: 0,
             stage_elapsed_s: 0.0,
+            stable_elapsed_s: 0.0,
             total_elapsed_s: 0.0,
         }
     }
@@ -400,19 +105,30 @@ impl ExperimentEngine {
         self.total_elapsed_s
     }
 
+    pub fn stable_elapsed_s(&self) -> f64 {
+        self.stable_elapsed_s
+    }
+
     /// A stage's exposure clock starts only when its gas switch is acknowledged.
     /// Transport delay remains part of the complete experiment timeline.
     pub fn confirm_stage_started(&mut self, switching_s: f64) {
+        if self.phase != Phase::StageTransition || !switching_s.is_finite() || switching_s < 0.0 {
+            return;
+        }
         if switching_s.is_finite() && switching_s >= 0.0 {
             self.total_elapsed_s += switching_s;
         }
         self.stage_elapsed_s = 0.0;
+        self.stable_elapsed_s = 0.0;
+        if self.phase == Phase::StageTransition {
+            self.phase = Phase::Running;
+        }
     }
 
     /// Advance `dt` seconds with sample temperature `t8`. Returns which stage's
     /// atmosphere to (re)apply and whether the run completed.
     pub fn tick(&mut self, t8: f64, dt: f64) -> TickResult {
-        if self.phase != Phase::Running && self.phase != Phase::StageTransition {
+        if self.phase != Phase::Running || !dt.is_finite() || dt <= 0.0 {
             return TickResult {
                 apply_stage: None,
                 completed: false,
@@ -422,9 +138,28 @@ impl ExperimentEngine {
         self.stage_elapsed_s += dt;
         self.total_elapsed_s += dt;
 
+        let at_temp = self
+            .current_stage()
+            .is_some_and(|s| t8.is_finite() && (t8 - s.target_temp).abs() <= s.tolerance);
+        self.stable_elapsed_s = if at_temp {
+            self.stable_elapsed_s + dt
+        } else {
+            0.0
+        };
+
         let reached = self
             .current_stage()
-            .map(|s| stage_reached(s, t8, self.stage_elapsed_s))
+            .map(|s| {
+                stage_reached(
+                    s,
+                    t8,
+                    if s.kind == StageKind::Stabilizing {
+                        self.stable_elapsed_s
+                    } else {
+                        self.stage_elapsed_s
+                    },
+                )
+            })
             .unwrap_or(true);
         if !reached {
             return TickResult {
@@ -433,26 +168,41 @@ impl ExperimentEngine {
             };
         }
 
-        // Advance.
-        self.stage_index += 1;
-        if self.stage_index >= self.program.stages.len() {
-            self.phase = Phase::Completing;
-            return TickResult {
-                apply_stage: None,
-                completed: true,
-            };
-        }
-        self.stage_elapsed_s = 0.0;
-        self.phase = Phase::StageTransition;
-        TickResult {
-            apply_stage: Some(self.stage_index),
-            completed: false,
-        }
+        self.advance()
     }
 
     /// Manual skip to the next stage (operator, with confirm + audit at the UI/command
     /// layer). Returns the new stage to apply, or completion.
     pub fn skip_stage(&mut self) -> TickResult {
+        if self.phase != Phase::Running
+            || !self.current_stage().is_some_and(|s| {
+                matches!(
+                    s.kind,
+                    StageKind::Heating | StageKind::Stabilizing | StageKind::Reducing
+                )
+            })
+        {
+            return TickResult {
+                apply_stage: None,
+                completed: false,
+            };
+        }
+        self.advance()
+    }
+
+    pub fn acknowledge_manual(&mut self, stage_index: usize) -> Result<TickResult, String> {
+        if self.phase != Phase::Running
+            || self.stage_index != stage_index
+            || !self
+                .current_stage()
+                .is_some_and(|s| s.kind == StageKind::Manual)
+        {
+            return Err("当前阶段不接受此人工确认，或阶段气氛尚未确认".into());
+        }
+        Ok(self.advance())
+    }
+
+    fn advance(&mut self) -> TickResult {
         self.stage_index += 1;
         if self.stage_index >= self.program.stages.len() {
             self.phase = Phase::Completing;
@@ -462,6 +212,7 @@ impl ExperimentEngine {
             };
         }
         self.stage_elapsed_s = 0.0;
+        self.stable_elapsed_s = 0.0;
         self.phase = Phase::StageTransition;
         TickResult {
             apply_stage: Some(self.stage_index),
@@ -472,16 +223,16 @@ impl ExperimentEngine {
 
 /// Stage arrival test (docs/05 §5.4).
 fn stage_reached(stage: &Stage, t8: f64, elapsed_s: f64) -> bool {
+    if !t8.is_finite() {
+        return false;
+    }
     let at_temp = (t8 - stage.target_temp).abs() <= stage.tolerance;
-    if stage.duration_min > 0.0 {
-        // hold stages: at target AND held long enough
-        at_temp && elapsed_s >= stage.duration_min * 60.0
-    } else if stage.kind == StageKind::Cooling {
-        // cooling (new rule): T ≤ target + 5.0 (old tolerance=0 never triggered)
-        t8 <= stage.target_temp + 5.0
-    } else {
-        // dynamic heating: at target
-        at_temp
+    match stage.kind {
+        StageKind::Manual => false,
+        StageKind::Purging | StageKind::Reducing => elapsed_s >= stage.duration_min * 60.0,
+        StageKind::Stabilizing => at_temp && elapsed_s >= stage.duration_min * 60.0,
+        StageKind::Cooling => t8 < stage.target_temp,
+        StageKind::Heating => at_temp,
     }
 }
 
@@ -495,14 +246,14 @@ mod tests {
         assert_eq!(p.source, ProgramSource::Standard);
         assert_eq!(p.sample_prefix, "RED");
         assert!(p.enabled);
-        assert_eq!(p.stages.len(), 4);
+        assert_eq!(p.stages.len(), 5);
         assert_eq!(p.stages[0].gas, [0.0, 5.0, 0.0, 0.0]);
         assert_eq!(p.stages[0].target_temp, 900.0);
         assert_eq!(p.stages[1].duration_min, 30.0);
         assert_eq!(p.stages[2].gas, [0.0, 10.5, 0.0, 4.5]); // CO=4.5 N2=10.5
         assert_eq!(p.stages[2].duration_min, 180.0);
-        assert_eq!(p.stages[3].kind, StageKind::Cooling);
-        assert_eq!(p.stages[3].target_temp, 25.0);
+        assert_eq!(p.stages[3].kind, StageKind::Purging);
+        assert_eq!(p.stages[4].kind, StageKind::Manual);
 
         let d = standard_program("LOW_TEMP_DEGRADATION").unwrap();
         assert_eq!(d.sample_prefix, "RDI");
@@ -514,7 +265,7 @@ mod tests {
         assert_eq!(s.sample_prefix, "FSI");
         assert_eq!(s.stages[0].gas, [0.0, 10.0, 0.0, 0.0]); // N2=10
         assert_eq!(s.stages[1].duration_min, 15.0);
-        assert_eq!(s.stages[3].target_temp, 50.0);
+        assert_eq!(s.stages[4].target_temp, 50.0);
 
         assert!(standard_program("NOPE").is_none());
     }
@@ -522,6 +273,10 @@ mod tests {
     #[test]
     fn legal_transitions() {
         assert!(is_legal_transition(Phase::Idle, Phase::Configuring));
+        assert!(is_legal_transition(
+            Phase::Configuring,
+            Phase::StageTransition
+        ));
         assert!(is_legal_transition(Phase::Running, Phase::Stopping));
         assert!(is_legal_transition(Phase::Completing, Phase::Idle));
         assert!(!is_legal_transition(Phase::Idle, Phase::Running));
@@ -529,10 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn cooling_reaches_at_target_plus_5() {
-        let cool = &standard_program("REDUCIBILITY").unwrap().stages[3]; // target 25, cooling
-        assert!(stage_reached(cool, 29.0, 0.0)); // 29 <= 25+5
-        assert!(!stage_reached(cool, 31.0, 0.0)); // 31 > 30
+    fn cooling_requires_strictly_below_limit() {
+        let cool = &standard_program("LOW_TEMP_DEGRADATION").unwrap().stages[4];
+        assert!(stage_reached(cool, 99.9, 0.0));
+        assert!(!stage_reached(cool, 100.0, 0.0));
     }
 
     #[test]
@@ -549,6 +304,7 @@ mod tests {
         // than a fixed constant per loop iteration (#43). Uneven dt must therefore land the
         // 30 min hold at 30 min of accumulated time, no earlier and no later.
         let mut e = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
+        e.confirm_stage_started(0.0);
         // Stage 0 is a dynamic heat to 900 °C: hold at 800 °C so nothing advances yet.
         let uneven = [0.7_f64, 1.4, 0.9, 1.0, 2.0];
         let mut elapsed = 0.0;
@@ -564,6 +320,7 @@ mod tests {
 
         // Reach the target: the heating stage completes and stage 1 (900 °C, 30 min) begins.
         assert_eq!(e.tick(900.0, 1.0).apply_stage, Some(1));
+        e.confirm_stage_started(0.0);
         let mut held = 0.0;
         for dt in uneven.iter().cycle() {
             if held + dt >= 30.0 * 60.0 {
@@ -588,22 +345,36 @@ mod tests {
         // Simulate a full FREE_SWELLING run: temperatures snap to each stage's target,
         // and we tick with dt large enough to satisfy holds.
         let mut e = ExperimentEngine::start(standard_program("FREE_SWELLING").unwrap());
+        e.confirm_stage_started(0.0);
         let mut applied = vec![0usize]; // stage 0 applied at start
         let mut guard = 0;
         loop {
             guard += 1;
             assert!(guard < 100, "should complete quickly");
             // Snap temperature to the stage target (cooling target+ε still ≤ target+5).
-            let t8 = e.current_stage().unwrap().target_temp;
-            let r = e.tick(t8, 3600.0); // 1h per tick — clears any hold
+            let stage = e.current_stage().unwrap();
+            let r = if stage.kind == StageKind::Manual {
+                e.acknowledge_manual(e.stage_index()).unwrap()
+            } else {
+                e.tick(
+                    stage.target_temp
+                        - if stage.kind == StageKind::Cooling {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    3600.0,
+                )
+            };
             if let Some(idx) = r.apply_stage {
                 applied.push(idx);
+                e.confirm_stage_started(0.0);
             }
             if r.completed {
                 break;
             }
         }
-        assert_eq!(applied, vec![0, 1, 2, 3]); // all 4 stages entered in order
+        assert_eq!(applied, vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(e.phase(), Phase::Completing);
     }
 
@@ -648,7 +419,9 @@ mod tests {
     #[test]
     fn gas_acknowledgement_delay_is_not_reduction_exposure() {
         let mut e = ExperimentEngine::start(standard_program("REDUCIBILITY").unwrap());
+        e.confirm_stage_started(0.0);
         e.skip_stage();
+        e.confirm_stage_started(0.0);
         e.skip_stage();
         e.confirm_stage_started(17.0);
         assert_eq!(e.total_elapsed_s(), 17.0);

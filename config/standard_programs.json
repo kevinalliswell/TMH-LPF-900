@@ -1,0 +1,284 @@
+[
+  {
+    "id": "REDUCIBILITY",
+    "name": "GB/T 13241 还原性",
+    "description": "GB/T 13241—2017 铁矿石 还原性的测定方法",
+    "category": "standard",
+    "enabled": true,
+    "sample_prefix": "RED",
+    "source": "standard",
+    "base_standard_id": "REDUCIBILITY",
+    "base_standard_version": "2017",
+    "template_revision": "GB-PROCEDURE-2026-09-08.1",
+    "stages": [
+      {
+        "name": "升温",
+        "kind": "HEATING",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 900,
+        "tolerance": 5,
+        "duration_min": 0,
+        "ramp_rate": 10,
+        "description": "由仪表执行升温程序，上位机监测；升温速度不超过10℃/min。"
+      },
+      {
+        "name": "稳定保持",
+        "kind": "STABILIZING",
+        "gas": [
+          0,
+          15,
+          0,
+          0
+        ],
+        "target_temp": 900,
+        "tolerance": 5,
+        "duration_min": 30,
+        "ramp_rate": 0,
+        "description": "温度在容差内连续保持；越界或缺失后重新计时。"
+      },
+      {
+        "name": "还原",
+        "kind": "REDUCING",
+        "gas": [
+          0,
+          10.5,
+          0,
+          4.5
+        ],
+        "target_temp": 900,
+        "tolerance": 5,
+        "duration_min": 180,
+        "ramp_rate": 0,
+        "description": "按气氛切换确认后的实际时间计时；超差记录为偏离，不自动延长还原。"
+      },
+      {
+        "name": "氮气吹扫",
+        "kind": "PURGING",
+        "gas": [
+          0,
+          15,
+          0,
+          0
+        ],
+        "target_temp": 900,
+        "tolerance": 5,
+        "duration_min": 5,
+        "ramp_rate": 0,
+        "description": "还原结束后以15 L/min氮气吹扫5 min，之后关闭氮气。"
+      },
+      {
+        "name": "取出还原管",
+        "kind": "MANUAL",
+        "gas": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "target_temp": 25,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "已完成5 min氮气吹扫并关闭氮气。请取出还原管后确认。"
+      }
+    ]
+  },
+  {
+    "id": "LOW_TEMP_DEGRADATION",
+    "name": "GB/T 13242 低温粉化",
+    "description": "GB/T 13242—2017 铁矿石 低温粉化试验 静态还原后使用冷转鼓的方法",
+    "category": "standard",
+    "enabled": true,
+    "sample_prefix": "RDI",
+    "source": "standard",
+    "base_standard_id": "LOW_TEMP_DEGRADATION",
+    "base_standard_version": "2017",
+    "template_revision": "GB-PROCEDURE-2026-09-08.1",
+    "stages": [
+      {
+        "name": "升温",
+        "kind": "HEATING",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 500,
+        "tolerance": 5,
+        "duration_min": 0,
+        "ramp_rate": 10,
+        "description": "由仪表执行升温程序，上位机监测；升温速度不超过10℃/min。"
+      },
+      {
+        "name": "稳定保持",
+        "kind": "STABILIZING",
+        "gas": [
+          0,
+          15,
+          0,
+          0
+        ],
+        "target_temp": 500,
+        "tolerance": 5,
+        "duration_min": 30,
+        "ramp_rate": 0,
+        "description": "温度在容差内连续保持；越界或缺失后重新计时。"
+      },
+      {
+        "name": "还原",
+        "kind": "REDUCING",
+        "gas": [
+          0,
+          9,
+          3,
+          3
+        ],
+        "target_temp": 500,
+        "tolerance": 5,
+        "duration_min": 60,
+        "ramp_rate": 0,
+        "description": "按气氛切换确认后的实际时间计时；超差记录为偏离，不自动延长还原。"
+      },
+      {
+        "name": "取管冷却准备",
+        "kind": "MANUAL",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 25,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "已切换5 L/min氮气。请取出还原管，在氮气流中冷却，并确认取管完成。"
+      },
+      {
+        "name": "氮气中冷却",
+        "kind": "COOLING",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 100,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "在氮气流中冷却至100℃以下，随后进行入鼓前称量、冷转鼓与筛分记录。"
+      }
+    ]
+  },
+  {
+    "id": "FREE_SWELLING",
+    "name": "GB/T 13240 自由膨胀",
+    "description": "GB/T 13240—2018 高炉用铁球团矿 自由膨胀指数的测定",
+    "category": "standard",
+    "enabled": true,
+    "sample_prefix": "FSI",
+    "source": "standard",
+    "base_standard_id": "FREE_SWELLING",
+    "base_standard_version": "2018",
+    "template_revision": "GB-PROCEDURE-2026-09-08.1",
+    "stages": [
+      {
+        "name": "升温",
+        "kind": "HEATING",
+        "gas": [
+          0,
+          10,
+          0,
+          0
+        ],
+        "target_temp": 900,
+        "tolerance": 10,
+        "duration_min": 0,
+        "ramp_rate": 10,
+        "description": "由仪表执行升温程序，上位机监测；升温速度不超过10℃/min。"
+      },
+      {
+        "name": "稳定保持",
+        "kind": "STABILIZING",
+        "gas": [
+          0,
+          15,
+          0,
+          0
+        ],
+        "target_temp": 900,
+        "tolerance": 10,
+        "duration_min": 15,
+        "ramp_rate": 0,
+        "description": "温度在容差内连续保持；越界或缺失后重新计时。"
+      },
+      {
+        "name": "还原",
+        "kind": "REDUCING",
+        "gas": [
+          0,
+          10.5,
+          0,
+          4.5
+        ],
+        "target_temp": 900,
+        "tolerance": 10,
+        "duration_min": 60,
+        "ramp_rate": 0,
+        "description": "按气氛切换确认后的实际时间计时；超差记录为偏离，不自动延长还原。"
+      },
+      {
+        "name": "关炉与取管",
+        "kind": "MANUAL",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 25,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "已切换5 L/min氮气。请关闭炉子电源并取出还原管，在氮气流中冷却；完成关炉和取管后确认。"
+      },
+      {
+        "name": "氮气中冷却",
+        "kind": "COOLING",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 50,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "在氮气流中冷却至室温且低于50℃。"
+      },
+      {
+        "name": "室温确认",
+        "kind": "MANUAL",
+        "gas": [
+          0,
+          5,
+          0,
+          0
+        ],
+        "target_temp": 25,
+        "tolerance": 0,
+        "duration_min": 0,
+        "ramp_rate": 0,
+        "description": "请确认试料已冷却至室温且低于50℃，再使用与还原前相同的方法测定18颗球团总体积。"
+      }
+    ]
+  }
+]

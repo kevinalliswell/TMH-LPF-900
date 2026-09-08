@@ -251,11 +251,23 @@ fn conditions_html(
             }
         ),
     );
+    let skip_notes = runtime
+        .and_then(|v| v["stage_actions"].as_array())
+        .map(|events| {
+            events
+                .iter()
+                .filter(|e| e["kind"] == "skip")
+                .filter_map(|e| e["notes"].as_str())
+                .collect::<Vec<_>>()
+                .join("；")
+        })
+        .filter(|s| !s.is_empty());
     let skip_detail = meta_row(
         "跳段及原因",
         if skip {
-            runtime
-                .and_then(|v| v["skip_reason"].as_str())
+            skip_notes
+                .as_deref()
+                .or_else(|| runtime.and_then(|v| v["skip_reason"].as_str()))
                 .unwrap_or("已跳段，原因未记录")
         } else if runtime.is_none() {
             "旧记录：未保存跳段信息"
@@ -306,6 +318,73 @@ fn conditions_html(
       meta_row("气体体积分数（±0.5 个百分点）",&format!("{} 点；{}",bad_ratio,verdict(bad_ratio))),
       meta_row("缺测或缺少质量记录",&missing.to_string()),
       meta_row("执行程序还原目标",&target.map(|v|format!("{v} ℃")).unwrap_or_else(||"待确认".into())))
+}
+
+fn procedure_evidence_html(exp: &ExperimentRow, analysis: Option<&serde_json::Value>) -> String {
+    let runtime = analysis.and_then(|a| a.get("runtime_evidence"));
+    let program: Option<crate::engine::Program> = exp
+        .program_snapshot_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
+    let mut html = format!(
+        "<table class=\"kv\">{}{}{}{}</table>",
+        meta_row(
+            "程序版本",
+            program
+                .as_ref()
+                .and_then(|p| p.template_revision.as_deref())
+                .unwrap_or("历史程序，未记录版本")
+        ),
+        meta_row(
+            "设备模式",
+            runtime
+                .and_then(|r| r["device_mode"].as_str())
+                .unwrap_or("未记录")
+        ),
+        meta_row(
+            "结束结果",
+            runtime
+                .and_then(|r| r["outcome"].as_str())
+                .unwrap_or("未记录")
+        ),
+        meta_row(
+            "结束气氛动作",
+            runtime
+                .and_then(|r| r["ending_action"].as_str())
+                .unwrap_or("未记录")
+        )
+    );
+    let events = runtime.and_then(|r| r["stage_actions"].as_array());
+    if let Some(events) = events.filter(|events| !events.is_empty()) {
+        html.push_str("<table class=\"kv3\"><tr><th>步骤</th><th>操作</th><th>确认人 / 时间</th><th>备注</th></tr>");
+        for event in events {
+            let stage = event["stage_index"]
+                .as_u64()
+                .and_then(|i| program.as_ref().and_then(|p| p.stages.get(i as usize)))
+                .map(|s| s.name.as_str())
+                .unwrap_or("阶段未记录");
+            let action = if event["kind"] == "confirm" {
+                "人工确认"
+            } else {
+                "跳段"
+            };
+            html.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{} / {}</td><td>{}</td></tr>",
+                esc(stage),
+                action,
+                esc(event["operator"].as_str().unwrap_or("未记录")),
+                esc(event["confirmed_at"].as_str().unwrap_or("未记录")),
+                esc(event["notes"].as_str().unwrap_or(""))
+            ));
+        }
+        html.push_str("</table>");
+    } else {
+        html.push_str(
+            "<p>没有已保存的人工步骤确认记录。旧记录不能据此推定已执行取管、关炉或室温确认。</p>",
+        );
+    }
+    html.push_str("<p>人工确认记录反映操作员声明；模拟运行用于验证软件流程，不能替代真实仪器、校准和国标实验验证。</p>");
+    html
 }
 
 fn report_details_html(analysis: Option<&serde_json::Value>) -> String {
@@ -430,7 +509,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}\
 <div class=\"sub\">TMH-LPF-900 · 北京科技大学</div>\
 <h2>实验信息</h2><table class=\"kv\">{meta}</table>\
 <h2>报告信息与人工补录</h2>{report_details}<h2>结果分析</h2>{analysis}\
-<h2>条件核查</h2>{conditions}\
+<h2>流程与人工操作记录</h2>{procedure}<h2>条件核查</h2>{conditions}\
 <h2>温度 / 质量曲线</h2>{chart}\
 <div class=\"foot\">本报告由 TMH-LPF-900 自动生成</div>\
 </body></html>",
@@ -439,6 +518,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}\
         analysis = analysis_html(analysis),
         conditions = conditions_html(exp, samples, reducing_target, analysis),
         report_details = report_details_html(analysis),
+        procedure = procedure_evidence_html(exp, analysis),
         chart = svg_chart(samples),
     )
 }
@@ -657,5 +737,20 @@ mod tests {
         assert!(html.contains("30.00 min"));
         assert!(html.contains("180 min"));
         assert!(html.contains("操作员提前取样"));
+    }
+    #[test]
+    fn manual_operation_evidence_is_visible_and_escaped() {
+        let mut exp = exp();
+        exp.program_snapshot_json = Some(
+            serde_json::to_string(&crate::engine::standard_program("REDUCIBILITY").unwrap())
+                .unwrap(),
+        );
+        let analysis = serde_json::json!({"runtime_evidence":{"device_mode":"mock","outcome":"completed","ending_action":"normal","stage_actions":[{"kind":"confirm","stage_index":4,"operator":"Lab <A>","confirmed_at":"2026-09-08T12:00:00Z","notes":"Tube <removed>"}]}});
+        let html = procedure_evidence_html(&exp, Some(&analysis));
+        assert!(html.contains("取出还原管"));
+        assert!(html.contains("Lab &lt;A&gt;"));
+        assert!(html.contains("Tube &lt;removed&gt;"));
+        assert!(html.contains("2026-09-08T12:00:00Z"));
+        assert!(html.contains("不能替代真实仪器"));
     }
 }
