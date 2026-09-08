@@ -98,23 +98,46 @@ export function gasConditionErrors(
   });
   return errors;
 }
+function sameStandardTemplate(
+  program: ProgramDto,
+  parent: ProgramDto,
+): boolean {
+  const metadata: (keyof ProgramDto)[] = [
+    "id",
+    "name",
+    "description",
+    "category",
+    "enabled",
+    "sample_prefix",
+    "source",
+    "base_standard_id",
+    "base_standard_version",
+    "template_revision",
+  ];
+  return (
+    program.provenance == null &&
+    metadata.every((key) => program[key] === parent[key]) &&
+    program.stages.length === parent.stages.length &&
+    conditionChanges(program, parent).length === 0
+  );
+}
 /** Mock and UI use the same structural rules; native code validates again. */
 export function executableProgramError(program: ProgramDto): string | null {
   if (program.stages.some((s) => !validStageDuration(s)))
     return "阶段类型与时长不匹配";
-  if (program.source === "standard") return null;
+  if (program.source === "standard") {
+    const parent = (standards as ProgramDto[]).find((p) => p.id === program.id);
+    return parent && sameStandardTemplate(program, parent)
+      ? null
+      : "标准程序与当前内置模板不一致，不能作为国标程序执行";
+  }
   if (!program.provenance)
     return "旧自定义程序缺少版本依据，请从当前国标重新复制";
   const error = customShapeError(program);
   const parent = standardParent(program);
   if (error || !parent) return error ?? "基础国标未知";
   const saved = program.provenance.parent_template;
-  if (
-    customShapeError(saved, parent) ||
-    saved.id !== parent.id ||
-    saved.source !== "standard" ||
-    conditionChanges(saved, parent).length
-  )
+  if (!sameStandardTemplate(saved, parent))
     return "基础模板已有更新，请从当前国标另建程序";
   if (
     program.provenance.revision <= 0 ||

@@ -155,3 +155,12 @@ it("uses the custom endpoint in manual analysis and escapes snapshot provenance 
   expect(html).toContain("基础国标条件");
   expect(html).toContain("不能据此声明符合国标方法");
 });
+
+it("rejects a modified template even when it declares standard source", async () => {
+  const { executableProgramError } = await import("./programRules");
+  const m = await import("./mock");
+  const p = m.mockListPrograms()[0]!;
+  expect(executableProgramError(p)).toBeNull();
+  p.stages[2]!.target_temp = 850;
+  expect(executableProgramError(p)).toContain("内置模板");
+});
