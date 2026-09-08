@@ -2,13 +2,8 @@ name: Candidate installers
 
 on:
   workflow_dispatch:
+  # All inputs, including shared runtime/configuration and packaged documentation.
   pull_request:
-    paths:
-      - .github/workflows/candidate.yml
-      - src-tauri/tauri.candidate.conf.json
-      - src-tauri/src/build_profile.rs
-      - scripts/package-candidate.mjs
-      - scripts/smoke-installed.ps1
 
 permissions:
   contents: read
@@ -88,7 +83,7 @@ jobs:
           set -euo pipefail
           bundle="target/universal-apple-darwin/release/bundle"
           app="$bundle/macos/TMH-LPF-900 Candidate.app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/tmh-app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/tmh-app-candidate"
           codesign --verify --deep --strict "$app"
           hdiutil verify "$bundle"/dmg/*.dmg
       - name: Record source commit and asset hashes

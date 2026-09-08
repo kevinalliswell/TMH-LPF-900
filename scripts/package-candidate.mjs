@@ -43,7 +43,7 @@ const manifest = {
   files: [{ name, bytes: bytes.length, sha256 }],
   validation:
     platform === "windows-x64"
-      ? "NSIS install, first window, normal close, fresh database and uninstall smoke"
+      ? "NSIS install, exact main window, normal close, fresh database, uninstall and separate production process smoke"
       : "Universal Mach-O and ad-hoc code signature, DMG verification",
   limitations: [
     "No real device or national-standard experiment validation",

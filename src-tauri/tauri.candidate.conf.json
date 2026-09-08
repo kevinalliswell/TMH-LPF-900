@@ -17,6 +17,9 @@
   },
   "bundle": {
     "createUpdaterArtifacts": false,
-    "macOS": { "signingIdentity": "-" }
-  }
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "mainBinaryName": "tmh-app-candidate"
 }
