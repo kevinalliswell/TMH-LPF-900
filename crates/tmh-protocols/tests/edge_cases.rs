@@ -36,13 +36,13 @@ fn echo_skip_multi_frame_picks_real_response() {
 }
 
 #[test]
-fn cpl_tail_variants_parse_identically() {
-    let crlf = unhex("02 30 31 30 30 58 32 30 2c 33 30 03 46 33 0d 0a");
-    let cr = unhex("02 30 31 30 30 58 32 30 2c 33 30 03 46 33 0d");
+fn cpl_requires_checksum_and_complete_crlf_tail() {
+    let crlf = unhex("02 30 31 30 30 58 32 30 2c 33 30 03 46 31 0d 0a");
+    let cr = unhex("02 30 31 30 30 58 32 30 2c 33 30 03 46 31 0d");
     let bare = unhex("02 30 31 30 30 58 32 30 2c 33 30 03");
     assert_eq!(cpl::parse_response(&crlf), Some(3.0));
-    assert_eq!(cpl::parse_response(&cr), Some(3.0));
-    assert_eq!(cpl::parse_response(&bare), Some(3.0));
+    assert_eq!(cpl::parse_response(&cr), None);
+    assert_eq!(cpl::parse_response(&bare), None);
 }
 
 #[test]

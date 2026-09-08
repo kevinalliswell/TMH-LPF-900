@@ -105,6 +105,7 @@ mod tests {
             ],
             weight,
             health: DeviceHealth {
+                safety_latched: false,
                 temp_valid: true,
                 mfc_valid: true,
                 balance_valid: true,

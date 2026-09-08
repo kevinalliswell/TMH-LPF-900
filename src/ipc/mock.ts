@@ -66,6 +66,7 @@ export function tick(): TelemetrySnapshot {
     }),
     weight: Number(weight.toFixed(3)),
     health: {
+      safety_latched: safetyLatched,
       temp_valid: true,
       mfc_valid: true,
       balance_valid: true,
@@ -77,6 +78,7 @@ export function tick(): TelemetrySnapshot {
 }
 
 export function mockSetFlow(gas: number, value: number): ClampResult {
+  if (safetyLatched) throw new Error("保护已锁存，请先复位");
   const applied = clampGas(gas, value);
   const limit =
     gas === 0
@@ -89,13 +91,25 @@ export function mockSetFlow(gas: number, value: number): ClampResult {
 }
 
 export function mockSetOnOff(gas: number, on: boolean): void {
+  if (safetyLatched) throw new Error("保护已锁存，请先复位");
   if (!on) sv[gas] = 0;
 }
 
+let safetyLatched = false;
 export function mockShutoff(): void {
+  safetyLatched = true;
+  if (run) mockStopExperiment();
   sv[0] = 0;
+  sv[1] = 5;
   sv[2] = 0;
   sv[3] = 0;
+}
+export function mockResetSafety(): void {
+  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
+  if (run) throw new Error("实验仍在结束");
+  if ([0, 2, 3].some((i) => pv[i]! > 0.1))
+    throw new Error("等待气体流量归零后复位");
+  safetyLatched = false;
 }
 
 export function mockTare(): TareResult {
@@ -399,6 +413,7 @@ function completeRun(): void {
 }
 
 export function mockStartExperiment(p: ExperimentParams): string {
+  if (safetyLatched) throw new Error("保护已锁存，请先复位");
   if (!p.sample_id.trim()) throw new Error("样品编号必填");
   if (!p.sample_name.trim()) throw new Error("样品名称必填");
   if (!(p.sample_weight > 0)) throw new Error("样品重量必须大于 0");

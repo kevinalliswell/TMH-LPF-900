@@ -1,5 +1,12 @@
+import { useTelemetry } from "../../stores/telemetry";
 import { useEffect, useState } from "react";
-import { EXPERIMENT_MODES, getExperimentDetail, skipStage, stopExperiment } from "../../ipc";
+import {
+  EXPERIMENT_MODES,
+  resetSafetyInterlock,
+  getExperimentDetail,
+  skipStage,
+  stopExperiment,
+} from "../../ipc";
 import type { ProgramDto } from "../../ipc/types";
 import { Modal } from "../../components/Modal";
 import { useExperiment } from "../../stores/experiment";
@@ -16,6 +23,9 @@ export function fmtHms(totalS: number | undefined): string {
 
 export function ExperimentBar() {
   const ex = useExperiment((s) => s.state);
+  const latched =
+    useTelemetry((s) => s.snapshot?.health.safety_latched) ||
+    ex.phase === "ERROR";
   const [showDialog, setShowDialog] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
@@ -26,13 +36,19 @@ export function ExperimentBar() {
   useEffect(() => {
     let cancelled = false;
     setProgram(null);
-    if (ex.experiment_id) getExperimentDetail(ex.experiment_id).then(detail => {
-      if (!cancelled) setProgram(detail.program_snapshot ?? null);
-    }).catch(toastError);
-    return () => { cancelled = true; };
+    if (ex.experiment_id)
+      getExperimentDetail(ex.experiment_id)
+        .then((detail) => {
+          if (!cancelled) setProgram(detail.program_snapshot ?? null);
+        })
+        .catch(toastError);
+    return () => {
+      cancelled = true;
+    };
   }, [ex.experiment_id]);
 
-  const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? ex.mode ?? "";
+  const modeName =
+    EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? ex.mode ?? "";
   const stageNo = (ex.stage_index ?? 0) + 1;
   const curStage = program?.stages[ex.stage_index ?? 0];
   const nextStage = program?.stages[(ex.stage_index ?? 0) + 1];
@@ -72,7 +88,13 @@ export function ExperimentBar() {
           <>
             <span className="flex items-center gap-1.5">
               <span
-                style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--ok)", boxShadow: "0 0 6px var(--ok)" }}
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: "var(--ok)",
+                  boxShadow: "0 0 6px var(--ok)",
+                }}
               />
               <span style={{ color: "var(--ok)" }}>实验运行中</span>
             </span>
@@ -85,7 +107,8 @@ export function ExperimentBar() {
                 className="px-2 py-0.5 rounded"
                 style={{ background: "var(--panel-2)", color: "var(--heat)" }}
               >
-                阶段 {stageNo}/{ex.total_stages ?? "-"} · {ex.stage_name} → {ex.target_temp ?? 0}℃
+                阶段 {stageNo}/{ex.total_stages ?? "-"} · {ex.stage_name} →{" "}
+                {ex.target_temp ?? 0}℃
               </span>
             )}
             <span className="mono" style={{ color: "var(--fg-faint)" }}>
@@ -95,7 +118,11 @@ export function ExperimentBar() {
             <button
               onClick={() => setConfirmSkip(true)}
               className="px-2.5 py-1 rounded text-[12px]"
-              style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+              style={{
+                background: "var(--panel-2)",
+                border: "1px solid var(--border-bright)",
+                color: "var(--fg)",
+              }}
             >
               跳过阶段
             </button>
@@ -109,9 +136,27 @@ export function ExperimentBar() {
           </>
         ) : (
           <>
-            <span style={{ color: "var(--fg-faint)" }}>空闲 · 未开始实验（手动气氛可控）</span>
+            <span
+              style={{ color: latched ? "var(--danger)" : "var(--fg-faint)" }}
+            >
+              {latched
+                ? "保护已锁存：确认安全与保存状态后复位"
+                : "空闲 · 未开始实验（手动气氛可控）"}
+            </span>
+            {latched && (
+              <button
+                onClick={() => {
+                  void resetSafetyInterlock()
+                    .then(() => push("保护已复位", "info"))
+                    .catch(toastError);
+                }}
+              >
+                确认安全并复位
+              </button>
+            )}
             <div className="flex-1" />
             <button
+              disabled={!!latched}
               onClick={() => setShowDialog(true)}
               className="px-2.5 py-1 rounded text-[12px] font-medium"
               style={{ background: "var(--ok)", color: "#04140a" }}
@@ -122,36 +167,58 @@ export function ExperimentBar() {
         )}
       </div>
 
-      {showDialog && <StartExperimentDialog onClose={() => setShowDialog(false)} />}
+      {showDialog && (
+        <StartExperimentDialog onClose={() => setShowDialog(false)} />
+      )}
       {confirmSkip && (
         <Modal title="跳过阶段" onClose={() => setConfirmSkip(false)}>
           <div className="flex flex-col gap-3 text-[13px]">
             <div style={{ color: "var(--fg-dim)" }}>
               确认跳过当前阶段?该操作会写入审计，并在下一轮控制周期下发下一阶段气氛。
             </div>
-            <div className="rounded p-2.5" style={{ background: "var(--bg)", border: "1px solid var(--border)" }}>
+            <div
+              className="rounded p-2.5"
+              style={{
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+              }}
+            >
               <div className="text-[12px]" style={{ color: "var(--fg-faint)" }}>
                 当前阶段
               </div>
               <div className="mt-1">
-                {curStage ? `${curStage.name} · ${stageCondition(curStage)}` : ex.stage_name ?? "—"}
+                {curStage
+                  ? `${curStage.name} · ${stageCondition(curStage)}`
+                  : (ex.stage_name ?? "—")}
               </div>
-              <div className="text-[12px] mt-2" style={{ color: "var(--fg-faint)" }}>
+              <div
+                className="text-[12px] mt-2"
+                style={{ color: "var(--fg-faint)" }}
+              >
                 下一阶段
               </div>
               <div className="mt-1">
                 {nextStage
                   ? `${nextStage.name} · ${stageCondition(nextStage)} · ${gasSummary(nextStage.gas)}`
-                  : program ? "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）" : "程序快照未取得，暂不可跳段"}
+                  : program
+                    ? "完成实验并切换保护气氛（N₂ 5.0，H₂/CO₂/CO 0）"
+                    : "程序快照未取得，暂不可跳段"}
               </div>
             </div>
-            <label className="flex flex-col gap-1 text-[12px]" style={{ color: "var(--fg-dim)" }}>
+            <label
+              className="flex flex-col gap-1 text-[12px]"
+              style={{ color: "var(--fg-dim)" }}
+            >
               跳段原因 *
               <textarea
                 value={skipReason}
                 onChange={(e) => setSkipReason(e.target.value)}
                 className="px-2 py-1.5 rounded text-[13px] min-h-20"
-                style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+                style={{
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  color: "var(--fg)",
+                }}
               />
             </label>
           </div>
@@ -159,15 +226,25 @@ export function ExperimentBar() {
             <button
               onClick={() => setConfirmSkip(false)}
               className="px-3 py-1.5 rounded text-[13px]"
-              style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+              style={{
+                background: "var(--panel-2)",
+                border: "1px solid var(--border-bright)",
+                color: "var(--fg)",
+              }}
             >
               取消
             </button>
             <button
               onClick={doSkip}
-              disabled={!skipReason.trim() || !program || ex.can_control === false}
+              disabled={
+                !skipReason.trim() || !program || ex.can_control === false
+              }
               className="px-3 py-1.5 rounded text-[13px]"
-              style={{ background: "var(--warn)", color: "#1a1204", opacity: skipReason.trim() ? 1 : 0.6 }}
+              style={{
+                background: "var(--warn)",
+                color: "#1a1204",
+                opacity: skipReason.trim() ? 1 : 0.6,
+              }}
             >
               确认跳过
             </button>
@@ -177,13 +254,18 @@ export function ExperimentBar() {
       {confirmStop && (
         <Modal title="停止实验" onClose={() => setConfirmStop(false)}>
           <div className="text-[13px] mb-4" style={{ color: "var(--fg-dim)" }}>
-            确认停止当前实验?系统将立即切换到保护气氛（N₂ 5.0 L/min,可燃气归零）。
+            确认停止当前实验?系统将立即切换到保护气氛（N₂ 5.0
+            L/min,可燃气归零）。
           </div>
           <div className="flex justify-end gap-2">
             <button
               onClick={() => setConfirmStop(false)}
               className="px-3 py-1.5 rounded text-[13px]"
-              style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
+              style={{
+                background: "var(--panel-2)",
+                border: "1px solid var(--border-bright)",
+                color: "var(--fg)",
+              }}
             >
               取消
             </button>
