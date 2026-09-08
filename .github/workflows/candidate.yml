@@ -89,7 +89,7 @@ jobs:
           hdiutil verify "$bundle"/dmg/*.dmg
       - name: Record source commit and asset hashes
         run: node scripts/package-candidate.mjs "${{ matrix.bundle_dir }}" "${{ matrix.platform }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: TMH-LPF-900-candidate-${{ matrix.platform }}-${{ github.run_id }}
           path: candidate-assets/${{ matrix.platform }}/
