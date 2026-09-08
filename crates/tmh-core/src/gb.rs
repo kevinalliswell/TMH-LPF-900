@@ -1,5 +1,6 @@
 //! Calculations verified against the user-supplied final GB/T 13240-2018,
 //! GB/T 13241-2017 and GB/T 13242-2017. See docs/13 for clause/page references.
+use crate::rounding::range_within;
 use serde::{Deserialize, Serialize};
 
 pub const CALCULATION_VERSION: &str = "GB-2026-09-05.1";
@@ -181,10 +182,6 @@ fn repeat_input(values: &[f64], a: f64, b: f64, c: f64) -> Result<(), String> {
     }
     Ok(())
 }
-fn spread(values: &[f64]) -> f64 {
-    values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-        - values.iter().copied().fold(f64::INFINITY, f64::min)
-}
 fn decision(values: &[f64], required_count: usize, middle: bool) -> Result<RepeatDecision, String> {
     if values.len() < required_count {
         return Ok(RepeatDecision {
@@ -215,17 +212,16 @@ fn decision(values: &[f64], required_count: usize, middle: bool) -> Result<Repea
 }
 pub fn repeat_decision(values: &[f64], a: f64, b: f64, c: f64) -> Result<RepeatDecision, String> {
     repeat_input(values, a, b, c)?;
-    if values.len() < 2 || spread(&values[..2]) <= a {
+    if values.len() < 2 || range_within(&values[..2], a) {
         return decision(values, 2, false);
     }
-    let d = spread(&values[..2]);
-    if d <= b && (values.len() < 3 || spread(&values[..3]) <= b) {
+    if range_within(&values[..2], b) && (values.len() < 3 || range_within(&values[..3], b)) {
         return decision(values, 3, false);
     }
     decision(
         values,
         4,
-        d > c || (values.len() == 4 && spread(values) > c),
+        !range_within(&values[..2], c) || (values.len() == 4 && !range_within(values, c)),
     )
 }
 pub fn sequential_repeat_decision(
@@ -235,11 +231,11 @@ pub fn sequential_repeat_decision(
     c: f64,
 ) -> Result<RepeatDecision, String> {
     repeat_input(values, a, b, c)?;
-    if values.len() < 2 || spread(&values[..2]) <= a {
+    if values.len() < 2 || range_within(&values[..2], a) {
         return decision(values, 2, false);
     }
-    if values.len() < 3 || spread(&values[..3]) <= b {
+    if values.len() < 3 || range_within(&values[..3], b) {
         return decision(values, 3, false);
     }
-    decision(values, 4, values.len() == 4 && spread(values) > c)
+    decision(values, 4, values.len() == 4 && !range_within(values, c))
 }
