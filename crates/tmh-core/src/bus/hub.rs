@@ -438,4 +438,46 @@ mod tests {
         assert!(result.is_err());
         hub.stop();
     }
+    #[test]
+    fn reset_invalidates_commands_submitted_while_protection_was_latched() {
+        let mut actor = MfcActor::new(
+            Box::new(MockTransport::mfc()),
+            [1, 2, 3, 4],
+            [0.1, 1.0, 0.1, 0.1],
+            5.0,
+            5.0,
+        );
+        for _ in 0..4 {
+            actor.poll_next(Instant::now());
+        }
+        let safety = actor.safety_latch();
+        safety.trip();
+        let epoch = safety.epoch();
+        let (reset_tx, reset_rx) = oneshot::channel();
+        let (flow_tx, flow_rx) = oneshot::channel();
+        let reset = QueuedMfc {
+            epoch,
+            req: MfcReq::Reset { reply: reset_tx },
+        };
+        let flow = QueuedMfc {
+            epoch,
+            req: MfcReq::SetFlow {
+                gas: 0,
+                value: 3.0,
+                reply: flow_tx,
+            },
+        };
+        dispatch_mfc(&mut actor, reset);
+        assert!(reset_rx.blocking_recv().unwrap().is_ok());
+        dispatch_mfc(&mut actor, flow);
+        assert_eq!(
+            flow_rx.blocking_recv().unwrap(),
+            Err(MfcCommandError::SafetyLatched)
+        );
+        assert_eq!(actor.snapshot().gas[0].sv, 0.0);
+        assert!(
+            actor.set_flow(0, 3.0).is_ok(),
+            "a genuinely new command after acknowledged reset is allowed"
+        );
+    }
 }

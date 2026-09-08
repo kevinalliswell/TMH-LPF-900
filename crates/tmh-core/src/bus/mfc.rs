@@ -86,6 +86,8 @@ impl SafetyLatch {
         if s.0 != epoch {
             return false;
         }
+        // Requests accepted before this reset must not acquire its authorization.
+        s.0 = s.0.wrapping_add(1);
         s.1 = false;
         true
     }
