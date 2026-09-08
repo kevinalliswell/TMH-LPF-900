@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "TMH-LPF-900 desktop shell (Tauri v2)."
 
+[features]
+default = []
+candidate = []
+
 [lib]
 name = "tmh_app_lib"
 crate-type = ["rlib"]
