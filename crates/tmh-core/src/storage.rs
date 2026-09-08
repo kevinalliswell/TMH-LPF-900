@@ -7,7 +7,10 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 7;
+mod groups;
+pub use groups::TestGroupRevision;
+
+const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -70,6 +73,8 @@ pub enum StorageError {
     InvalidCompletion,
     #[error("custom program changed or revision is invalid; reload before saving")]
     ProgramConflict,
+    #[error("test group changed or revision is invalid; reload before saving")]
+    GroupConflict,
     #[error("invalid stored JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("storage: {0}")]
@@ -81,7 +86,7 @@ pub enum StorageError {
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 /// An `experiments` row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExperimentRow {
     pub sample_id: Option<String>,
     pub project_name: Option<String>,
@@ -269,6 +274,19 @@ impl Storage {
                 SELECT id, NULL, program_json FROM custom_programs;",
             )?;
             tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
+            version = 7;
+        }
+        if version == 7 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("CREATE TABLE test_group_revisions (
+                group_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+                owner_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+                recorded_by_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL, snapshot_json TEXT NOT NULL,
+                PRIMARY KEY(group_id, revision));
+                CREATE INDEX idx_group_owner_time ON test_group_revisions(owner_user_id, created_at DESC);")?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -663,6 +681,12 @@ impl Storage {
         Ok(())
     }
 
+    /// Exact database revision for the current analysis; report-only patches do not
+    /// become analysis versions. Freeze this ID alongside the JSON in a test group.
+    pub fn current_analysis_revision_id(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row("SELECT MAX(a.id) FROM analysis_revisions a JOIN experiments e ON e.experiment_id=a.experiment_id WHERE e.experiment_id=?1 AND a.result_json=e.analysis_results_json", [id], |r| r.get(0))?)
+    }
+
     pub fn analysis_revisions(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT result_json FROM analysis_revisions WHERE experiment_id=?1 ORDER BY id DESC",
@@ -936,7 +960,7 @@ mod tests {
     #[test]
     fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 7);
+        assert_eq!(s.user_version().unwrap(), 8);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -987,7 +1011,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 7);
+        assert_eq!(s.user_version().unwrap(), 8);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -1045,6 +1069,7 @@ mod tests {
             .unwrap();
         s.save_report_revision("e1", r#"{"report_details":{"lab_name":"Lab B"}}"#)
             .unwrap();
+        assert_eq!(s.current_analysis_revision_id("e1").unwrap(), Some(1));
         let revisions = s.analysis_revisions("e1").unwrap();
         assert_eq!(revisions.len(), 3);
         assert_eq!(revisions[1]["report_details"]["lab_name"], "Lab A");
@@ -1100,7 +1125,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 7);
+        assert_eq!(s.user_version().unwrap(), 8);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
