@@ -7,7 +7,7 @@ use crate::auth::UserRole;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS experiments (
@@ -68,6 +68,8 @@ CREATE INDEX idx_experiments_owner_start ON experiments(owner_user_id, start_tim
 pub enum StorageError {
     #[error("invalid or conflicting experiment completion")]
     InvalidCompletion,
+    #[error("custom program changed or revision is invalid; reload before saving")]
+    ProgramConflict,
     #[error("invalid stored JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("storage: {0}")]
@@ -244,6 +246,19 @@ impl Storage {
             tx.execute_batch("CREATE TABLE run_completions (token TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id), completion_json TEXT NOT NULL);")?;
             tx.pragma_update(None, "user_version", 6)?;
             tx.commit()?;
+            version = 6;
+        }
+        if version == 6 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE custom_program_revisions (
+                program_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                program_json TEXT NOT NULL, PRIMARY KEY(program_id, revision));
+                INSERT INTO custom_program_revisions(program_id, revision, program_json)
+                SELECT id, 0, program_json FROM custom_programs;",
+            )?;
+            tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -268,6 +283,85 @@ impl Storage {
             .prepare("SELECT program_json FROM custom_programs ORDER BY id")?;
         let rows = statement
             .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_custom_program(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Store the current revision and its immutable history in one transaction.
+    /// Compare the original JSON too, so concurrent editors cannot overwrite changes.
+    pub fn save_custom_program_revision(
+        &mut self,
+        program: &crate::program::Program,
+        expected_json: Option<&str>,
+    ) -> Result<()> {
+        let revision = program
+            .provenance
+            .as_ref()
+            .map(|p| p.revision)
+            .and_then(|r| i64::try_from(r).ok())
+            .filter(|r| *r > 0)
+            .ok_or(StorageError::ProgramConflict)?;
+        let json = serde_json::to_string(program)?;
+        let tx = self.conn.transaction()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT program_json FROM custom_programs WHERE id=?1",
+                [&program.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != expected_json {
+            return Err(StorageError::ProgramConflict);
+        }
+        let previous_revision = match current.as_deref() {
+            Some(raw) => {
+                let previous: crate::program::Program = serde_json::from_str(raw)?;
+                let previous_revision = previous
+                    .provenance
+                    .as_ref()
+                    .map(|p| p.revision)
+                    .unwrap_or(0);
+                let previous_revision =
+                    i64::try_from(previous_revision).map_err(|_| StorageError::ProgramConflict)?;
+                tx.execute("INSERT OR IGNORE INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,?2,?3)", params![program.id, previous_revision, raw])?;
+                previous_revision
+            }
+            None => {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM custom_program_revisions WHERE program_id=?1)",
+                    [&program.id],
+                    |r| r.get(0),
+                )?;
+                if exists {
+                    return Err(StorageError::ProgramConflict);
+                }
+                0
+            }
+        };
+        if previous_revision.checked_add(1) != Some(revision) {
+            return Err(StorageError::ProgramConflict);
+        }
+        tx.execute("INSERT INTO custom_program_revisions(program_id, revision, program_json) VALUES (?1,?2,?3)", params![program.id, revision, json])?;
+        tx.execute("INSERT INTO custom_programs(id, program_json) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET program_json=excluded.program_json", params![program.id, json])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn custom_program_revisions(&self, id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare("SELECT program_json FROM custom_program_revisions WHERE program_id=?1 ORDER BY revision DESC")?;
+        let rows = statement
+            .query_map([id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -805,7 +899,7 @@ mod tests {
     #[test]
     fn schema_inits_at_version_3() {
         let s = Storage::open_in_memory().unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert_eq!(s.user_count().unwrap(), 0);
     }
 
@@ -856,7 +950,7 @@ mod tests {
             .unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert!(s
             .get_experiment("legacy")
             .unwrap()
@@ -969,7 +1063,7 @@ mod tests {
             s.insert_samples(&[sample("e2", 300.0)]).unwrap();
         }
         let s = Storage::open(&path).unwrap();
-        assert_eq!(s.user_version().unwrap(), 6);
+        assert_eq!(s.user_version().unwrap(), 7);
         assert_eq!(s.count_samples("e2").unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
