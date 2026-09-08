@@ -189,13 +189,8 @@ export function ModeView() {
     [programs, selectedId],
   );
 
-  useEffect(() => {
-    setReason("");
-    if (!selectedId) return;
-    if (selected) setDraft(cloneProgram(selected));
-    else setDraft(null);
-  }, [selected, selectedId]);
-
+  // Derive the read-only selection until a user action creates a draft. A passive
+  // selection effect can otherwise overwrite a copy made just after the first paint.
   const active = draft ?? selected;
   const standard = programs.filter((p) => p.source === "standard");
   const custom = programs.filter((p) => p.source === "custom");
@@ -216,6 +211,7 @@ export function ModeView() {
   const selectProgram = (program: ProgramDto) => {
     setSelectedId(program.id);
     setDraft(cloneProgram(program));
+    setReason("");
   };
 
   const patchProgram = (patch: Partial<ProgramDto>) => {
@@ -295,6 +291,7 @@ export function ModeView() {
       push(`已删除自定义模式：${deleteTarget.name}`, "warn");
       setDeleteTarget(null);
       await refresh();
+      setDraft((current) => current?.id === deleteTarget.id ? null : current);
     } catch (e) {
       toastError(e);
     }

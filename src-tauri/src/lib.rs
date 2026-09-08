@@ -10,6 +10,7 @@ use tmh_core::storage::RunCompletion;
 
 mod auth_service;
 mod auth_session;
+mod build_profile;
 mod custom_programs;
 mod groups;
 mod persistence;
@@ -3340,17 +3341,17 @@ fn initialize_state() -> AppState {
     }
     let sim_speed = sim_speed(&mode);
     // Software update checking is OFF by default (docs/09 §9.3); config/env enables it.
-    let updater_enabled = matches!(
+    let updater_enabled = build_profile::updater_allowed(matches!(
         std::env::var("TMH_UPDATER").as_deref(),
         Ok("1" | "on" | "true")
-    );
+    ));
     // Persistent per-user data dir (Windows %APPDATA%, Linux ~/.local/share, etc.);
     // TMH_DATA_DIR selects an isolated test profile. Never silently store durable
     // experiment history in a temporary directory.
     let data_root = std::env::var_os("TMH_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|dir| dir.join("tmh-lpf-900")))
+        .or_else(|| dirs::data_dir().map(|dir| dir.join(build_profile::data_folder())))
         .expect("无法确定持久数据目录，请设置 TMH_DATA_DIR");
     let audit_dir = data_root.join("logs");
     let data_lock = recovery::DataDirectoryLock::acquire(&data_root).expect("无法独占实验数据目录");

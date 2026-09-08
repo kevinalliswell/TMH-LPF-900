@@ -65,4 +65,19 @@ it("saves two explained revisions through the form while protecting the standard
   ).toEqual([800, 850]);
   fireEvent.click(screen.getByRole("button", { name: "版本历史" }));
   expect(await screen.findByText("版本 1 · 界面核验员")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+  fireEvent.change(screen.getByLabelText("本次修改原因"), {
+    target: { value: "尚未保存的修改原因" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /标准 GB\/T 13242 低温粉化/ }));
+  expect(screen.queryByLabelText("本次修改原因")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(saved.name) }));
+  expect((screen.getByLabelText("本次修改原因") as HTMLTextAreaElement).value).toBe("");
+  expect((screen.getByLabelText("第 3 阶段温度 (℃)") as HTMLInputElement).value).toBe("800");
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => expect(screen.queryByLabelText("本次修改原因")).toBeNull());
+  expect(screen.getByRole("button", { name: "复制为自定义" })).toBeTruthy();
+  expect(mockListPrograms().some((p) => p.id === saved.id)).toBe(false);
+  expect(mockListCustomProgramRevisions(saved.id)).toHaveLength(2);
 });

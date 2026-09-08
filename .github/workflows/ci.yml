@@ -83,7 +83,9 @@ jobs:
         run: cargo build -p tmh-core --features serial
 
       - name: Headless soak (replay dirty session + short mock)
+        shell: bash
         run: |
+          set -euo pipefail
           cargo run -p tmh-core --example soak -- --replay fixtures/dirty-session.jsonl
           cargo run -p tmh-core --example soak -- --minutes 5
 

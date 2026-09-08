@@ -1,0 +1,97 @@
+name: Candidate installers
+
+on:
+  workflow_dispatch:
+  # All inputs, including shared runtime/configuration and packaged documentation.
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            targets: x86_64-pc-windows-msvc
+            args: --bundles nsis
+            bundle_dir: target/release/bundle
+          - os: macos-latest
+            platform: macos-universal
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
+            bundle_dir: target/universal-apple-darwin/release/bundle
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: candidate-${{ matrix.platform }}
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.12"
+      - name: Frontend and metadata quality gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm lint
+          pnpm test
+          pnpm build
+          pnpm check:ipc-contract
+          pnpm check:tauri-security
+          pnpm audit --prod --audit-level moderate
+          node scripts/sync-version.mjs --check
+      - name: Native candidate quality gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --features tmh-app/candidate -- -D warnings
+          cargo test --workspace --features tmh-app/candidate
+      - name: Build isolated candidate installers
+        run: pnpm tauri build --ci --features candidate --config src-tauri/tauri.candidate.conf.json ${{ matrix.args }}
+      - name: Windows installed application smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-installed.ps1
+      - name: Verify macOS universal bundle and disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="target/universal-apple-darwin/release/bundle"
+          app="$bundle/macos/TMH-LPF-900 Candidate.app"
+          lipo "$app/Contents/MacOS/tmh-app-candidate" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
+          hdiutil verify "$bundle"/dmg/*.dmg
+      - name: Record source commit and asset hashes
+        run: node scripts/package-candidate.mjs "${{ matrix.bundle_dir }}" "${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TMH-LPF-900-candidate-${{ matrix.platform }}-${{ github.run_id }}
+          path: candidate-assets/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 30
