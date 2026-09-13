@@ -34,4 +34,5 @@ tauri-plugin-updater = { workspace = true }
 tauri-plugin-process = { workspace = true }
 
 [dev-dependencies]
+tauri = { workspace = true, features = ["test"] }
 rusqlite.workspace = true

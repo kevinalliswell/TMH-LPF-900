@@ -347,7 +347,7 @@ fn redact_experiment_status(
 
 /// Emit only a view authorized for the session that is active at emission time. Snapshotting
 /// does not touch the idle deadline, so a running experiment cannot keep a user logged in.
-fn emit_experiment_status(app: &AppHandle, status: &ExperimentStatus) {
+fn emit_experiment_status<R: tauri::Runtime>(app: &AppHandle<R>, status: &ExperimentStatus) {
     let state = app.state::<AppState>();
     let snapshot = state.auth.snapshot(&lock(&state.storage), epoch_now()).ok();
     if let Some(snapshot) = snapshot {
@@ -744,8 +744,8 @@ fn sample_due(deadline: &mut Instant, period: Duration, now: Instant, forced: bo
 
 /// Publish + emit the current running status.
 #[allow(clippy::too_many_arguments)]
-fn publish_running(
-    app: &AppHandle,
+fn publish_running<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     exp: &ExpControl,
     engine: &ExperimentEngine,
     id: &str,
@@ -771,8 +771,8 @@ fn publish_running(
 /// End-of-run bookkeeping shared by completion and stop: safety atmosphere, final flush,
 /// DB close-out, audit, and publish idle. Idempotent.
 #[allow(clippy::too_many_arguments)]
-fn finalize(
-    app: &AppHandle,
+fn finalize<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     hub: &DeviceHub,
     storage: &Arc<Mutex<Storage>>,
     audit: &AuditLog,
@@ -905,8 +905,8 @@ fn finalize(
 /// `sim_speed` simulated seconds), (re)apply stage atmospheres, sample to SQLite, and
 /// finalize on completion or stop.
 #[allow(clippy::too_many_arguments)]
-fn spawn_experiment_task(
-    app: AppHandle,
+fn spawn_experiment_task<R: tauri::Runtime>(
+    app: AppHandle<R>,
     hub: Arc<DeviceHub>,
     storage: Arc<Mutex<Storage>>,
     audit: Arc<AuditLog>,
@@ -3530,6 +3530,7 @@ mod tests {
     mod analysis_sample_tests;
     mod device_lifecycle_tests;
     mod group_tests;
+    mod storage_fault_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
     /// below (`current_user`, `current_admin`, `authorize_experiment`,
