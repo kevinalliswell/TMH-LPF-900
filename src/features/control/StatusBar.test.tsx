@@ -16,3 +16,15 @@ it("uses the applied freshness timeout in the stale warning and home readings", 
   expect(screen.queryByText("99.99")).toBeNull();
   expect(screen.getByText("数据陈旧，读值暂不可用")).toBeTruthy();
 });
+
+it("hides invalid device values even while fresh telemetry frames continue arriving", async () => {
+  useTelemetry.setState({staleMs: 5000, lastAt: Date.now(), snapshot: {
+    seq: 2, temps: Array(9).fill(321.5), weight: 99.99, gas: [],
+    health: {temp_connected: true, mfc_connected: true, balance_connected: true, temp_valid: false, mfc_valid: true, balance_valid: false},
+  }});
+  await act(async () => { render(<HomeView />); });
+  expect(screen.queryByText("321.5")).toBeNull();
+  expect(screen.queryByText("99.99")).toBeNull();
+  expect(screen.getByText("温度读值不可用")).toBeTruthy();
+  expect(screen.getByText("天平读值不可用")).toBeTruthy();
+});

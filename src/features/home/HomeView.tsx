@@ -26,9 +26,9 @@ export function HomeView() {
   const ex = useExperiment((s) => s.state);
   const setView = useNav((s) => s.setView);
   const stale = useTelemetryStale();
-  const t8 = stale ? null : snap?.temps[7] ?? null;
-  const weight = stale ? null : snap?.weight;
   const h = stale ? undefined : snap?.health;
+  const t8 = h?.temp_valid === true ? snap?.temps[7] ?? null : null;
+  const weight = h?.balance_valid === true ? snap?.weight : null;
   const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? "—";
 
   return (
@@ -44,6 +44,7 @@ export function HomeView() {
       <div className="grid grid-cols-3 gap-4">
         <div className="panel p-4">
           <SectionTitle>样品温度 T8</SectionTitle>
+          {!stale && snap && h?.temp_valid !== true && <p className="text-xs" style={{color: "var(--warn)"}}>温度读值不可用</p>}
           <div className="mono text-[28px]" style={{ color: "var(--heat)" }}>
             {t8 == null ? "—" : t8.toFixed(1)}
             <span className="text-[14px]"> ℃</span>
@@ -51,6 +52,7 @@ export function HomeView() {
         </div>
         <div className="panel p-4">
           <SectionTitle>天平读数</SectionTitle>
+          {!stale && snap && h?.balance_valid !== true && <p className="text-xs" style={{color: "var(--warn)"}}>天平读值不可用</p>}
           <div className="mono text-[28px]" style={{ color: "var(--gas)" }}>
             {weight == null ? "—" : weight.toFixed(2)}
             <span className="text-[14px]"> g</span>
