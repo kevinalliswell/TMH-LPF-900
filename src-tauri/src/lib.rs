@@ -15,6 +15,7 @@ mod custom_programs;
 mod groups;
 mod persistence;
 mod procedure;
+mod user_management;
 use persistence::recover_unfinished;
 #[cfg(test)]
 use persistence::retry_pending_completions;
@@ -30,7 +31,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
-use tmh_core::auth::{hash_password, validate_display_name, warm_password_hashing, UserRole};
+use tmh_core::auth::{warm_password_hashing, UserRole};
 use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, MfcCommandError, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
@@ -1397,22 +1398,7 @@ fn bootstrap_admin(
     display_name: String,
     password: String,
 ) -> Result<PublicUser, String> {
-    let user = state
-        .auth
-        .bootstrap(
-            &lock(&state.storage),
-            &username,
-            &display_name,
-            &password,
-            epoch_now(),
-        )
-        .map_err(auth_error)?;
-    state.audit.write(
-        &AuditEntry::new(Category::Auth, "bootstrap_admin", AuditResult::Success)
-            .operator(user.display_name.clone())
-            .detail(serde_json::json!({ "user_id": user.user_id })),
-    );
-    Ok(PublicUser::from(&user))
+    user_management::bootstrap_admin(&state, username, display_name, password)
 }
 
 #[tauri::command]
@@ -1520,34 +1506,7 @@ fn create_user(
     temporary_password: String,
     role: UserRole,
 ) -> Result<PublicUser, String> {
-    let actor = current_admin(&state)?;
-    let outcome = state.auth.create_user(
-        &lock(&state.storage),
-        &username,
-        &display_name,
-        &temporary_password,
-        role,
-        epoch_now(),
-    );
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "create_user",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(actor.display_name)
-        .detail(serde_json::json!({
-            "username": username,
-            "role": role,
-            "user_id": outcome.as_ref().ok().map(|user| user.user_id.clone())
-        })),
-    );
-    let user = outcome.map_err(auth_error)?;
-    Ok(PublicUser::from(&user))
+    user_management::create_user(&state, username, display_name, temporary_password, role)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1558,44 +1517,7 @@ fn update_user(
     role: UserRole,
     is_active: bool,
 ) -> Result<PublicUser, String> {
-    let actor = current_admin(&state)?;
-    let display_name =
-        validate_display_name(&display_name).map_err(|_| AuthCode::InvalidInput.to_string())?;
-    let storage = lock(&state.storage);
-    let target = storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
-    if target.user_id == actor.user_id && (role != target.role || !is_active) {
-        return Err(AuthCode::Forbidden.to_string());
-    }
-    if target.role.is_admin()
-        && target.is_active
-        && (!role.is_admin() || !is_active)
-        && storage.active_admin_count().map_err(|e| e.to_string())? <= 1
-    {
-        return Err(AuthCode::LastAdmin.to_string());
-    }
-    storage
-        .update_user(&user_id, &display_name, role, is_active, &iso_now())
-        .map_err(|e| e.to_string())?;
-    let updated = storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
-    state.audit.write(
-        &AuditEntry::new(Category::Auth, "update_user", AuditResult::Success)
-            .operator(actor.display_name)
-            .detail(serde_json::json!({
-                "user_id": user_id,
-                "username": updated.username,
-                "role_from": target.role,
-                "role_to": updated.role,
-                "active_from": target.is_active,
-                "active_to": updated.is_active
-            })),
-    );
-    Ok(PublicUser::from(&updated))
+    user_management::update_user(&state, user_id, display_name, role, is_active)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1604,35 +1526,7 @@ fn reset_user_password(
     user_id: String,
     temporary_password: String,
 ) -> Result<(), String> {
-    let actor = current_admin(&state)?;
-    if actor.user_id == user_id {
-        return Err(AuthCode::Forbidden.to_string());
-    }
-    let hash =
-        hash_password(&temporary_password).map_err(|_| AuthCode::InvalidInput.to_string())?;
-    let storage = lock(&state.storage);
-    if storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        return Err("USER_NOT_FOUND".into());
-    }
-    let outcome = storage.set_user_password(&user_id, &hash, true, &iso_now());
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "reset_password",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
-        )
-        .operator(actor.display_name)
-        .detail(serde_json::json!({ "user_id": user_id })),
-    );
-    outcome.map_err(|e| e.to_string())
+    user_management::reset_user_password(&state, user_id, temporary_password)
 }
 
 #[tauri::command(rename_all = "snake_case")]
