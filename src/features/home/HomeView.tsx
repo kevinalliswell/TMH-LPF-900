@@ -1,10 +1,10 @@
 import { EXPERIMENT_MODES } from "../../ipc";
 import { useExperiment } from "../../stores/experiment";
 import { useNav } from "../../stores/nav";
-import { useTelemetry } from "../../stores/telemetry";
+import { useTelemetry, useTelemetryStale } from "../../stores/telemetry";
 import { Page, SectionTitle } from "../../components/Page";
 
-function Dot({ ok, label }: { ok: boolean; label: string }) {
+function Dot({ ok, label }: { ok: boolean | undefined; label: string }) {
   return (
     <div className="flex items-center gap-1.5 text-[12px]">
       <span
@@ -12,7 +12,7 @@ function Dot({ ok, label }: { ok: boolean; label: string }) {
           width: 8,
           height: 8,
           borderRadius: "50%",
-          background: ok ? "var(--ok)" : "var(--err)",
+          background: ok === undefined ? "var(--warn)" : ok ? "var(--ok)" : "var(--err)",
           boxShadow: ok ? "0 0 6px var(--ok)" : "none",
         }}
       />
@@ -25,8 +25,10 @@ export function HomeView() {
   const snap = useTelemetry((s) => s.snapshot);
   const ex = useExperiment((s) => s.state);
   const setView = useNav((s) => s.setView);
-  const t8 = snap?.temps[7] ?? null;
-  const h = snap?.health;
+  const stale = useTelemetryStale();
+  const t8 = stale ? null : snap?.temps[7] ?? null;
+  const weight = stale ? null : snap?.weight;
+  const h = stale ? undefined : snap?.health;
   const modeName = EXPERIMENT_MODES.find((m) => m.id === ex.mode)?.name ?? "—";
 
   return (
@@ -38,6 +40,7 @@ export function HomeView() {
         </div>
       </div>
 
+      {stale && snap && <p role="status" className="text-sm" style={{color: "var(--warn)"}}>数据陈旧，读值暂不可用</p>}
       <div className="grid grid-cols-3 gap-4">
         <div className="panel p-4">
           <SectionTitle>样品温度 T8</SectionTitle>
@@ -49,7 +52,7 @@ export function HomeView() {
         <div className="panel p-4">
           <SectionTitle>天平读数</SectionTitle>
           <div className="mono text-[28px]" style={{ color: "var(--gas)" }}>
-            {snap?.weight == null ? "—" : snap.weight.toFixed(2)}
+            {weight == null ? "—" : weight.toFixed(2)}
             <span className="text-[14px]"> g</span>
           </div>
         </div>
@@ -75,9 +78,9 @@ export function HomeView() {
       <div className="panel p-4">
         <SectionTitle>设备连接</SectionTitle>
         <div className="flex gap-6">
-          <Dot ok={!!h?.temp_valid} label="温度控制器" />
-          <Dot ok={!!h?.mfc_valid} label="气体流量 MFC" />
-          <Dot ok={!!h?.balance_valid} label="电子天平" />
+          <Dot ok={h?.temp_valid} label="温度控制器" />
+          <Dot ok={h?.mfc_valid} label="气体流量 MFC" />
+          <Dot ok={h?.balance_valid} label="电子天平" />
         </div>
       </div>
 
