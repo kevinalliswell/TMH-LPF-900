@@ -41,8 +41,8 @@ use tmh_core::engine::{
     STANDARD_MODES,
 };
 use tmh_core::gb::{
-    free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput, SwellingInput,
-    CALCULATION_VERSION,
+    free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput,
+    ReductionSampleEvidence, SwellingInput, CALCULATION_VERSION,
 };
 use tmh_core::sampler::{build_sample_row, SampleContext};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage, UserRow};
@@ -2707,22 +2707,32 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
 
 // ---- GB analysis ------------------------------------------------------------
 
+struct ReductionCurve {
+    points: Vec<(f64, f64)>,
+    evidence: ReductionSampleEvidence,
+}
+
 /// Read exact stage time without treating old untimed rows or missing readings as zero.
+/// Count original records at the same decision points as the existing curve filter.
 fn reduction_curve(
     samples: &[SampleRow],
     m0: f64,
     m1: f64,
     input: &ReductionInput,
     max_gap_s: f64,
-) -> Vec<(f64, f64)> {
+) -> ReductionCurve {
     let mut points: Vec<(f64, f64)> = Vec::new();
-    for row in samples
-        .iter()
-        .filter(|r| r.experiment_status.as_deref() == Some("REDUCING"))
-    {
+    let mut evidence = ReductionSampleEvidence::new(samples.len());
+    for row in samples {
+        if row.experiment_status.as_deref() != Some("REDUCING") {
+            evidence.non_reduction_rows += 1;
+            continue;
+        }
+        evidence.reduction_sample_count += 1;
         let record: serde_json::Value =
             serde_json::from_str(row.record_json.as_deref().unwrap_or("{}")).unwrap_or_default();
         let Some(t) = record["stage_elapsed_s"].as_f64() else {
+            evidence.excluded_time_rows += 1;
             continue;
         };
         let rt = if row.system_message.is_none() {
@@ -2730,6 +2740,24 @@ fn reduction_curve(
         } else {
             None
         };
+        // Reasons are exclusive: missing stage time first, then balance annotation,
+        // other quality annotations, and finally an uncomputable mass/result.
+        if rt.is_some() {
+            evidence.valid_sample_count += 1;
+            if record["sample_role"] == "reduction_baseline" {
+                evidence.valid_baseline_count += 1;
+            }
+        } else if row
+            .system_message
+            .as_deref()
+            .is_some_and(|v| v.contains("天平离线"))
+        {
+            evidence.excluded_offline_rows += 1;
+        } else if row.system_message.is_some() {
+            evidence.excluded_other_quality_rows += 1;
+        } else {
+            evidence.excluded_value_rows += 1;
+        }
         if let Some(&(previous, _)) = points.last() {
             if (t / 60.0 - previous) * 60.0 > max_gap_s {
                 points.push(((previous + t / 60.0) / 2.0, f64::NAN));
@@ -2737,7 +2765,7 @@ fn reduction_curve(
         }
         points.push((t / 60.0, rt.unwrap_or(f64::NAN)));
     }
-    points
+    ReductionCurve { points, evidence }
 }
 fn value_at(points: &[(f64, f64)], time: f64) -> Option<f64> {
     if let Some((_, v)) = points.iter().find(|p| p.0 == time && p.1.is_finite()) {
@@ -2884,13 +2912,14 @@ fn calculate_reduction(
         .unwrap_or(0.0)
         * 1.5;
     reducibility(row.sample_weight, m1, m1, input.w1, input.w2).ok_or("亚铁/全铁含量或称量无效")?;
-    let points = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
+    let curve = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
+    let points = &curve.points;
     let rt = if let Some(mt) = input.manual_mt.or(input.manual_m180) {
         reducibility(row.sample_weight, m1, mt, input.w1, input.w2)
             .ok_or("还原终点总称量无效")?
             .rt
     } else {
-        value_at(&points, endpoint_min).ok_or_else(|| {
+        value_at(points, endpoint_min).ok_or_else(|| {
             format!("{endpoint_min} 分钟处没有连续有效称量，可依据原始记录人工补录 mₜ")
         })?
     };
@@ -2910,13 +2939,14 @@ fn calculate_reduction(
             .copied()
             .filter(|(t, _)| *t < endpoint_min)
             .collect();
-        if let Some(value) = value_at(&points, endpoint_min) {
+        if let Some(value) = value_at(points, endpoint_min) {
             bounded.push((endpoint_min, value));
         }
         reduction_rate(&bounded)
     };
     let mut value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
       "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"endpoint_min":endpoint_min,
+      "valid_sample_count":curve.evidence.valid_sample_count,"excluded_offline_rows":curve.evidence.excluded_offline_rows,"sample_evidence":curve.evidence,
       "reduction_rate_index":rate.as_ref().map(|r|r.index),"rate_evidence":rate,
       "runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
     if custom {
@@ -3545,6 +3575,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use tmh_core::auth::UserRole;
+    mod analysis_sample_tests;
     mod device_lifecycle_tests;
     mod group_tests;
 
@@ -4354,9 +4385,9 @@ mod tests {
             },
             90.0,
         );
-        assert_eq!(curve.len(), 3);
-        assert!(curve[1].1.is_nan());
-        assert!(curve[2].1.is_nan());
+        assert_eq!(curve.points.len(), 3);
+        assert!(curve.points[1].1.is_nan());
+        assert!(curve.points[2].1.is_nan());
     }
 
     #[test]
@@ -4391,7 +4422,7 @@ mod tests {
         };
         let curve = reduction_curve(&samples, 100.0, 100.0, &input, 270.0);
         assert!(
-            value_at(&curve, 180.0).is_some(),
+            value_at(&curve.points, 180.0).is_some(),
             "normal scheduling must retain the endpoint bracket"
         );
         assert_eq!(

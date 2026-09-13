@@ -5,6 +5,37 @@ use serde::{Deserialize, Serialize};
 
 pub const CALCULATION_VERSION: &str = "GB-2026-09-05.1";
 
+pub const REDUCTION_SAMPLE_EVIDENCE_VERSION: &str = "REDUCTION-SAMPLES-2026-09-13.1";
+
+/// Frozen facts about stored rows presented to the automatic reduction curve.
+/// These counts do not certify a method or count the points determining a result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReductionSampleEvidence {
+    pub version: String,
+    pub scope: String,
+    pub total_sample_count: usize,
+    pub reduction_sample_count: usize,
+    pub valid_sample_count: usize,
+    pub excluded_offline_rows: usize,
+    pub excluded_other_quality_rows: usize,
+    pub excluded_time_rows: usize,
+    pub excluded_value_rows: usize,
+    pub non_reduction_rows: usize,
+    /// Subset of valid_sample_count; the baseline is excluded only from gas checks.
+    pub valid_baseline_count: usize,
+}
+
+impl ReductionSampleEvidence {
+    pub fn new(total_sample_count: usize) -> Self {
+        Self {
+            version: REDUCTION_SAMPLE_EVIDENCE_VERSION.into(),
+            scope: "stored_reduction_rows".into(),
+            total_sample_count,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Reducibility {
     pub rt: f64,
