@@ -48,7 +48,7 @@ const manifest = {
   limitations: [
     "No real device or national-standard experiment validation",
     "No publisher certificate or Apple notarization",
-    "Native manual acceptance remains required",
+    "Target-machine and actual-device acceptance remain required; local native mock evidence is documented separately",
   ],
 };
 await writeFile(
@@ -59,5 +59,9 @@ await writeFile(path.join(output, "SHA256SUMS.txt"), `${sha256}  ${name}\n`);
 await copyFile(
   "docs/20-候选安装包验收.md",
   path.join(output, "README-候选安装包.md"),
+);
+await copyFile(
+  "docs/23-2026-09-13桌面验收记录.md",
+  path.join(output, "23-2026-09-13桌面验收记录.md"),
 );
 console.log(JSON.stringify(manifest, null, 2));
