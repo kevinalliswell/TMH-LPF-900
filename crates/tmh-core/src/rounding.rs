@@ -5,7 +5,7 @@ use num_bigint::{BigInt, BigUint, Sign};
 
 pub const ROUNDING_VERSION: &str = "GB8170-2008-decimal-v1";
 
-fn decimal(value: f64) -> (BigInt, u32) {
+pub(crate) fn decimal(value: f64) -> (BigInt, u32) {
     let text = value.to_string();
     let (mantissa, exponent) = text
         .split_once(['e', 'E'])

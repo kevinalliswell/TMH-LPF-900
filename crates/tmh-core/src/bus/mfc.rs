@@ -6,6 +6,7 @@ use crate::clamp::{clamp_setpoint, ClampResult, Gas};
 use crate::config::CommConfig;
 use crate::health::{Health, ReadFreshness};
 use crate::transport::{BusError, Transport};
+use num_bigint::BigInt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tmh_protocols::cpl;
@@ -121,6 +122,49 @@ fn gas_enum(idx: usize) -> Gas {
     }
 }
 
+/// Quantize shortest decimal inputs, using the protocol's nearest integer rule.
+/// This is separate from GB/T result rounding: ties here round up for positive flow.
+/// The safety cap is floored in wire units so rounding cannot exceed it.
+fn wire_setpoint(value: f64, scaling: f64, limit: f64) -> Result<(i64, f64, bool), BusError> {
+    // Zero shutoff must remain possible even if an actor received invalid scaling.
+    if value == 0.0 {
+        return Ok((0, 0.0, false));
+    }
+    let invalid = || BusError::Io("MFC setpoint is not representable in wire units".into());
+    if !value.is_finite() || value < 0.0 || !scaling.is_finite() || scaling <= 0.0 {
+        return Err(invalid());
+    }
+    let (v, vs) = crate::rounding::decimal(value);
+    let (s, ss) = crate::rounding::decimal(scaling);
+    let factor = BigInt::from(10u8).pow(ss + 1);
+    let numerator = v * &factor;
+    let denominator = &s * BigInt::from(10u8).pow(vs);
+    let mut raw = &numerator / &denominator;
+    if (&numerator % &denominator) * 2u8 >= denominator {
+        raw += 1u8;
+    }
+    let mut capped = false;
+    if limit.is_finite() {
+        if limit < 0.0 {
+            return Err(invalid());
+        }
+        let (l, ls) = crate::rounding::decimal(limit);
+        let cap = l * factor / (&s * BigInt::from(10u8).pow(ls));
+        if raw > cap {
+            raw = cap;
+            capped = true;
+        }
+    }
+    let raw = i64::try_from(raw).map_err(|_| invalid())?;
+    let applied = format!("{}e-{}", s * raw, ss + 1)
+        .parse::<f64>()
+        .map_err(|_| invalid())?;
+    if !applied.is_finite() {
+        return Err(invalid());
+    }
+    Ok((raw, applied, capped))
+}
+
 impl MfcActor {
     pub fn new(
         transport: Box<dyn Transport>,
@@ -204,8 +248,11 @@ impl MfcActor {
         if gas_idx >= self.gas.len() {
             return Err(MfcCommandError::InvalidGas(gas_idx));
         }
-        let clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
-        let raw = (clamp.applied / self.scaling[gas_idx] * 10.0).round() as i64;
+        let mut clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
+        let (raw, applied, capped) =
+            wire_setpoint(clamp.applied, self.scaling[gas_idx], clamp.limit)?;
+        clamp.applied = applied;
+        clamp.clamped |= capped;
         let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
         let response = match self
             .transport
@@ -232,9 +279,8 @@ impl MfcActor {
         self.health.on_success(Instant::now());
         self.gas[gas_idx].sv = clamp.applied;
         self.gas[gas_idx].on = clamp.applied > 0.0;
-        let wire_value = raw as f64 / 10.0 * self.scaling[gas_idx];
-        if wire_value.is_finite() && wire_value > 0.0 {
-            self.restorable_flow[gas_idx] = Some(wire_value);
+        if clamp.applied > 0.0 {
+            self.restorable_flow[gas_idx] = Some(clamp.applied);
         }
         Ok(clamp)
     }

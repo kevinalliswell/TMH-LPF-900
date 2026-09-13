@@ -88,24 +88,62 @@ export function tick(): TelemetrySnapshot {
   };
 }
 
+// Use exact shortest decimal inputs for wire quantization, as the native actor does.
+function decimalParts(value: number): [bigint, number] {
+  const [mantissa, exponent = "0"] = value.toString().split(/e/i);
+  const fraction = mantissa!.split(".")[1]?.length ?? 0;
+  const scale = fraction - Number(exponent);
+  const integer = BigInt(mantissa!.replace(".", ""));
+  return scale < 0
+    ? [integer * 10n ** BigInt(-scale), 0]
+    : [integer, scale];
+}
+
+function quantizeFlow(value: number, step: number, limit: number) {
+  if (value === 0) return { applied: 0, capped: false };
+  const [v, vs] = decimalParts(value);
+  const [s, ss] = decimalParts(step);
+  const factor = 10n ** BigInt(ss);
+  const numerator = v * factor;
+  const denominator = s * 10n ** BigInt(vs);
+  let raw = numerator / denominator;
+  if ((numerator % denominator) * 2n >= denominator) raw += 1n;
+  let capped = false;
+  if (Number.isFinite(limit)) {
+    const [l, ls] = decimalParts(limit);
+    const cap = (l * factor) / (s * 10n ** BigInt(ls));
+    if (raw > cap) {
+      raw = cap;
+      capped = true;
+    }
+  }
+  if (raw > 9223372036854775807n)
+    throw new Error("流量超出通讯协议可表示范围");
+  const applied = Number(`${raw * s}e-${ss}`);
+  if (!Number.isFinite(applied))
+    throw new Error("流量超出通讯协议可表示范围");
+  return { applied, capped };
+}
+
 export function mockSetFlow(gas: number, value: number): ClampResult {
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
-  const applied = clampGas(gas, value);
+  return rememberFlow(gas, value);
+}
+
+function rememberFlow(gas: number, value: number): ClampResult {
+  if (!Number.isInteger(gas) || gas < 0 || gas >= flowSteps.length)
+    throw new Error("无效气体通道");
+  const clampedValue = clampGas(gas, value);
   const limit =
     gas === 0
       ? Math.min(limits.h2, H2_ABS)
       : gas === 3
         ? Math.min(limits.co, CO_ABS)
         : Infinity;
-  rememberFlow(gas, applied);
-  return { applied, clamped: applied < value, limit };
-}
-
-function rememberFlow(gas: number, applied: number): void {
+  const { applied, capped } = quantizeFlow(clampedValue, flowSteps[gas]!, limit);
   sv[gas] = applied;
-  const step = flowSteps[gas]!;
-  const wireValue = Math.round(applied / step) * step;
-  if (Number.isFinite(wireValue) && wireValue > 0) restorableFlow[gas] = wireValue;
+  if (applied > 0) restorableFlow[gas] = applied;
+  return { applied, clamped: clampedValue < value || capped, limit };
 }
 
 export function mockSetOnOff(gas: number, on: boolean): void {
@@ -196,7 +234,7 @@ function stageReached(s: StageDto, t8: number, elapsedS: number): boolean {
 }
 
 function applyStage(s: StageDto, w0: number): void {
-  s.gas.forEach((v, i) => rememberFlow(i, clampGas(i, v)));
+  s.gas.forEach((v, i) => rememberFlow(i, v));
   furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
   if (s.kind === "REDUCING") weightTarget = w0 * (1 - MOCK_LOSS);
 }
