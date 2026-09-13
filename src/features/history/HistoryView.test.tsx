@@ -11,6 +11,9 @@ vi.mock("../../ipc", async (original) => ({
   listExperiments: vi.fn(),
   getExperimentDetail: vi.fn(),
   getExperimentSamples: vi.fn(),
+  listUsers: vi.fn(),
+  deleteExperiment: vi.fn(),
+  setExperimentOwner: vi.fn(),
 }));
 
 const first: ExperimentSummary = {
@@ -31,6 +34,13 @@ beforeEach(() => {
   vi.mocked(ipc.getExperimentSamples).mockResolvedValue([]);
 });
 afterEach(cleanup);
+
+function admin() {
+  const user = { user_id: "admin", username: "admin", display_name: "管理员", role: "ADMIN" as const,
+    is_active: true, must_change_password: false, created_at: first.start_time };
+  useAuth.setState({ snapshot: {status: "AUTHENTICATED", idle_timeout_s: 900, user} });
+  vi.mocked(ipc.listUsers).mockResolvedValue([user]);
+}
 
 it("refreshes the visible history and selected record after terminal persistence completes", async () => {
   render(<HistoryView />);
@@ -59,4 +69,50 @@ it("keeps the newly selected record when an older detail request finishes late",
   await act(async () => { resolveFirst(detailOf(first)); });
   expect(screen.queryByText("ri-first")).toBeNull();
   expect(screen.getByText("ri-second")).toBeTruthy();
+});
+
+it("never exposes the previous record's delete action while a new selection is loading", async () => {
+  admin();
+  const second = { ...first, experiment_id: "ri-second", sample_name: "试样 B" };
+  vi.mocked(ipc.listExperiments).mockResolvedValue([first, second]);
+  vi.mocked(ipc.getExperimentDetail).mockImplementation((id) => id === first.experiment_id
+    ? Promise.resolve(detailOf(first)) : new Promise(() => {}));
+  render(<HistoryView />);
+  await screen.findByText("ri-first");
+  fireEvent.click(screen.getByRole("button", { name: /试样 B/ }));
+  expect(screen.queryByText("ri-first")).toBeNull();
+  expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+});
+
+it("does not let an old ownership save replace the currently selected detail", async () => {
+  admin();
+  const second = { ...first, experiment_id: "ri-second", sample_name: "试样 B" };
+  vi.mocked(ipc.listExperiments).mockResolvedValue([first, second]);
+  vi.mocked(ipc.getExperimentDetail).mockImplementation((id) => Promise.resolve(detailOf(id === first.experiment_id ? first : second)));
+  let finishSave!: () => void;
+  vi.mocked(ipc.setExperimentOwner).mockImplementation(() => new Promise((resolve) => { finishSave = resolve; }));
+  render(<HistoryView />);
+  await screen.findByText("ri-first");
+  fireEvent.change(screen.getByLabelText("数据归属"), { target: { value: "admin" } });
+  fireEvent.click(screen.getByRole("button", { name: /试样 B/ }));
+  await screen.findByText("ri-second");
+  await act(async () => finishSave());
+  expect(screen.queryByText("ri-first")).toBeNull();
+  expect(screen.getByText("ri-second")).toBeTruthy();
+});
+
+it("deletes only the record named in the confirmation even if selection changes", async () => {
+  admin();
+  const second = { ...first, experiment_id: "ri-second", sample_name: "试样 B" };
+  vi.mocked(ipc.listExperiments).mockResolvedValue([first, second]);
+  vi.mocked(ipc.getExperimentDetail).mockImplementation((id) => Promise.resolve(detailOf(id === first.experiment_id ? first : second)));
+  vi.mocked(ipc.deleteExperiment).mockResolvedValue(undefined);
+  render(<HistoryView />);
+  await screen.findByText("ri-first");
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  fireEvent.click(screen.getByRole("button", { name: /试样 B/ }));
+  await screen.findByText("ri-second");
+  expect(screen.getByText(/确认删除实验「试样 A」/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => expect(ipc.deleteExperiment).toHaveBeenCalledWith("ri-first"));
 });
