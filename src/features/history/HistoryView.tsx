@@ -1,5 +1,5 @@
 import { ReportDetailsPanel } from "./ReportDetailsPanel";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteExperiment,
   EXPERIMENT_MODES,
@@ -20,6 +20,7 @@ import { ProgramPreview } from "../experiment/ProgramPreview";
 import { AnalyzePanel } from "./AnalyzePanel";
 import { HistoryChart } from "./HistoryChart";
 import { useAuth } from "../../stores/auth";
+import { useExperiment } from "../../stores/experiment";
 
 const modeName = (id?: string | null) =>
   EXPERIMENT_MODES.find((m) => m.id === id)?.name ?? id ?? "—";
@@ -51,27 +52,35 @@ export function HistoryView() {
   const [users, setUsers] = useState<PublicUser[]>([]);
   const push = useToasts((s) => s.push);
   const isAdmin = useAuth((s) => s.snapshot?.user?.role === "ADMIN");
+  const running = useExperiment((s) => s.state.running);
+  const persistencePending = useExperiment((s) => s.state.persistence_pending);
+  const detailRequest = useRef(0);
 
   useEffect(() => {
     if (isAdmin) void listUsers().then(setUsers).catch(toastError);
   }, [isAdmin]);
 
   useEffect(() => {
+    let cancelled = false;
     listExperiments()
       .then((l) => {
+        if (cancelled) return;
         setList(l);
         setSelId((cur) => cur ?? l[0]?.experiment_id ?? null);
       })
-      .catch(toastError);
-  }, []);
+      .catch((error) => { if (!cancelled) toastError(error); });
+    return () => { cancelled = true; };
+  }, [running, persistencePending]);
 
   const loadDetail = useCallback((id: string) => {
+    const request = ++detailRequest.current;
     Promise.all([getExperimentDetail(id), getExperimentSamples(id, 1500)])
       .then(([d, s]) => {
+        if (request !== detailRequest.current) return;
         setDetail(d);
         setSamples(s);
       })
-      .catch(toastError);
+      .catch((error) => { if (request === detailRequest.current) toastError(error); });
   }, []);
 
   useEffect(() => {
@@ -80,7 +89,8 @@ export function HistoryView() {
       setDetail(null);
       setSamples([]);
     }
-  }, [selId, loadDetail]);
+    return () => { detailRequest.current++; };
+  }, [selId, loadDetail, running, persistencePending]);
 
   const refreshList = useCallback(
     () =>
