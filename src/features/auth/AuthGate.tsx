@@ -11,11 +11,18 @@ import { useAuth } from "../../stores/auth";
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { snapshot, loading, refresh, setSnapshot } = useAuth();
+  const [startupError, setStartupError] = useState("");
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    void refresh().catch((cause) => { if (active) setStartupError(String(cause)); });
+    return () => { active = false; };
   }, [refresh]);
 
+  if (startupError) return <AuthShell title="应用载入失败">
+    <p role="alert" className="text-sm break-all mt-3" style={{color: "var(--danger)"}}>{startupError}</p>
+    <p className="text-xs mt-3">请核对配置文件或数据目录后关闭并重新打开应用。配置错误不会被默认值覆盖。</p>
+  </AuthShell>;
   if (loading || !snapshot) return <AuthShell title="正在载入…" />;
   if (snapshot.status === "SETUP_REQUIRED") return <SetupForm onDone={refresh} />;
   if (snapshot.status === "PASSWORD_CHANGE_REQUIRED") return <PasswordChange onDone={refresh} />;

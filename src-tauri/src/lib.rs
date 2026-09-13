@@ -11,6 +11,7 @@ use tmh_core::storage::RunCompletion;
 mod auth_service;
 mod auth_session;
 mod build_profile;
+mod config_commands;
 mod custom_programs;
 mod groups;
 mod persistence;
@@ -79,6 +80,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Managed application state.
 struct AppState {
+    config: Mutex<tmh_core::config_store::ConfigStore>,
     _data_lock: recovery::DataDirectoryLock,
     recovery_dir: PathBuf,
     hub: Arc<DeviceHub>,
@@ -491,30 +493,8 @@ fn sim_speed(mode: &str) -> f64 {
         .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
 }
 
-/// Compiled-in default comm config (the repo's config/comm_config.json), used when no
-/// external config file is present or it fails to load. Kept in sync with docs/06 §6.4.
+/// Validated defaults initialize a missing per-profile configuration only.
 const DEFAULT_COMM_CONFIG: &str = include_str!("../../config/comm_config.json");
-
-/// Load + validate the comm config (docs/06 §6.4) so the safety limits, MFC slave
-/// addresses and flow scaling come from the file (issue #11). Resolution order:
-/// `TMH_COMM_CONFIG` env override, else `config/comm_config.json` in the working dir;
-/// on any failure fall back to the compiled-in default so the app still runs (mock).
-fn load_comm_config() -> CommConfig {
-    let path = std::env::var("TMH_COMM_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"));
-    match CommConfig::load(&path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!(
-                "comm config unavailable/invalid ({}: {e}); using built-in defaults",
-                path.display()
-            );
-            CommConfig::from_json(DEFAULT_COMM_CONFIG)
-                .expect("built-in default comm config must parse")
-        }
-    }
-}
 
 fn build_mock_hub(cfg: &CommConfig) -> DeviceHub {
     // Idle furnace sits at ambient; a running experiment drives the target per stage. The
@@ -1384,11 +1364,16 @@ struct PublicSafetyStatus {
 // ---- Commands ---------------------------------------------------------------
 
 #[tauri::command]
-fn get_auth_state(state: State<AppState>) -> Result<AuthSnapshot, String> {
-    state
+fn get_auth_state(app: AppHandle) -> Result<AuthSnapshot, String> {
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        app.try_state::<StartupFailure>()
+            .map_or_else(|| "应用尚未初始化".into(), |failure| failure.0.clone())
+    })?;
+    let snapshot = state
         .auth
         .snapshot(&lock(&state.storage), epoch_now())
-        .map_err(auth_error)
+        .map_err(auth_error);
+    snapshot
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1433,7 +1418,10 @@ fn login(
         .detail(serde_json::json!({ "username": username, "code": code })),
     );
     outcome.map_err(auth_error)?;
-    get_auth_state(state)
+    state
+        .auth
+        .snapshot(&lock(&state.storage), epoch_now())
+        .map_err(auth_error)
 }
 
 #[tauri::command]
@@ -1597,6 +1585,33 @@ fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
 }
 
 #[tauri::command]
+fn get_comm_config(
+    state: State<AppState>,
+) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
+    config_commands::snapshot(&state)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn save_comm_config(
+    state: State<AppState>,
+    expected_revision: String,
+    config: CommConfig,
+    reason: String,
+) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
+    config_commands::save(&state, &expected_revision, config, &reason)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn restart_for_config(app: AppHandle, expected_revision: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let lease = config_commands::prepare_restart(&state, &expected_revision).await?;
+    emit_experiment_status(&app, &state.exp.snapshot());
+    // Keep the lifecycle lease until the new process takes over.
+    let _lease = lease;
+    app.restart();
+}
+
+#[tauri::command]
 fn get_runtime_settings(state: State<AppState>) -> Result<RuntimeSettings, String> {
     current_user(&state)?;
     Ok(RuntimeSettings {
@@ -1638,34 +1653,87 @@ fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
     }
 }
 
+/// Authorization and queue submission share the start/update lifecycle boundary.
+/// Return the receiver before awaiting it, so no synchronous lock crosses an await.
+fn with_device_lifecycle<T>(
+    state: &AppState,
+    enqueue: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _lifecycle = lock(&state.exp.lifecycle);
+    enqueue()
+}
+
+fn enqueue_manual_gas<T>(
+    state: &AppState,
+    enqueue: impl FnOnce(&DeviceHub) -> Result<T, String>,
+) -> Result<(String, T), String> {
+    with_device_lifecycle(state, || {
+        let operator = require_experiment_controller(state)?.display_name;
+        Ok((operator, enqueue(&state.hub)?))
+    })
+}
+
+fn enqueue_safety_reset(
+    state: &AppState,
+) -> Result<
+    (
+        UserRow,
+        impl std::future::Future<Output = Result<(), String>>,
+    ),
+    String,
+> {
+    with_device_lifecycle(state, || {
+        let user = current_user(state)?;
+        if state.exp.updating.load(Ordering::SeqCst) {
+            return Err("更新期间不能复位保护".into());
+        }
+        if state.exp.is_running() || state.exp.persistence_pending() {
+            return Err("实验仍在结束或数据待保存，暂不能复位".into());
+        }
+        if !lock(&state.storage)
+            .unfinished_experiments()
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
+            return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
+        }
+        if !state.hub.temp_rx().borrow().is_fresh(Instant::now()) {
+            return Err("温度测量无效，不能复位".into());
+        }
+        let reply = state.hub.request_reset_safety();
+        Ok((user, async move {
+            reply
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }))
+    })
+}
+
+fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) -> bool {
+    let _lifecycle = lock(&state.exp.lifecycle);
+    // An ACK belongs to the earlier reset request, not to a run/restart/protection
+    // event that occurred while the command was waiting for its response.
+    if state.exp.is_running()
+        || state.exp.updating.load(Ordering::SeqCst)
+        || state.exp.persistence_pending()
+        || state.hub.safety_latched()
+    {
+        return false;
+    }
+    let status = ExperimentStatus::idle();
+    state.exp.set_status(status.clone());
+    // Publish under the same lock: a new run must not emit Running before this Idle.
+    emit(&status);
+    true
+}
+
 #[tauri::command]
 async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
-    let user = current_user(&st)?;
-    if st.exp.updating.load(Ordering::SeqCst) {
-        return Err("更新期间不能复位保护".into());
-    }
-    if st.exp.is_running() || st.exp.persistence_pending() {
-        return Err("实验仍在结束或数据待保存，暂不能复位".into());
-    }
-    if !lock(&st.storage)
-        .unfinished_experiments()
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
-        return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
-    }
-    if !st.hub.temp_rx().borrow().is_fresh(Instant::now()) {
-        return Err("温度测量无效，不能复位".into());
-    }
-    st.hub
-        .request_reset_safety()
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let status = ExperimentStatus::idle();
-    st.exp.set_status(status.clone());
-    emit_experiment_status(&app, &status);
+    let (user, reply) = enqueue_safety_reset(&st)?;
+    reply.await?;
+    publish_safety_reset(&st, |status| emit_experiment_status(&app, status));
     st.audit.write(
         &AuditEntry::new(
             Category::Gas,
@@ -1708,14 +1776,14 @@ async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
-    // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
-    if gas >= GAS_COUNT {
-        return Err("无效的气体通道".into());
-    }
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_set_flow(gas, value).await {
+    let st = app.state::<AppState>();
+    let (operator, reply) = enqueue_manual_gas(&st, |hub| {
+        if gas >= GAS_COUNT {
+            return Err("无效的气体通道".into());
+        }
+        Ok(hub.request_set_flow(gas, value))
+    })?;
+    let result = match reply.await {
         Ok(result) => result,
         Err(_) => {
             app.state::<AppState>().audit.write(
@@ -1728,7 +1796,6 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
             return Err("DEVICE_OFFLINE".into());
         }
     };
-    let st = app.state::<AppState>();
     let clamp = match result {
         Ok(clamp) => clamp,
         Err(error) => {
@@ -1777,12 +1844,13 @@ fn gas_command_error(error: MfcCommandError) -> String {
 }
 
 async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
-    let operator = require_experiment_controller(st)?.display_name;
-    if gas >= GAS_COUNT {
-        return Err("INVALID_PARAMS".into());
-    }
-    let hub = st.hub.clone();
-    let result = match hub.request_set_on_off(gas, on).await {
+    let (operator, reply) = enqueue_manual_gas(st, |hub| {
+        if gas >= GAS_COUNT {
+            return Err("INVALID_PARAMS".into());
+        }
+        Ok(hub.request_set_on_off(gas, on))
+    })?;
+    let result = match reply.await {
         Ok(result) => result.map_err(gas_command_error),
         Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
     };
@@ -1807,12 +1875,11 @@ async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
 }
 
 async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), String> {
-    let operator = require_experiment_controller(st)?.display_name;
-    let hub = st.hub.clone();
-    let mut replies = Vec::with_capacity(GAS_COUNT);
-    for g in 0..GAS_COUNT {
-        replies.push(hub.request_set_on_off(g, on));
-    }
+    let (operator, replies) = enqueue_manual_gas(st, |hub| {
+        Ok((0..GAS_COUNT)
+            .map(|gas| hub.request_set_on_off(gas, on))
+            .collect::<Vec<_>>())
+    })?;
     let mut channels = Vec::with_capacity(GAS_COUNT);
     let mut errors = Vec::new();
     for (gas, reply) in replies.into_iter().enumerate() {
@@ -2056,6 +2123,9 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
 
 fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
     let mut blocking = Vec::new();
+    if let Some(message) = config_commands::start_blocker(state) {
+        blocking.push(PreflightIssue::blocking("CONFIG_RESTART_REQUIRED", message));
+    }
     if state.hub.safety_latched() || state.exp.snapshot().phase == Phase::Error {
         blocking.push(PreflightIssue::blocking(
             "SAFETY_LATCHED",
@@ -3270,7 +3340,9 @@ fn prepare_exit(app: &AppHandle) -> bool {
 }
 
 /// Called only after single-instance plugin initialization.
-fn initialize_state() -> AppState {
+struct StartupFailure(String);
+
+fn initialize_state() -> Result<AppState, String> {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
     if let Err(message) = validate_runtime_mode(&mode) {
         eprintln!("TMH 启动失败: {message}");
@@ -3302,7 +3374,11 @@ fn initialize_state() -> AppState {
     // Pay the Argon2 cost once here, before any login can be attempted.
     warm_password_hashing();
     let mut storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let comm_config = load_comm_config();
+    let config = config_commands::open_store(
+        &data_root,
+        std::env::var_os("TMH_COMM_CONFIG").map(PathBuf::from),
+    )?;
+    let comm_config = config.snapshot().applied;
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
     // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
@@ -3312,7 +3388,8 @@ fn initialize_state() -> AppState {
     let _ = recover_unfinished(&hub, &mut storage, &audit, &exp, &recovery_dir);
 
     let idle_timeout_s = idle_timeout_s();
-    AppState {
+    Ok(AppState {
+        config: Mutex::new(config),
         _data_lock: data_lock,
         recovery_dir,
         hub,
@@ -3336,7 +3413,7 @@ fn initialize_state() -> AppState {
         telemetry_gen: Arc::new(AtomicU64::new(0)),
         cadence: Cadence::from_config(&comm_config),
         idle_timeout_s,
-    }
+    })
 }
 
 /// Build and run the Tauri application.
@@ -3371,7 +3448,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            app.manage(initialize_state());
+            match initialize_state() {
+                Ok(state) => {
+                    app.manage(state);
+                }
+                Err(message) => {
+                    app.manage(StartupFailure(message));
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3395,6 +3479,9 @@ pub fn run() {
             get_runtime_mode,
             get_gas_safety_limits,
             get_runtime_settings,
+            get_comm_config,
+            save_comm_config,
+            restart_for_config,
             get_device_health,
             set_gas_flow,
             set_gas_on_off,
@@ -3450,6 +3537,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use tmh_core::auth::UserRole;
+    mod device_lifecycle_tests;
     mod group_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
@@ -3461,7 +3549,15 @@ mod tests {
         let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("built-in config");
         let dir = std::env::temp_dir().join(format!("tmh_state_{}", tmh_core::auth::new_user_id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
         AppState {
+            config: Mutex::new(
+                tmh_core::config_store::ConfigStore::open(
+                    dir.join("config/comm_config.json"),
+                    Some(&cfg),
+                )
+                .unwrap(),
+            ),
             _data_lock: recovery::DataDirectoryLock::acquire(&dir).unwrap(),
             recovery_dir: dir.join("recovery"),
             hub: Arc::new(build_mock_hub(&cfg)),
@@ -4400,12 +4496,9 @@ mod tests {
     }
 
     #[test]
-    fn load_comm_config_returns_a_valid_config() {
-        // The test working dir has no config/comm_config.json, so this exercises the
-        // compiled-in default fallback path (#11).
-        load_comm_config()
-            .validate()
-            .expect("fallback config valid");
+    fn default_profile_config_is_valid() {
+        let state = test_state();
+        lock(&state.config).snapshot().applied.validate().unwrap();
     }
     // Insert into src-tauri/src/lib.rs's existing `tests` module.
     // The stage-transition sample may arrive after the configured endpoint. It is

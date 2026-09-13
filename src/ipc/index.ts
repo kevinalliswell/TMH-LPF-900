@@ -74,6 +74,24 @@ import {
 
 export * from "./types";
 export * from "./groupTypes";
+export * from "./configTypes";
+import type { CommConfig, ConfigSnapshot } from "./configTypes";
+
+function requireNativeConfig(): void {
+  if (!isTauri()) throw new Error("通讯配置需要在桌面应用中读取和保存；浏览器预览不连接设备。");
+}
+export async function getCommConfig(): Promise<ConfigSnapshot> {
+  requireNativeConfig();
+  return invoke("get_comm_config");
+}
+export async function saveCommConfig(expectedRevision: string, config: CommConfig, reason: string): Promise<ConfigSnapshot> {
+  requireNativeConfig();
+  return invoke("save_comm_config", { expected_revision: expectedRevision, config, reason });
+}
+export async function restartForConfig(expectedRevision: string): Promise<void> {
+  requireNativeConfig();
+  return invoke("restart_for_config", { expected_revision: expectedRevision });
+}
 import type { GroupRequest, GroupSnapshot, TestGroupRevision } from "./groupTypes";
 
 function requireGroupDatabase(): void {
