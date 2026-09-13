@@ -98,6 +98,8 @@ pub struct AuthSnapshot {
 pub struct AuthService {
     session: Mutex<AuthSession>,
     idle_timeout_s: i64,
+    #[cfg(test)]
+    fail_next_snapshot: std::sync::atomic::AtomicBool,
 }
 
 impl AuthService {
@@ -105,7 +107,15 @@ impl AuthService {
         Self {
             session: Mutex::new(AuthSession::new(idle_timeout_s)),
             idle_timeout_s,
+            #[cfg(test)]
+            fail_next_snapshot: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_snapshot_for_test(&self) {
+        self.fail_next_snapshot
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn bootstrap(
@@ -205,6 +215,14 @@ impl AuthService {
     }
 
     pub fn snapshot(&self, storage: &Storage, now_epoch_s: i64) -> Result<AuthSnapshot, AuthCode> {
+        // Isolate a final response read failure after authentication has succeeded.
+        #[cfg(test)]
+        if self
+            .fail_next_snapshot
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AuthCode::Storage);
+        }
         if storage.user_count().map_err(|_| AuthCode::Storage)? == 0 {
             return Ok(AuthSnapshot {
                 status: AuthStatus::SetupRequired,

@@ -1,4 +1,5 @@
 import { programSnapshotHtml } from "./reportPreview";
+import { SAMPLE_EVIDENCE_NOTE, sampleEvidenceRows } from "./sampleEvidence";
 import {
   programValueErrors,
   customShapeError,
@@ -38,6 +39,8 @@ const H2_ABS = 10;
 const CO_ABS = 10;
 const limits = { h2: 5, co: 5 };
 const sv = [0, 0, 0, 0]; // display L/min per gas [H2, N2, CO2, CO]
+const flowSteps = [0.01, 0.1, 0.01, 0.01];
+const restorableFlow: Array<number | null> = [null, null, null, null];
 let pv = [0, 0, 0, 0];
 let temps = new Array(9).fill(24).map((t, i) => t + i * 0.2);
 let furnaceTarget = 25; // °C the furnace eases toward (idle ambient)
@@ -86,22 +89,81 @@ export function tick(): TelemetrySnapshot {
   };
 }
 
+// Use exact shortest decimal inputs for wire quantization, as the native actor does.
+function decimalParts(value: number): [bigint, number] {
+  const [mantissa, exponent = "0"] = value.toString().split(/e/i);
+  const fraction = mantissa!.split(".")[1]?.length ?? 0;
+  const scale = fraction - Number(exponent);
+  const integer = BigInt(mantissa!.replace(".", ""));
+  return scale < 0
+    ? [integer * 10n ** BigInt(-scale), 0]
+    : [integer, scale];
+}
+
+function quantizeFlow(value: number, step: number, limit: number) {
+  if (value === 0) return { applied: 0, capped: false };
+  const [v, vs] = decimalParts(value);
+  const [s, ss] = decimalParts(step);
+  const factor = 10n ** BigInt(ss);
+  const numerator = v * factor;
+  const denominator = s * 10n ** BigInt(vs);
+  let raw = numerator / denominator;
+  if ((numerator % denominator) * 2n >= denominator) raw += 1n;
+  let capped = false;
+  if (Number.isFinite(limit)) {
+    const [l, ls] = decimalParts(limit);
+    const cap = (l * factor) / (s * 10n ** BigInt(ls));
+    if (raw > cap) {
+      raw = cap;
+      capped = true;
+    }
+  }
+  if (raw > 9223372036854775807n)
+    throw new Error("流量超出通讯协议可表示范围");
+  const applied = Number(`${raw * s}e-${ss}`);
+  if (!Number.isFinite(applied))
+    throw new Error("流量超出通讯协议可表示范围");
+  return { applied, capped };
+}
+
 export function mockSetFlow(gas: number, value: number): ClampResult {
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
-  const applied = clampGas(gas, value);
+  return rememberFlow(gas, value);
+}
+
+function rememberFlow(gas: number, value: number): ClampResult {
+  if (!Number.isInteger(gas) || gas < 0 || gas >= flowSteps.length)
+    throw new Error("无效气体通道");
+  const clampedValue = clampGas(gas, value);
   const limit =
     gas === 0
       ? Math.min(limits.h2, H2_ABS)
       : gas === 3
         ? Math.min(limits.co, CO_ABS)
         : Infinity;
+  const { applied, capped } = quantizeFlow(clampedValue, flowSteps[gas]!, limit);
   sv[gas] = applied;
-  return { applied, clamped: applied < value, limit };
+  if (applied > 0) restorableFlow[gas] = applied;
+  return { applied, clamped: clampedValue < value || capped, limit };
 }
 
 export function mockSetOnOff(gas: number, on: boolean): void {
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
-  if (!on) sv[gas] = 0;
+  const target = on ? restorableFlow[gas] : 0;
+  if (target == null) throw new Error("该通道没有可恢复流量，请先设定");
+  mockSetFlow(gas, target);
+}
+
+export function mockSetAllValves(on: boolean): void {
+  const errors: string[] = [];
+  for (const [gas, name] of ["H₂", "N₂", "CO₂", "CO"].entries()) {
+    try {
+      mockSetOnOff(gas, on);
+    } catch (error) {
+      errors.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (errors.length) throw new Error(`部分通道操作未成功：${errors.join("；")}`);
 }
 
 let safetyLatched = false;
@@ -109,7 +171,7 @@ export function mockShutoff(): void {
   safetyLatched = true;
   if (run) mockStopExperiment();
   sv[0] = 0;
-  sv[1] = 5;
+  rememberFlow(1, 5);
   sv[2] = 0;
   sv[3] = 0;
 }
@@ -173,7 +235,7 @@ function stageReached(s: StageDto, t8: number, elapsedS: number): boolean {
 }
 
 function applyStage(s: StageDto, w0: number): void {
-  s.gas.forEach((v, i) => (sv[i] = clampGas(i, v)));
+  s.gas.forEach((v, i) => rememberFlow(i, v));
   furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
   if (s.kind === "REDUCING") weightTarget = w0 * (1 - MOCK_LOSS);
 }
@@ -387,7 +449,7 @@ export function mockStartExperiment(p: ExperimentParams): string {
 export function mockStopExperiment(): void {
   // Safety atmosphere: N2=5, flammables 0.
   sv[0] = 0;
-  sv[1] = 5;
+  rememberFlow(1, 5);
   sv[2] = 0;
   sv[3] = 0;
   furnaceTarget = 25;
@@ -672,8 +734,12 @@ export function mockReportHtml(id: string): string {
   ]
     .map(([k, v]) => `<tr><th>${esc(k!)}</th><td>${esc(v!)}</td></tr>`)
     .join("");
+  const counts = a?.standard === "GB/T 13241" ? sampleEvidenceRows(a) : null;
+  const sampling = a?.standard !== "GB/T 13241" ? "" : counts
+    ? `<h3>采样筛选统计</h3><table>${counts.map(([label, value]) => `<tr><th>${esc(label)}</th><td>${value}</td></tr>`).join("")}</table><p>${esc(SAMPLE_EVIDENCE_NOTE)}</p>`
+    : "<p>采样筛选统计：未记录</p>";
   const analysis = a
-    ? `<pre>${esc(JSON.stringify(a, null, 2))}</pre>`
+    ? `${sampling}<pre>${esc(JSON.stringify(a, null, 2))}</pre>`
     : '<p style="color:#999">尚未进行结果分析。</p>';
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>检测报告 ${d.experiment_id}</title>\
 <style>body{font-family:'Microsoft YaHei',system-ui,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;color:#1a1a1a}\

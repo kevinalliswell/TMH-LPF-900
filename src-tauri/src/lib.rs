@@ -11,10 +11,12 @@ use tmh_core::storage::RunCompletion;
 mod auth_service;
 mod auth_session;
 mod build_profile;
+mod config_commands;
 mod custom_programs;
 mod groups;
 mod persistence;
 mod procedure;
+mod user_management;
 use persistence::recover_unfinished;
 #[cfg(test)]
 use persistence::retry_pending_completions;
@@ -30,8 +32,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
-use tmh_core::auth::{hash_password, validate_display_name, warm_password_hashing, UserRole};
-use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
+use tmh_core::auth::{warm_password_hashing, UserRole};
+use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, MfcCommandError, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
@@ -39,8 +41,8 @@ use tmh_core::engine::{
     STANDARD_MODES,
 };
 use tmh_core::gb::{
-    free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput, SwellingInput,
-    CALCULATION_VERSION,
+    free_swelling, rdi, reducibility, reduction_rate, RdiInput, ReductionInput,
+    ReductionSampleEvidence, SwellingInput, CALCULATION_VERSION,
 };
 use tmh_core::sampler::{build_sample_row, SampleContext};
 use tmh_core::storage::{ExperimentRow, SampleRow, Storage, UserRow};
@@ -78,6 +80,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Managed application state.
 struct AppState {
+    config: Mutex<tmh_core::config_store::ConfigStore>,
     _data_lock: recovery::DataDirectoryLock,
     recovery_dir: PathBuf,
     hub: Arc<DeviceHub>,
@@ -344,7 +347,7 @@ fn redact_experiment_status(
 
 /// Emit only a view authorized for the session that is active at emission time. Snapshotting
 /// does not touch the idle deadline, so a running experiment cannot keep a user logged in.
-fn emit_experiment_status(app: &AppHandle, status: &ExperimentStatus) {
+fn emit_experiment_status<R: tauri::Runtime>(app: &AppHandle<R>, status: &ExperimentStatus) {
     let state = app.state::<AppState>();
     let snapshot = state.auth.snapshot(&lock(&state.storage), epoch_now()).ok();
     if let Some(snapshot) = snapshot {
@@ -490,30 +493,8 @@ fn sim_speed(mode: &str) -> f64 {
         .unwrap_or(if mode == "mock" { 180.0 } else { 1.0 })
 }
 
-/// Compiled-in default comm config (the repo's config/comm_config.json), used when no
-/// external config file is present or it fails to load. Kept in sync with docs/06 §6.4.
+/// Validated defaults initialize a missing per-profile configuration only.
 const DEFAULT_COMM_CONFIG: &str = include_str!("../../config/comm_config.json");
-
-/// Load + validate the comm config (docs/06 §6.4) so the safety limits, MFC slave
-/// addresses and flow scaling come from the file (issue #11). Resolution order:
-/// `TMH_COMM_CONFIG` env override, else `config/comm_config.json` in the working dir;
-/// on any failure fall back to the compiled-in default so the app still runs (mock).
-fn load_comm_config() -> CommConfig {
-    let path = std::env::var("TMH_COMM_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("config/comm_config.json"));
-    match CommConfig::load(&path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!(
-                "comm config unavailable/invalid ({}: {e}); using built-in defaults",
-                path.display()
-            );
-            CommConfig::from_json(DEFAULT_COMM_CONFIG)
-                .expect("built-in default comm config must parse")
-        }
-    }
-}
 
 fn build_mock_hub(cfg: &CommConfig) -> DeviceHub {
     // Idle furnace sits at ambient; a running experiment drives the target per stage. The
@@ -747,10 +728,24 @@ fn next_deadline(previous: Instant, period: Duration, now: Instant) -> Instant {
     }
 }
 
+/// Decide whether this control tick should capture a sample. Forced boundary
+/// samples also establish the next interval for the new stage.
+fn sample_due(deadline: &mut Instant, period: Duration, now: Instant, forced: bool) -> bool {
+    if !forced && now < *deadline {
+        return false;
+    }
+    *deadline = if forced {
+        now + period
+    } else {
+        next_deadline(*deadline, period, now)
+    };
+    true
+}
+
 /// Publish + emit the current running status.
 #[allow(clippy::too_many_arguments)]
-fn publish_running(
-    app: &AppHandle,
+fn publish_running<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     exp: &ExpControl,
     engine: &ExperimentEngine,
     id: &str,
@@ -776,8 +771,8 @@ fn publish_running(
 /// End-of-run bookkeeping shared by completion and stop: safety atmosphere, final flush,
 /// DB close-out, audit, and publish idle. Idempotent.
 #[allow(clippy::too_many_arguments)]
-fn finalize(
-    app: &AppHandle,
+fn finalize<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     hub: &DeviceHub,
     storage: &Arc<Mutex<Storage>>,
     audit: &AuditLog,
@@ -910,8 +905,8 @@ fn finalize(
 /// `sim_speed` simulated seconds), (re)apply stage atmospheres, sample to SQLite, and
 /// finalize on completion or stop.
 #[allow(clippy::too_many_arguments)]
-fn spawn_experiment_task(
-    app: AppHandle,
+fn spawn_experiment_task<R: tauri::Runtime>(
+    app: AppHandle<R>,
     hub: Arc<DeviceHub>,
     storage: Arc<Mutex<Storage>>,
     audit: Arc<AuditLog>,
@@ -977,16 +972,10 @@ fn spawn_experiment_task(
         // and stage advancement run at least once a second even when a site configures a
         // slower sampling cadence. A faster configured cadence still samples every tick.
         let control_period = control_period(sample_period);
-        let sample_period_s = sample_period.as_secs_f64();
-        let mut since_sample = f64::INFINITY; // sample on the very first tick
-                                              // Wall-clock driven (#43): the engine is advanced by the time that ACTUALLY
-                                              // passed and the next wake-up is a fixed deadline, not "one second after this
-                                              // tick's work finished". Counting ticks made every hold stage run long by
-                                              // however much the tick's own work (sampling, SQLite, waiting for MFC
-                                              // acknowledgements) cost — for GB/T 13241's 180 min reduction hold that is
-                                              // neither accurate nor reproducible.
+        // Engine time uses the monotonic elapsed time, including work between ticks.
         let mut previous = Instant::now();
         let mut deadline = previous + control_period;
+        let mut sample_deadline = deadline;
 
         loop {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -994,7 +983,6 @@ fn spawn_experiment_task(
             deadline = next_deadline(deadline, control_period, now);
             let real_dt = now.duration_since(previous).as_secs_f64();
             let dt = real_dt * sim_speed;
-            since_sample += real_dt;
             previous = now;
 
             if exp.stop.load(Ordering::Relaxed) {
@@ -1137,9 +1125,13 @@ fn spawn_experiment_task(
                 }
             };
 
-            if since_sample >= sample_period_s || result.apply_stage.is_some() || result.completed {
+            if sample_due(
+                &mut sample_deadline,
+                sample_period,
+                now,
+                result.apply_stage.is_some() || result.completed,
+            ) {
                 buffer.push(measured);
-                since_sample = 0.0;
                 samples_since_flush += 1;
             }
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
@@ -1206,6 +1198,7 @@ fn spawn_experiment_task(
                     engine.confirm_stage_started(switching_s);
                     previous = confirmed_at;
                     deadline = previous + control_period;
+                    sample_deadline = previous + sample_period;
                     if reducing && lock(&storage).patch_runtime_metadata(&id,&serde_json::json!({"reduction_start_s":engine.total_elapsed_s(),"gas_switch_confirmed_at":iso_now(),"gas_switch_delay_s":switching_s}).to_string()).is_err() {
                         exp.stop.store(true,Ordering::SeqCst);continue;
                     }
@@ -1371,11 +1364,16 @@ struct PublicSafetyStatus {
 // ---- Commands ---------------------------------------------------------------
 
 #[tauri::command]
-fn get_auth_state(state: State<AppState>) -> Result<AuthSnapshot, String> {
-    state
+fn get_auth_state(app: AppHandle) -> Result<AuthSnapshot, String> {
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        app.try_state::<StartupFailure>()
+            .map_or_else(|| "应用尚未初始化".into(), |failure| failure.0.clone())
+    })?;
+    let snapshot = state
         .auth
         .snapshot(&lock(&state.storage), epoch_now())
-        .map_err(auth_error)
+        .map_err(auth_error);
+    snapshot
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1385,22 +1383,7 @@ fn bootstrap_admin(
     display_name: String,
     password: String,
 ) -> Result<PublicUser, String> {
-    let user = state
-        .auth
-        .bootstrap(
-            &lock(&state.storage),
-            &username,
-            &display_name,
-            &password,
-            epoch_now(),
-        )
-        .map_err(auth_error)?;
-    state.audit.write(
-        &AuditEntry::new(Category::Auth, "bootstrap_admin", AuditResult::Success)
-            .operator(user.display_name.clone())
-            .detail(serde_json::json!({ "user_id": user.user_id })),
-    );
-    Ok(PublicUser::from(&user))
+    user_management::bootstrap_admin(&state, username, display_name, password)
 }
 
 #[tauri::command]
@@ -1409,33 +1392,7 @@ fn login(
     username: String,
     password: String,
 ) -> Result<AuthSnapshot, String> {
-    let outcome = state
-        .auth
-        .login(&lock(&state.storage), &username, &password, epoch_now());
-    // A rejected login has no session, so "who tried" — the attempted username — is the
-    // only attribution available. A successful one uses the authenticated display name, so
-    // it matches every other entry in the trail even when the account's display name
-    // differs from its username or the operator typed odd casing. Passwords never appear.
-    let code = outcome.as_ref().err().map(|error| error.as_str());
-    let operator = match outcome.as_ref() {
-        Ok(user) => user.display_name.clone(),
-        Err(_) => username.clone(),
-    };
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "login",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(operator)
-        .detail(serde_json::json!({ "username": username, "code": code })),
-    );
-    outcome.map_err(auth_error)?;
-    get_auth_state(state)
+    user_management::login(&state, username, password)
 }
 
 #[tauri::command]
@@ -1469,26 +1426,7 @@ fn change_own_password(
     current_password: String,
     new_password: String,
 ) -> Result<(), String> {
-    let operator = audit_operator(&state);
-    let outcome = state.auth.change_own_password(
-        &lock(&state.storage),
-        &current_password,
-        &new_password,
-        epoch_now(),
-    );
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "change_password",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(operator),
-    );
-    outcome.map_err(auth_error)
+    user_management::change_own_password(&state, current_password, new_password)
 }
 
 #[tauri::command]
@@ -1508,34 +1446,7 @@ fn create_user(
     temporary_password: String,
     role: UserRole,
 ) -> Result<PublicUser, String> {
-    let actor = current_admin(&state)?;
-    let outcome = state.auth.create_user(
-        &lock(&state.storage),
-        &username,
-        &display_name,
-        &temporary_password,
-        role,
-        epoch_now(),
-    );
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "create_user",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(actor.display_name)
-        .detail(serde_json::json!({
-            "username": username,
-            "role": role,
-            "user_id": outcome.as_ref().ok().map(|user| user.user_id.clone())
-        })),
-    );
-    let user = outcome.map_err(auth_error)?;
-    Ok(PublicUser::from(&user))
+    user_management::create_user(&state, username, display_name, temporary_password, role)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1546,44 +1457,7 @@ fn update_user(
     role: UserRole,
     is_active: bool,
 ) -> Result<PublicUser, String> {
-    let actor = current_admin(&state)?;
-    let display_name =
-        validate_display_name(&display_name).map_err(|_| AuthCode::InvalidInput.to_string())?;
-    let storage = lock(&state.storage);
-    let target = storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
-    if target.user_id == actor.user_id && (role != target.role || !is_active) {
-        return Err(AuthCode::Forbidden.to_string());
-    }
-    if target.role.is_admin()
-        && target.is_active
-        && (!role.is_admin() || !is_active)
-        && storage.active_admin_count().map_err(|e| e.to_string())? <= 1
-    {
-        return Err(AuthCode::LastAdmin.to_string());
-    }
-    storage
-        .update_user(&user_id, &display_name, role, is_active, &iso_now())
-        .map_err(|e| e.to_string())?;
-    let updated = storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
-    state.audit.write(
-        &AuditEntry::new(Category::Auth, "update_user", AuditResult::Success)
-            .operator(actor.display_name)
-            .detail(serde_json::json!({
-                "user_id": user_id,
-                "username": updated.username,
-                "role_from": target.role,
-                "role_to": updated.role,
-                "active_from": target.is_active,
-                "active_to": updated.is_active
-            })),
-    );
-    Ok(PublicUser::from(&updated))
+    user_management::update_user(&state, user_id, display_name, role, is_active)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1592,35 +1466,7 @@ fn reset_user_password(
     user_id: String,
     temporary_password: String,
 ) -> Result<(), String> {
-    let actor = current_admin(&state)?;
-    if actor.user_id == user_id {
-        return Err(AuthCode::Forbidden.to_string());
-    }
-    let hash =
-        hash_password(&temporary_password).map_err(|_| AuthCode::InvalidInput.to_string())?;
-    let storage = lock(&state.storage);
-    if storage
-        .get_user(&user_id)
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        return Err("USER_NOT_FOUND".into());
-    }
-    let outcome = storage.set_user_password(&user_id, &hash, true, &iso_now());
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "reset_password",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
-        )
-        .operator(actor.display_name)
-        .detail(serde_json::json!({ "user_id": user_id })),
-    );
-    outcome.map_err(|e| e.to_string())
+    user_management::reset_user_password(&state, user_id, temporary_password)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1691,6 +1537,33 @@ fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
 }
 
 #[tauri::command]
+fn get_comm_config(
+    state: State<AppState>,
+) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
+    config_commands::snapshot(&state)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn save_comm_config(
+    state: State<AppState>,
+    expected_revision: String,
+    config: CommConfig,
+    reason: String,
+) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
+    config_commands::save(&state, &expected_revision, config, &reason)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn restart_for_config(app: AppHandle, expected_revision: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let lease = config_commands::prepare_restart(&state, &expected_revision).await?;
+    emit_experiment_status(&app, &state.exp.snapshot());
+    // Keep the lifecycle lease until the new process takes over.
+    let _lease = lease;
+    app.restart();
+}
+
+#[tauri::command]
 fn get_runtime_settings(state: State<AppState>) -> Result<RuntimeSettings, String> {
     current_user(&state)?;
     Ok(RuntimeSettings {
@@ -1732,34 +1605,87 @@ fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
     }
 }
 
+/// Authorization and queue submission share the start/update lifecycle boundary.
+/// Return the receiver before awaiting it, so no synchronous lock crosses an await.
+fn with_device_lifecycle<T>(
+    state: &AppState,
+    enqueue: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _lifecycle = lock(&state.exp.lifecycle);
+    enqueue()
+}
+
+fn enqueue_manual_gas<T>(
+    state: &AppState,
+    enqueue: impl FnOnce(&DeviceHub) -> Result<T, String>,
+) -> Result<(String, T), String> {
+    with_device_lifecycle(state, || {
+        let operator = require_experiment_controller(state)?.display_name;
+        Ok((operator, enqueue(&state.hub)?))
+    })
+}
+
+fn enqueue_safety_reset(
+    state: &AppState,
+) -> Result<
+    (
+        UserRow,
+        impl std::future::Future<Output = Result<(), String>>,
+    ),
+    String,
+> {
+    with_device_lifecycle(state, || {
+        let user = current_user(state)?;
+        if state.exp.updating.load(Ordering::SeqCst) {
+            return Err("更新期间不能复位保护".into());
+        }
+        if state.exp.is_running() || state.exp.persistence_pending() {
+            return Err("实验仍在结束或数据待保存，暂不能复位".into());
+        }
+        if !lock(&state.storage)
+            .unfinished_experiments()
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
+            return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
+        }
+        if !state.hub.temp_rx().borrow().is_fresh(Instant::now()) {
+            return Err("温度测量无效，不能复位".into());
+        }
+        let reply = state.hub.request_reset_safety();
+        Ok((user, async move {
+            reply
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }))
+    })
+}
+
+fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) -> bool {
+    let _lifecycle = lock(&state.exp.lifecycle);
+    // An ACK belongs to the earlier reset request, not to a run/restart/protection
+    // event that occurred while the command was waiting for its response.
+    if state.exp.is_running()
+        || state.exp.updating.load(Ordering::SeqCst)
+        || state.exp.persistence_pending()
+        || state.hub.safety_latched()
+    {
+        return false;
+    }
+    let status = ExperimentStatus::idle();
+    state.exp.set_status(status.clone());
+    // Publish under the same lock: a new run must not emit Running before this Idle.
+    emit(&status);
+    true
+}
+
 #[tauri::command]
 async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
-    let user = current_user(&st)?;
-    if st.exp.updating.load(Ordering::SeqCst) {
-        return Err("更新期间不能复位保护".into());
-    }
-    if st.exp.is_running() || st.exp.persistence_pending() {
-        return Err("实验仍在结束或数据待保存，暂不能复位".into());
-    }
-    if !lock(&st.storage)
-        .unfinished_experiments()
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
-        return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
-    }
-    if !st.hub.temp_rx().borrow().is_fresh(Instant::now()) {
-        return Err("温度测量无效，不能复位".into());
-    }
-    st.hub
-        .request_reset_safety()
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let status = ExperimentStatus::idle();
-    st.exp.set_status(status.clone());
-    emit_experiment_status(&app, &status);
+    let (user, reply) = enqueue_safety_reset(&st)?;
+    reply.await?;
+    publish_safety_reset(&st, |status| emit_experiment_status(&app, status));
     st.audit.write(
         &AuditEntry::new(
             Category::Gas,
@@ -1773,7 +1699,9 @@ async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
-    let st = app.state::<AppState>();
+    let st = app
+        .try_state::<AppState>()
+        .ok_or("设备服务未启动，无法确认保护气氛；请按现场应急规程处置")?;
     // Deliberately callable without a session; still attributed, so the trail shows whether
     // a logged-in operator or someone at a locked screen triggered it (#41).
     let operator = audit_operator(&st);
@@ -1802,14 +1730,14 @@ async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    // Reject out-of-range channels from the untrusted webview (defense in depth; the MFC
-    // actor also bounds-guards). There are exactly 4 gas channels (H2, N2, CO2, CO).
-    if gas >= GAS_COUNT {
-        return Err("无效的气体通道".into());
-    }
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_set_flow(gas, value).await {
+    let st = app.state::<AppState>();
+    let (operator, reply) = enqueue_manual_gas(&st, |hub| {
+        if gas >= GAS_COUNT {
+            return Err("无效的气体通道".into());
+        }
+        Ok(hub.request_set_flow(gas, value))
+    })?;
+    let result = match reply.await {
         Ok(result) => result,
         Err(_) => {
             app.state::<AppState>().audit.write(
@@ -1822,7 +1750,6 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
             return Err("DEVICE_OFFLINE".into());
         }
     };
-    let st = app.state::<AppState>();
     let clamp = match result {
         Ok(clamp) => clamp,
         Err(error) => {
@@ -1833,7 +1760,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
                     serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
                 ),
             );
-            return Err("DEVICE_OFFLINE".into());
+            return Err(gas_command_error(error));
         }
     };
     st.audit.write(
@@ -1854,16 +1781,34 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 
 #[tauri::command]
 async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    if gas >= GAS_COUNT {
-        return Err("INVALID_PARAMS".into());
+    switch_gas(&app.state::<AppState>(), gas, on).await
+}
+
+fn gas_command_error(error: MfcCommandError) -> String {
+    match error {
+        MfcCommandError::NoRestorableSetpoint(_) => "该通道没有可恢复流量，请先设定".into(),
+        MfcCommandError::UnrepresentableSetpoint => {
+            "流量超出通讯协议可表示范围，请修改设定值".into()
+        }
+        MfcCommandError::SafetyLatched => "保护已锁存，请先确认保护状态并复位".into(),
+        MfcCommandError::InvalidGas(_) => "无效的气体通道".into(),
+        MfcCommandError::QueueFull => "气体命令队列已满，请稍后重试".into(),
+        MfcCommandError::Transport(_) => "设备未确认气体操作，请检查连接和实际流量".into(),
     }
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_set_on_off(gas, on).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+}
+
+async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
+    let (operator, reply) = enqueue_manual_gas(st, |hub| {
+        if gas >= GAS_COUNT {
+            return Err("INVALID_PARAMS".into());
+        }
+        Ok(hub.request_set_on_off(gas, on))
+    })?;
+    let result = match reply.await {
+        Ok(result) => result.map_err(gas_command_error),
+        Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
     };
-    app.state::<AppState>().audit.write(
+    st.audit.write(
         &AuditEntry::new(
             Category::Gas,
             "on_off",
@@ -1874,42 +1819,57 @@ async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), Stri
             },
         )
         .operator(operator)
-        .detail(serde_json::json!({ "gas": gas, "on": on })),
+        .detail(serde_json::json!({
+            "gas": gas, "on": on,
+            "applied": result.as_ref().ok().map(|clamp| clamp.applied),
+            "error": result.as_ref().err()
+        })),
     );
-    result
+    result.map(|_| ())
 }
 
-async fn set_all_valves(
-    app: &AppHandle,
-    on: bool,
-    action: &str,
-    operator: String,
-) -> Result<(), String> {
-    let hub = app.state::<AppState>().hub.clone();
-    let mut replies = Vec::with_capacity(GAS_COUNT);
-    for g in 0..GAS_COUNT {
-        replies.push(hub.request_set_on_off(g, on));
-    }
-    let mut failed = false;
-    for reply in replies {
-        if !matches!(reply.await, Ok(Ok(()))) {
-            failed = true;
+async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), String> {
+    let (operator, replies) = enqueue_manual_gas(st, |hub| {
+        Ok((0..GAS_COUNT)
+            .map(|gas| hub.request_set_on_off(gas, on))
+            .collect::<Vec<_>>())
+    })?;
+    let mut channels = Vec::with_capacity(GAS_COUNT);
+    let mut errors = Vec::new();
+    for (gas, reply) in replies.into_iter().enumerate() {
+        let result = match reply.await {
+            Ok(result) => result.map_err(gas_command_error),
+            Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
+        };
+        if let Err(error) = &result {
+            errors.push(format!("{}：{error}", ["H₂", "N₂", "CO₂", "CO"][gas]));
         }
+        channels.push(serde_json::json!({
+            "gas": gas, "on": on,
+            "applied": result.as_ref().ok().map(|clamp| clamp.applied),
+            "error": result.as_ref().err()
+        }));
     }
-    app.state::<AppState>().audit.write(
+    st.audit.write(
         &AuditEntry::new(
             Category::Gas,
             action,
-            if failed {
+            if !errors.is_empty() {
                 AuditResult::Failure
             } else {
                 AuditResult::Success
             },
         )
-        .operator(operator),
+        .operator(operator)
+        .detail(serde_json::json!({"channels": channels})),
     );
-    if failed {
-        Err("DEVICE_OFFLINE".into())
+    if !errors.is_empty() {
+        let status = if errors.len() < GAS_COUNT {
+            "部分通道已执行"
+        } else {
+            "全部通道均未确认成功"
+        };
+        Err(format!("{status}；未成功通道：{}", errors.join("；")))
     } else {
         Ok(())
     }
@@ -1917,14 +1877,12 @@ async fn set_all_valves(
 
 #[tauri::command]
 async fn open_all_valves(app: AppHandle) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    set_all_valves(&app, true, "open_all", operator).await
+    set_all_valves(&app.state::<AppState>(), true, "open_all").await
 }
 
 #[tauri::command]
 async fn close_all_valves(app: AppHandle) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    set_all_valves(&app, false, "close_all", operator).await
+    set_all_valves(&app.state::<AppState>(), false, "close_all").await
 }
 
 #[tauri::command]
@@ -2119,6 +2077,9 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
 
 fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
     let mut blocking = Vec::new();
+    if let Some(message) = config_commands::start_blocker(state) {
+        blocking.push(PreflightIssue::blocking("CONFIG_RESTART_REQUIRED", message));
+    }
     if state.hub.safety_latched() || state.exp.snapshot().phase == Phase::Error {
         blocking.push(PreflightIssue::blocking(
             "SAFETY_LATCHED",
@@ -2698,22 +2659,32 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
 
 // ---- GB analysis ------------------------------------------------------------
 
+struct ReductionCurve {
+    points: Vec<(f64, f64)>,
+    evidence: ReductionSampleEvidence,
+}
+
 /// Read exact stage time without treating old untimed rows or missing readings as zero.
+/// Count original records at the same decision points as the existing curve filter.
 fn reduction_curve(
     samples: &[SampleRow],
     m0: f64,
     m1: f64,
     input: &ReductionInput,
     max_gap_s: f64,
-) -> Vec<(f64, f64)> {
+) -> ReductionCurve {
     let mut points: Vec<(f64, f64)> = Vec::new();
-    for row in samples
-        .iter()
-        .filter(|r| r.experiment_status.as_deref() == Some("REDUCING"))
-    {
+    let mut evidence = ReductionSampleEvidence::new(samples.len());
+    for row in samples {
+        if row.experiment_status.as_deref() != Some("REDUCING") {
+            evidence.non_reduction_rows += 1;
+            continue;
+        }
+        evidence.reduction_sample_count += 1;
         let record: serde_json::Value =
             serde_json::from_str(row.record_json.as_deref().unwrap_or("{}")).unwrap_or_default();
         let Some(t) = record["stage_elapsed_s"].as_f64() else {
+            evidence.excluded_time_rows += 1;
             continue;
         };
         let rt = if row.system_message.is_none() {
@@ -2721,6 +2692,24 @@ fn reduction_curve(
         } else {
             None
         };
+        // Reasons are exclusive: missing stage time first, then balance annotation,
+        // other quality annotations, and finally an uncomputable mass/result.
+        if rt.is_some() {
+            evidence.valid_sample_count += 1;
+            if record["sample_role"] == "reduction_baseline" {
+                evidence.valid_baseline_count += 1;
+            }
+        } else if row
+            .system_message
+            .as_deref()
+            .is_some_and(|v| v.contains("天平离线"))
+        {
+            evidence.excluded_offline_rows += 1;
+        } else if row.system_message.is_some() {
+            evidence.excluded_other_quality_rows += 1;
+        } else {
+            evidence.excluded_value_rows += 1;
+        }
         if let Some(&(previous, _)) = points.last() {
             if (t / 60.0 - previous) * 60.0 > max_gap_s {
                 points.push(((previous + t / 60.0) / 2.0, f64::NAN));
@@ -2728,7 +2717,7 @@ fn reduction_curve(
         }
         points.push((t / 60.0, rt.unwrap_or(f64::NAN)));
     }
-    points
+    ReductionCurve { points, evidence }
 }
 fn value_at(points: &[(f64, f64)], time: f64) -> Option<f64> {
     if let Some((_, v)) = points.iter().find(|p| p.0 == time && p.1.is_finite()) {
@@ -2875,13 +2864,14 @@ fn calculate_reduction(
         .unwrap_or(0.0)
         * 1.5;
     reducibility(row.sample_weight, m1, m1, input.w1, input.w2).ok_or("亚铁/全铁含量或称量无效")?;
-    let points = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
+    let curve = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
+    let points = &curve.points;
     let rt = if let Some(mt) = input.manual_mt.or(input.manual_m180) {
         reducibility(row.sample_weight, m1, mt, input.w1, input.w2)
             .ok_or("还原终点总称量无效")?
             .rt
     } else {
-        value_at(&points, endpoint_min).ok_or_else(|| {
+        value_at(points, endpoint_min).ok_or_else(|| {
             format!("{endpoint_min} 分钟处没有连续有效称量，可依据原始记录人工补录 mₜ")
         })?
     };
@@ -2901,13 +2891,14 @@ fn calculate_reduction(
             .copied()
             .filter(|(t, _)| *t < endpoint_min)
             .collect();
-        if let Some(value) = value_at(&points, endpoint_min) {
+        if let Some(value) = value_at(points, endpoint_min) {
             bounded.push((endpoint_min, value));
         }
         reduction_rate(&bounded)
     };
     let mut value = serde_json::json!({"standard":"GB/T 13241","standard_version":"2017","calculation_version":CALCULATION_VERSION,
       "manual_used":manual_used,"input":input,"m0":row.sample_weight,"m1":m1,"rt":rt,"endpoint_min":endpoint_min,
+      "valid_sample_count":curve.evidence.valid_sample_count,"excluded_offline_rows":curve.evidence.excluded_offline_rows,"sample_evidence":curve.evidence,
       "reduction_rate_index":rate.as_ref().map(|r|r.index),"rate_evidence":rate,
       "runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
     if custom {
@@ -3333,7 +3324,9 @@ fn prepare_exit(app: &AppHandle) -> bool {
 }
 
 /// Called only after single-instance plugin initialization.
-fn initialize_state() -> AppState {
+struct StartupFailure(String);
+
+fn initialize_state() -> Result<AppState, String> {
     let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
     if let Err(message) = validate_runtime_mode(&mode) {
         eprintln!("TMH 启动失败: {message}");
@@ -3365,7 +3358,11 @@ fn initialize_state() -> AppState {
     // Pay the Argon2 cost once here, before any login can be attempted.
     warm_password_hashing();
     let mut storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let comm_config = load_comm_config();
+    let config = config_commands::open_store(
+        &data_root,
+        std::env::var_os("TMH_COMM_CONFIG").map(PathBuf::from),
+    )?;
+    let comm_config = config.snapshot().applied;
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
     // Enforce the documented 180-day audit retention (docs/06 §6.5) at startup — issue #6.
@@ -3375,7 +3372,8 @@ fn initialize_state() -> AppState {
     let _ = recover_unfinished(&hub, &mut storage, &audit, &exp, &recovery_dir);
 
     let idle_timeout_s = idle_timeout_s();
-    AppState {
+    Ok(AppState {
+        config: Mutex::new(config),
         _data_lock: data_lock,
         recovery_dir,
         hub,
@@ -3399,7 +3397,7 @@ fn initialize_state() -> AppState {
         telemetry_gen: Arc::new(AtomicU64::new(0)),
         cadence: Cadence::from_config(&comm_config),
         idle_timeout_s,
-    }
+    })
 }
 
 /// Build and run the Tauri application.
@@ -3434,7 +3432,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            app.manage(initialize_state());
+            match initialize_state() {
+                Ok(state) => {
+                    app.manage(state);
+                }
+                Err(message) => {
+                    app.manage(StartupFailure(message));
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3458,6 +3463,9 @@ pub fn run() {
             get_runtime_mode,
             get_gas_safety_limits,
             get_runtime_settings,
+            get_comm_config,
+            save_comm_config,
+            restart_for_config,
             get_device_health,
             set_gas_flow,
             set_gas_on_off,
@@ -3501,7 +3509,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Both restart entry points have already awaited protection under an
+                // update lease. Tauri ignores prevent_exit for this reserved code;
+                // ordinary close checks would therefore only record a false failure.
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    return;
+                }
                 if prepare_exit(app) {
                     api.prevent_exit();
                 }
@@ -3513,7 +3527,10 @@ pub fn run() {
 mod tests {
     use super::*;
     use tmh_core::auth::UserRole;
+    mod analysis_sample_tests;
+    mod device_lifecycle_tests;
     mod group_tests;
+    mod storage_fault_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
     /// below (`current_user`, `current_admin`, `authorize_experiment`,
@@ -3524,7 +3541,15 @@ mod tests {
         let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("built-in config");
         let dir = std::env::temp_dir().join(format!("tmh_state_{}", tmh_core::auth::new_user_id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
         AppState {
+            config: Mutex::new(
+                tmh_core::config_store::ConfigStore::open(
+                    dir.join("config/comm_config.json"),
+                    Some(&cfg),
+                )
+                .unwrap(),
+            ),
             _data_lock: recovery::DataDirectoryLock::acquire(&dir).unwrap(),
             recovery_dir: dir.join("recovery"),
             hub: Arc::new(build_mock_hub(&cfg)),
@@ -3619,6 +3644,58 @@ mod tests {
             .auth
             .login(&lock(&state.storage), username, password, epoch_now())
             .expect("login");
+    }
+
+    #[test]
+    fn native_gas_switch_rejects_missing_restore_without_claiming_device_offline() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        assert_eq!(
+            tauri::async_runtime::block_on(switch_gas(&state, 0, true)),
+            Err("AUTH_REQUIRED".into())
+        );
+        login(&state, "admin", "admin-password");
+        let result = tauri::async_runtime::block_on(switch_gas(&state, 0, true));
+        assert!(result.unwrap_err().contains("没有可恢复"));
+        let invalid = tauri::async_runtime::block_on(state.hub.request_set_flow(1, 1e308))
+            .unwrap()
+            .unwrap_err();
+        assert!(gas_command_error(invalid).contains("超出通讯协议"));
+        state.auth.lock();
+        assert_eq!(
+            tauri::async_runtime::block_on(set_all_valves(&state, true, "open_all")),
+            Err("AUTH_REQUIRED".into())
+        );
+    }
+
+    #[test]
+    fn native_gas_batch_reports_partial_application_and_audits_each_applied_value() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+        let logs = state.recovery_dir.parent().unwrap().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        tauri::async_runtime::block_on(async {
+            state.hub.request_set_flow(1, 5.0).await.unwrap().unwrap();
+            switch_gas(&state, 1, false).await.unwrap();
+            let failure = set_all_valves(&state, true, "open_all").await.unwrap_err();
+            assert!(failure.contains("部分通道已执行"));
+            assert!(failure.contains("H₂") && failure.contains("CO₂") && failure.contains("CO"));
+        });
+        let text = std::fs::read_to_string(
+            std::fs::read_dir(logs)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(audit["operator"], "管理员");
+        assert_eq!(audit["result"], "FAILURE");
+        assert_eq!(audit["detail"]["channels"][1]["applied"], 5.0);
+        assert!(audit["detail"]["channels"][0]["error"].is_string());
     }
 
     // Paste inside src-tauri/src/lib.rs's existing `tests` module.
@@ -4261,9 +4338,75 @@ mod tests {
             },
             90.0,
         );
-        assert_eq!(curve.len(), 3);
-        assert!(curve[1].1.is_nan());
-        assert!(curve[2].1.is_nan());
+        assert_eq!(curve.points.len(), 3);
+        assert!(curve.points[1].1.is_nan());
+        assert!(curve.points[2].1.is_nan());
+    }
+
+    #[test]
+    fn sample_deadlines_preserve_the_ri_endpoint_despite_normal_tick_jitter() {
+        let start = Instant::now();
+        let period = Duration::from_secs(1);
+        let mut deadline = start + period;
+        let mut samples = vec![row("REDUCING", 0, 100.0, false)];
+        samples[0].record_json = Some("{\"stage_elapsed_s\":0}".into());
+        for tick in 1..=60 {
+            // The desktop run alternated slightly early/late durations around a
+            // fixed control deadline. Resetting the sample interval from "now"
+            // skipped alternate rows and broke the 180-minute endpoint bracket.
+            let jitter_ms = if tick % 2 == 0 { 5 } else { 1 };
+            let elapsed = Duration::from_secs(tick) + Duration::from_millis(jitter_ms);
+            if sample_due(&mut deadline, period, start + elapsed, tick == 60) {
+                let mut sample = row("REDUCING", tick * 3, 88.0, false);
+                sample.record_json = Some(
+                    serde_json::json!({"stage_elapsed_s":elapsed.as_secs_f64()*180.0}).to_string(),
+                );
+                samples.push(sample);
+            }
+        }
+        let input = ReductionInput {
+            w1: 10.0,
+            w2: 60.0,
+            manual_m1: None,
+            manual_m180: None,
+            manual_mt: None,
+            manual_rate_points: None,
+            source_record: None,
+        };
+        let curve = reduction_curve(&samples, 100.0, 100.0, &input, 270.0);
+        assert!(
+            value_at(&curve.points, 180.0).is_some(),
+            "normal scheduling must retain the endpoint bracket"
+        );
+        assert_eq!(
+            samples.len(),
+            61,
+            "every scheduled tick plus the baseline is recorded"
+        );
+    }
+
+    #[test]
+    fn sample_deadlines_capture_boundaries_without_a_catch_up_burst() {
+        let start = Instant::now();
+        let period = Duration::from_secs(5);
+        let mut deadline = start + period;
+        assert!(!sample_due(
+            &mut deadline,
+            period,
+            start + Duration::from_secs(2),
+            false
+        ));
+        assert!(sample_due(
+            &mut deadline,
+            period,
+            start + Duration::from_secs(3),
+            true
+        ));
+        assert_eq!(deadline, start + Duration::from_secs(8));
+        let stalled = start + Duration::from_secs(30);
+        assert!(sample_due(&mut deadline, period, stalled, false));
+        assert_eq!(deadline, stalled + period);
+        assert!(!sample_due(&mut deadline, period, stalled, false));
     }
 
     #[test]
@@ -4345,12 +4488,9 @@ mod tests {
     }
 
     #[test]
-    fn load_comm_config_returns_a_valid_config() {
-        // The test working dir has no config/comm_config.json, so this exercises the
-        // compiled-in default fallback path (#11).
-        load_comm_config()
-            .validate()
-            .expect("fallback config valid");
+    fn default_profile_config_is_valid() {
+        let state = test_state();
+        lock(&state.config).snapshot().applied.validate().unwrap();
     }
     // Insert into src-tauri/src/lib.rs's existing `tests` module.
     // The stage-transition sample may arrive after the configured endpoint. It is

@@ -23,6 +23,7 @@ function Dot({ ok, label }: { ok: boolean | undefined; label: string }) {
 export function StatusBar() {
   const snap = useTelemetry((s) => s.snapshot);
   const stale = useTelemetryStale();
+  const staleMs = useTelemetry((state) => state.staleMs);
   // A stale stream (>5s without a frame) shows amber/stale dots regardless of last-known
   // health, so frozen data is never presented as live (issue #10).
   const h = stale ? undefined : snap?.health;
@@ -37,7 +38,7 @@ export function StatusBar() {
       <Dot ok={h?.balance_valid} label="天平" />
       {stale && snap && (
         <span className="text-[11px]" style={{ color: "var(--warn)" }}>
-          数据陈旧（&gt;5s）
+          数据陈旧（&gt;{staleMs / 1000}s）
         </span>
       )}
       <div className="flex-1" />

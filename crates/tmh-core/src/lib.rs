@@ -8,6 +8,7 @@ pub mod auth;
 pub mod bus;
 pub mod clamp;
 pub mod config;
+pub mod config_store;
 pub mod engine;
 pub mod gb;
 pub mod health;

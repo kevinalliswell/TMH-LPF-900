@@ -211,6 +211,21 @@ export interface ExperimentDetail {
   owner_user_id?: string | null;
 }
 
+/** Frozen row screening counts, mirrored from tmh_core::gb::ReductionSampleEvidence. */
+export interface ReductionSampleEvidence {
+  version: string;
+  scope: string;
+  total_sample_count: number;
+  reduction_sample_count: number;
+  valid_sample_count: number;
+  excluded_offline_rows: number;
+  excluded_other_quality_rows: number;
+  excluded_time_rows: number;
+  excluded_value_rows: number;
+  non_reduction_rows: number;
+  valid_baseline_count: number;
+}
+
 export interface SampleDto {
   quality?: string | null;
   record?: {

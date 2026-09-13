@@ -59,6 +59,7 @@ import {
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
+  mockSetAllValves,
   mockShutoff,
   mockResetSafety,
   mockSkipStage,
@@ -73,6 +74,24 @@ import {
 
 export * from "./types";
 export * from "./groupTypes";
+export * from "./configTypes";
+import type { CommConfig, ConfigSnapshot } from "./configTypes";
+
+function requireNativeConfig(): void {
+  if (!isTauri()) throw new Error("通讯配置需要在桌面应用中读取和保存；浏览器预览不连接设备。");
+}
+export async function getCommConfig(): Promise<ConfigSnapshot> {
+  requireNativeConfig();
+  return invoke("get_comm_config");
+}
+export async function saveCommConfig(expectedRevision: string, config: CommConfig, reason: string): Promise<ConfigSnapshot> {
+  requireNativeConfig();
+  return invoke("save_comm_config", { expected_revision: expectedRevision, config, reason });
+}
+export async function restartForConfig(expectedRevision: string): Promise<void> {
+  requireNativeConfig();
+  return invoke("restart_for_config", { expected_revision: expectedRevision });
+}
 import type { GroupRequest, GroupSnapshot, TestGroupRevision } from "./groupTypes";
 
 function requireGroupDatabase(): void {
@@ -266,14 +285,12 @@ export async function setGasOnOff(gas: number, on: boolean): Promise<void> {
 }
 
 export async function openAllValves(): Promise<void> {
-  if (!isTauri())
-    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, true));
+  if (!isTauri()) return mockSetAllValves(true);
   await invoke("open_all_valves");
 }
 
 export async function closeAllValves(): Promise<void> {
-  if (!isTauri())
-    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, false));
+  if (!isTauri()) return mockSetAllValves(false);
   await invoke("close_all_valves");
 }
 

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommConfig {
     #[serde(rename = "COM_RS485_MFC")]
     pub mfc: SerialParams,
@@ -26,7 +26,7 @@ pub struct CommConfig {
     pub gas_safety_limits: GasSafetyLimits,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SerialParams {
     pub port: String,
     pub baudrate: u32,
@@ -36,7 +36,7 @@ pub struct SerialParams {
     pub timeout: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempParams {
     pub port: String,
     pub baudrate: u32,
@@ -54,19 +54,20 @@ pub struct TempParams {
     pub signed_registers: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sampling {
     pub interval_s: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Performance {
     pub data_collection_interval: f64,
+    /// Legacy JSON alias of SAMPLING.interval_s; validation requires equality.
     pub experiment_data_interval: f64,
     pub heartbeat_timeout: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SlaveAddrMfc {
     #[serde(rename = "H2")]
     pub h2: u8,
@@ -78,7 +79,7 @@ pub struct SlaveAddrMfc {
     pub co: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowScaling {
     #[serde(rename = "H2")]
     pub h2: f64,
@@ -90,7 +91,7 @@ pub struct FlowScaling {
     pub co: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GasSafetyLimits {
     #[serde(rename = "H2")]
     pub h2: f64,
@@ -118,12 +119,16 @@ pub enum ConfigError {
     EmptyPort(&'static str),
     #[error("non-positive safety limit: {0}")]
     NonPositiveLimit(&'static str),
-    #[error("scale must be non-zero: {0}")]
+    #[error("scale must be positive and finite: {0}")]
     ZeroScale(&'static str),
     #[error("MFC slave addresses must be distinct")]
     SlaveAddrConflict,
-    #[error("interval must be positive and finite: {0}")]
+    #[error("interval must be finite and within 0.01..=86400 seconds: {0}")]
     NonPositiveInterval(&'static str),
+    #[error("invalid configuration field: {0}")]
+    InvalidField(&'static str),
+    #[error("PERFORMANCE_CONFIG.experiment_data_interval must equal SAMPLING.interval_s")]
+    SamplingAliasMismatch,
     #[error("parse error: {0}")]
     Parse(String),
     #[error("io error: {0}")]
@@ -144,13 +149,22 @@ impl CommConfig {
         serde_json::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
-    /// Atomically write back (temp file + rename). Caller does read-modify-write.
+    /// Compatibility convenience writer. New read/edit/save consumers must retain
+    /// a ConfigStore and pass its revision so a stale editing session cannot win.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| ConfigError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| ConfigError::Io(e.to_string()))?;
+        use crate::config_store::{ConfigStore, ConfigStoreError};
+        let map_error = |error: ConfigStoreError| match error {
+            ConfigStoreError::Config(error) => error,
+            other => ConfigError::Io(other.to_string()),
+        };
+        self.validate()?;
+        let mut store = ConfigStore::open(path.to_path_buf(), Some(self)).map_err(map_error)?;
+        let snapshot = store.snapshot();
+        if snapshot.saved != *self {
+            store
+                .save(&snapshot.revision, self.clone())
+                .map_err(map_error)?;
+        }
         Ok(())
     }
 
@@ -165,13 +179,13 @@ impl CommConfig {
         if self.balance.port.trim().is_empty() {
             return Err(ConfigError::EmptyPort("COM_RS232_Balance"));
         }
-        if self.gas_safety_limits.h2 <= 0.0 {
+        if !self.gas_safety_limits.h2.is_finite() || self.gas_safety_limits.h2 <= 0.0 {
             return Err(ConfigError::NonPositiveLimit("H2"));
         }
-        if self.gas_safety_limits.co <= 0.0 {
+        if !self.gas_safety_limits.co.is_finite() || self.gas_safety_limits.co <= 0.0 {
             return Err(ConfigError::NonPositiveLimit("CO"));
         }
-        if self.temp.scale == 0.0 {
+        if !self.temp.scale.is_finite() || self.temp.scale <= 0.0 {
             return Err(ConfigError::ZeroScale("COM_RS485_TEMP.scale"));
         }
         for (name, v) in [
@@ -180,9 +194,21 @@ impl CommConfig {
             ("CO2", self.flow_scaling.co2),
             ("CO", self.flow_scaling.co),
         ] {
-            if v == 0.0 {
+            if !v.is_finite() || v <= 0.0 || !(v / 10.0).is_finite() || v / 10.0 <= 0.0 {
                 return Err(ConfigError::ZeroScale(name));
             }
+        }
+        // The fixed emergency nitrogen atmosphere must survive configuration
+        // quantization exactly, including the protocol's signed integer bound.
+        let (n2, scale) = crate::rounding::decimal(self.flow_scaling.n2);
+        let protective_raw =
+            num_bigint::BigInt::from(50u8) * num_bigint::BigInt::from(10u8).pow(scale);
+        if &protective_raw % &n2 != num_bigint::BigInt::from(0u8)
+            || i64::try_from(protective_raw / n2).is_err()
+        {
+            return Err(ConfigError::InvalidField(
+                "FLOW_SCALING.N2 must exactly encode protection 5 within i64",
+            ));
         }
         // Cadences are consumed by the sampler, the telemetry pump and the staleness
         // check; a zero or negative value would spin those loops (#44).
@@ -201,12 +227,56 @@ impl CommConfig {
                 self.performance.heartbeat_timeout,
             ),
         ] {
-            if !v.is_finite() || v <= 0.0 {
+            if !v.is_finite() || !(0.01..=86_400.0).contains(&v) {
                 return Err(ConfigError::NonPositiveInterval(name));
             }
         }
+        if self.performance.experiment_data_interval != self.sampling.interval_s {
+            return Err(ConfigError::SamplingAliasMismatch);
+        }
+        validate_serial("COM_RS485_MFC", &self.mfc)?;
+        validate_serial("COM_RS232_Balance", &self.balance)?;
+        validate_serial(
+            "COM_RS485_TEMP",
+            &SerialParams {
+                port: self.temp.port.clone(),
+                baudrate: self.temp.baudrate,
+                bytesize: self.temp.bytesize,
+                parity: self.temp.parity.clone(),
+                stopbits: self.temp.stopbits,
+                timeout: self.temp.timeout,
+            },
+        )?;
+        // The first release reads exactly registers 0..9 into the nine fixed channels.
+        // Address zero remains accepted for legacy files, pending hardware validation.
+        if self.temp.slave_address > 247 || self.temp.start_reg != 0 || self.temp.reg_count != 9 {
+            return Err(ConfigError::InvalidField(
+                "COM_RS485_TEMP register/address layout",
+            ));
+        }
+        if self.temp.temp_channels != (1..=9).map(|i| format!("T{i}")).collect::<Vec<_>>() {
+            return Err(ConfigError::InvalidField("COM_RS485_TEMP.TEMP_CHANNELS"));
+        }
+        let ports = [&self.mfc.port, &self.temp.port, &self.balance.port].map(|port| {
+            let upper = port.to_ascii_uppercase();
+            if cfg!(windows)
+                || upper.strip_prefix("COM").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                })
+            {
+                upper
+            } else {
+                port.clone()
+            }
+        });
+        if ports[0] == ports[1] || ports[0] == ports[2] || ports[1] == ports[2] {
+            return Err(ConfigError::InvalidField("serial ports must be distinct"));
+        }
         let a = &self.slave_address_mfc;
         let addrs = [a.h2, a.n2, a.co2, a.co];
+        if addrs.iter().any(|a| !(1..=99).contains(a)) {
+            return Err(ConfigError::InvalidField("SLAVE_ADDRESS_MFC (1..99)"));
+        }
         for i in 0..addrs.len() {
             for j in i + 1..addrs.len() {
                 if addrs[i] == addrs[j] {
@@ -216,6 +286,22 @@ impl CommConfig {
         }
         Ok(())
     }
+}
+
+fn validate_serial(name: &'static str, serial: &SerialParams) -> Result<(), ConfigError> {
+    if serial.port.trim() != serial.port
+        || serial.port.len() > 512
+        || serial.port.chars().any(char::is_control)
+        || serial.baudrate == 0
+        || !(5..=8).contains(&serial.bytesize)
+        || !matches!(serial.parity.as_str(), "N" | "E" | "O")
+        || !matches!(serial.stopbits, 1 | 2)
+        || !serial.timeout.is_finite()
+        || !(0.001..=60.0).contains(&serial.timeout)
+    {
+        return Err(ConfigError::InvalidField(name));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -61,6 +61,14 @@ describe("AuthGate (#45)", () => {
     expect(screen.queryByText("受保护的控制台")).toBeNull();
   });
 
+  it("shows startup configuration failures instead of staying on a loading screen", async () => {
+    getAuthState.mockRejectedValue(new Error("通讯配置不可用：/profile/config/comm_config.json"));
+    await act(async () => { render(<AuthGate><div>受保护的控制台</div></AuthGate>); });
+    expect(screen.getByText("应用载入失败")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("通讯配置不可用");
+    expect(screen.queryByText("受保护的控制台")).toBeNull();
+  });
+
   it("shows the login form to an anonymous session", async () => {
     await renderGate(snapshot("ANONYMOUS"));
     expect(screen.getByText("用户登录")).toBeTruthy();

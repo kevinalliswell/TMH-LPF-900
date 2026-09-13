@@ -3,6 +3,7 @@ import { analyzeGb13240, analyzeGb13241, analyzeGb13242 } from "../../ipc";
 import type { ExperimentDetail } from "../../ipc/types";
 import { toastError, useToasts } from "../../stores/toast";
 import { SectionTitle } from "../../components/Page";
+import { AnalysisSampleEvidence } from "./AnalysisSampleEvidence";
 
 function fmt(v: unknown, digits = 2): string {
   return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
@@ -89,6 +90,7 @@ function ResultBlock({ analysis }: { analysis: Record<string, unknown> }) {
         单次试验计算；最终结果仍需过程、外部步骤及重复性验收。
       </p>
       {!analysis.calculation_version && <p>旧版本计算结果须复核后重算。</p>}
+      <AnalysisSampleEvidence analysis={analysis} />
       {analysis.external_conditions_met === false && (
         <p>转鼓或筛分记录偏离标准条件。</p>
       )}

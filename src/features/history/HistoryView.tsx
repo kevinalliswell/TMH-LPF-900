@@ -1,5 +1,5 @@
 import { ReportDetailsPanel } from "./ReportDetailsPanel";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteExperiment,
   EXPERIMENT_MODES,
@@ -20,6 +20,7 @@ import { ProgramPreview } from "../experiment/ProgramPreview";
 import { AnalyzePanel } from "./AnalyzePanel";
 import { HistoryChart } from "./HistoryChart";
 import { useAuth } from "../../stores/auth";
+import { useExperiment } from "../../stores/experiment";
 
 const modeName = (id?: string | null) =>
   EXPERIMENT_MODES.find((m) => m.id === id)?.name ?? id ?? "—";
@@ -46,41 +47,53 @@ export function HistoryView() {
   const [selId, setSelId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ExperimentDetail | null>(null);
   const [samples, setSamples] = useState<SampleDto[]>([]);
-  const [confirmDel, setConfirmDel] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<{id: string; name: string} | null>(null);
   const [busy, setBusy] = useState(false);
   const [users, setUsers] = useState<PublicUser[]>([]);
   const push = useToasts((s) => s.push);
   const isAdmin = useAuth((s) => s.snapshot?.user?.role === "ADMIN");
+  const running = useExperiment((s) => s.state.running);
+  const persistencePending = useExperiment((s) => s.state.persistence_pending);
+  const detailRequest = useRef(0);
+  const selectedDetailId = useRef<string | null>(null);
 
   useEffect(() => {
     if (isAdmin) void listUsers().then(setUsers).catch(toastError);
   }, [isAdmin]);
 
   useEffect(() => {
+    let cancelled = false;
     listExperiments()
       .then((l) => {
+        if (cancelled) return;
         setList(l);
         setSelId((cur) => cur ?? l[0]?.experiment_id ?? null);
       })
-      .catch(toastError);
-  }, []);
+      .catch((error) => { if (!cancelled) toastError(error); });
+    return () => { cancelled = true; };
+  }, [running, persistencePending]);
 
   const loadDetail = useCallback((id: string) => {
+    if (id !== selectedDetailId.current) return;
+    const request = ++detailRequest.current;
     Promise.all([getExperimentDetail(id), getExperimentSamples(id, 1500)])
       .then(([d, s]) => {
+        if (request !== detailRequest.current || id !== selectedDetailId.current) return;
         setDetail(d);
         setSamples(s);
       })
-      .catch(toastError);
+      .catch((error) => { if (request === detailRequest.current) toastError(error); });
   }, []);
 
   useEffect(() => {
+    selectedDetailId.current = selId;
     if (selId) loadDetail(selId);
     else {
       setDetail(null);
       setSamples([]);
     }
-  }, [selId, loadDetail]);
+    return () => { selectedDetailId.current = null; detailRequest.current++; };
+  }, [selId, loadDetail, running, persistencePending]);
 
   const refreshList = useCallback(
     () =>
@@ -91,17 +104,21 @@ export function HistoryView() {
   );
 
   const doDelete = async () => {
-    if (!selId) return;
+    if (!confirmDel || busy) return;
+    const deletedId = confirmDel.id;
+    setBusy(true);
     try {
-      await deleteExperiment(selId);
+      await deleteExperiment(deletedId);
       push("实验已删除", "warn");
       const l = await listExperiments();
       setList(l);
-      setSelId(l[0]?.experiment_id ?? null);
+      setSelId((current) => current !== deletedId && l.some((item) => item.experiment_id === current)
+        ? current : l[0]?.experiment_id ?? null);
     } catch (e) {
       toastError(e);
     } finally {
-      setConfirmDel(false);
+      setConfirmDel(null);
+      setBusy(false);
     }
   };
 
@@ -170,13 +187,13 @@ export function HistoryView() {
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto p-4">
-        {detail ? (
+        {detail && detail.experiment_id === selId ? (
           <div className="flex flex-col gap-4">
             <div className="panel p-4">
               <div className="flex items-start justify-between">
                 <div className="text-[15px] font-semibold">{detail.sample_name}</div>
                 {isAdmin && <button
-                  onClick={() => setConfirmDel(true)}
+                  onClick={() => setConfirmDel({id: detail.experiment_id, name: detail.sample_name})}
                   className="px-2.5 py-1 rounded text-[12px]"
                   style={{ background: "var(--panel-2)", border: "1px solid var(--danger)", color: "var(--danger)" }}
                 >
@@ -258,19 +275,20 @@ export function HistoryView() {
           </div>
         ) : (
           <div className="text-[13px]" style={{ color: "var(--fg-faint)" }}>
-            选择左侧一条实验查看详情
+            {selId ? "正在读取实验详情…" : "选择左侧一条实验查看详情"}
           </div>
         )}
       </div>
 
-      {confirmDel && detail && (
-        <Modal title="删除实验" onClose={() => setConfirmDel(false)}>
+      {confirmDel && (
+        <Modal title="删除实验" onClose={() => { if (!busy) setConfirmDel(null); }}>
           <div className="text-[13px] mb-4" style={{ color: "var(--fg-dim)" }}>
-            确认删除实验「{detail.sample_name}」及其全部采样数据?此操作不可撤销。
+            确认删除实验「{confirmDel.name}」及其全部采样数据?此操作不可撤销。
           </div>
           <div className="flex justify-end gap-2">
             <button
-              onClick={() => setConfirmDel(false)}
+              disabled={busy}
+              onClick={() => setConfirmDel(null)}
               className="px-3 py-1.5 rounded text-[13px]"
               style={{ background: "var(--panel-2)", border: "1px solid var(--border-bright)", color: "var(--fg)" }}
             >
@@ -278,6 +296,7 @@ export function HistoryView() {
             </button>
             <button
               onClick={doDelete}
+              disabled={busy}
               className="px-3 py-1.5 rounded text-[13px]"
               style={{ background: "var(--danger)", color: "#fff" }}
             >

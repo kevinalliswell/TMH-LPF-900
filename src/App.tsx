@@ -85,8 +85,9 @@ function AuthenticatedApp() {
   const visibleNav = NAV.filter(
     (item) => item.view !== "users" || auth?.user?.role === "ADMIN",
   );
-  const title = visibleNav.find((n) => n.view === view)?.label ?? "";
-  const ViewComponent = VIEWS[view];
+  const effectiveView = visibleNav.some((item) => item.view === view) ? view : "control";
+  const title = visibleNav.find((n) => n.view === effectiveView)?.label ?? "";
+  const ViewComponent = VIEWS[effectiveView];
 
   return (
     <div className="flex h-full w-full">
@@ -105,7 +106,7 @@ function AuthenticatedApp() {
         </div>
         <ul className="py-2 text-[13px]">
           {visibleNav.map((n) => {
-            const active = n.view === view;
+            const active = n.view === effectiveView;
             return (
               <li key={n.view}>
                 <button

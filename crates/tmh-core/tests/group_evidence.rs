@@ -102,3 +102,35 @@ fn later_snapshot_reuses_original_members_even_if_the_caller_reloads_new_evidenc
     );
     assert_eq!(second.evaluation.reported["RI"].as_deref(), Some("42.0"));
 }
+
+#[test]
+fn group_report_displays_frozen_analysis_counts_and_marks_legacy_counts_unknown() {
+    let mut first = trial("a", 1);
+    let mut analysis: serde_json::Value =
+        serde_json::from_str(first.experiment.analysis_results_json.as_ref().unwrap()).unwrap();
+    analysis["sample_evidence"] = json!({
+        "version":"REDUCTION-SAMPLES-2026-09-13.1","scope":"stored_reduction_rows",
+        "total_sample_count":5,"reduction_sample_count":4,"valid_sample_count":4,
+        "excluded_offline_rows":0,"excluded_other_quality_rows":0,"excluded_time_rows":0,
+        "excluded_value_rows":0,"non_reduction_rows":1,"valid_baseline_count":1
+    });
+    first.experiment.analysis_results_json = Some(analysis.to_string());
+    let snapshot = build_snapshot(
+        &request(),
+        None,
+        vec![first, trial("bad", 2), trial("b", 3)],
+        "Alice",
+    )
+    .unwrap();
+    let record = TestGroupRevision {
+        group_id: "group-counts".into(),
+        revision: 1,
+        owner_user_id: "alice".into(),
+        recorded_by_user_id: "alice".into(),
+        created_at: "2026-09-13".into(),
+        snapshot: serde_json::to_value(&snapshot).unwrap(),
+    };
+    let html = group_report::render(&record).unwrap();
+    assert!(html.contains("<th>还原曲线可用称量点</th><td>4</td>"));
+    assert!(html.contains("采样筛选统计：未记录"));
+}

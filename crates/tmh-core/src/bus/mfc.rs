@@ -6,6 +6,7 @@ use crate::clamp::{clamp_setpoint, ClampResult, Gas};
 use crate::config::CommConfig;
 use crate::health::{Health, ReadFreshness};
 use crate::transport::{BusError, Transport};
+use num_bigint::BigInt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tmh_protocols::cpl;
@@ -56,6 +57,10 @@ pub enum MfcCommandError {
     InvalidGas(usize),
     #[error("safety interlock is latched; acknowledge safe state before resuming")]
     SafetyLatched,
+    #[error("gas channel {0} has no acknowledged nonzero setpoint to restore")]
+    NoRestorableSetpoint(usize),
+    #[error("MFC setpoint is not representable in wire units")]
+    UnrepresentableSetpoint,
     #[error("command queue is full")]
     QueueFull,
     #[error(transparent)]
@@ -102,6 +107,9 @@ pub struct MfcActor {
     limit_h2: f64,
     limit_co: f64,
     gas: [GasReading; 4],
+    /// Last positive wire setpoint acknowledged in this actor's lifetime. OFF does
+    /// not erase it; failed writes and zero-only startup never establish it.
+    restorable_flow: [Option<f64>; 4],
     poll_cursor: usize,
     pub health: Health,
     freshness: [ReadFreshness; 4],
@@ -114,6 +122,53 @@ fn gas_enum(idx: usize) -> Gas {
         2 => Gas::Co2,
         _ => Gas::Co,
     }
+}
+
+/// Quantize shortest decimal inputs, using the protocol's nearest integer rule.
+/// This is separate from GB/T result rounding: ties here round up for positive flow.
+/// The safety cap is floored in wire units so rounding cannot exceed it.
+fn wire_setpoint(
+    value: f64,
+    scaling: f64,
+    limit: f64,
+) -> Result<(i64, f64, bool), MfcCommandError> {
+    // Zero shutoff must remain possible even if an actor received invalid scaling.
+    if value == 0.0 {
+        return Ok((0, 0.0, false));
+    }
+    let invalid = || MfcCommandError::UnrepresentableSetpoint;
+    if !value.is_finite() || value < 0.0 || !scaling.is_finite() || scaling <= 0.0 {
+        return Err(invalid());
+    }
+    let (v, vs) = crate::rounding::decimal(value);
+    let (s, ss) = crate::rounding::decimal(scaling);
+    let factor = BigInt::from(10u8).pow(ss + 1);
+    let numerator = v * &factor;
+    let denominator = &s * BigInt::from(10u8).pow(vs);
+    let mut raw = &numerator / &denominator;
+    if (&numerator % &denominator) * 2u8 >= denominator {
+        raw += 1u8;
+    }
+    let mut capped = false;
+    if limit.is_finite() {
+        if limit < 0.0 {
+            return Err(invalid());
+        }
+        let (l, ls) = crate::rounding::decimal(limit);
+        let cap = l * factor / (&s * BigInt::from(10u8).pow(ls));
+        if raw > cap {
+            raw = cap;
+            capped = true;
+        }
+    }
+    let raw = i64::try_from(raw).map_err(|_| invalid())?;
+    let applied = format!("{}e-{}", s * raw, ss + 1)
+        .parse::<f64>()
+        .map_err(|_| invalid())?;
+    if !applied.is_finite() {
+        return Err(invalid());
+    }
+    Ok((raw, applied, capped))
 }
 
 impl MfcActor {
@@ -136,6 +191,7 @@ impl MfcActor {
                 sv: 0.0,
                 on: false,
             }; 4],
+            restorable_flow: [None; 4],
             poll_cursor: 0,
             health: Health::new(),
             freshness: [ReadFreshness::default(); 4],
@@ -198,8 +254,11 @@ impl MfcActor {
         if gas_idx >= self.gas.len() {
             return Err(MfcCommandError::InvalidGas(gas_idx));
         }
-        let clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
-        let raw = (clamp.applied / self.scaling[gas_idx] * 10.0).round() as i64;
+        let mut clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
+        let (raw, applied, capped) =
+            wire_setpoint(clamp.applied, self.scaling[gas_idx], clamp.limit)?;
+        clamp.applied = applied;
+        clamp.clamped |= capped;
         let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
         let response = match self
             .transport
@@ -226,25 +285,37 @@ impl MfcActor {
         self.health.on_success(Instant::now());
         self.gas[gas_idx].sv = clamp.applied;
         self.gas[gas_idx].on = clamp.applied > 0.0;
+        if clamp.applied > 0.0 {
+            self.restorable_flow[gas_idx] = Some(clamp.applied);
+        }
         Ok(clamp)
     }
 
-    /// Handle one HIGH-priority command; returns the clamp result for `SetFlow`.
+    /// ON resumes only an acknowledged positive setpoint. It remains an ordinary
+    /// clamped write, so neither restore memory nor an ON request bypasses protection.
+    pub fn set_on_off(&mut self, gas: usize, on: bool) -> Result<ClampResult, MfcCommandError> {
+        if gas >= self.gas.len() {
+            return Err(MfcCommandError::InvalidGas(gas));
+        }
+        let target = if on {
+            if self.safety.is_latched() {
+                return Err(MfcCommandError::SafetyLatched);
+            }
+            self.restorable_flow[gas].ok_or(MfcCommandError::NoRestorableSetpoint(gas))?
+        } else {
+            0.0
+        };
+        self.set_flow(gas, target)
+    }
+
+    /// Handle one HIGH-priority command; flow and ON/OFF return their applied value.
     pub fn handle_command(
         &mut self,
         cmd: &MfcCommand,
     ) -> Result<Option<ClampResult>, MfcCommandError> {
         match cmd {
             MfcCommand::SetFlow { gas, value } => self.set_flow(*gas, *value).map(Some),
-            MfcCommand::SetOnOff { gas, on } => {
-                // Bounds-guard the untrusted index (see `set_flow`): out of range -> error.
-                let target = if *on {
-                    self.gas.get(*gas).map(|g| g.sv.max(0.0)).unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                self.set_flow(*gas, target).map(|_| None)
-            }
+            MfcCommand::SetOnOff { gas, on } => self.set_on_off(*gas, *on).map(Some),
             MfcCommand::ShutoffFlammable => {
                 self.safety.trip();
                 self.apply_protection().map(|_| None)
