@@ -59,6 +59,8 @@ pub enum MfcCommandError {
     SafetyLatched,
     #[error("gas channel {0} has no acknowledged nonzero setpoint to restore")]
     NoRestorableSetpoint(usize),
+    #[error("MFC setpoint is not representable in wire units")]
+    UnrepresentableSetpoint,
     #[error("command queue is full")]
     QueueFull,
     #[error(transparent)]
@@ -125,12 +127,16 @@ fn gas_enum(idx: usize) -> Gas {
 /// Quantize shortest decimal inputs, using the protocol's nearest integer rule.
 /// This is separate from GB/T result rounding: ties here round up for positive flow.
 /// The safety cap is floored in wire units so rounding cannot exceed it.
-fn wire_setpoint(value: f64, scaling: f64, limit: f64) -> Result<(i64, f64, bool), BusError> {
+fn wire_setpoint(
+    value: f64,
+    scaling: f64,
+    limit: f64,
+) -> Result<(i64, f64, bool), MfcCommandError> {
     // Zero shutoff must remain possible even if an actor received invalid scaling.
     if value == 0.0 {
         return Ok((0, 0.0, false));
     }
-    let invalid = || BusError::Io("MFC setpoint is not representable in wire units".into());
+    let invalid = || MfcCommandError::UnrepresentableSetpoint;
     if !value.is_finite() || value < 0.0 || !scaling.is_finite() || scaling <= 0.0 {
         return Err(invalid());
     }

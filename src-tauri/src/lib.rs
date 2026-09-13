@@ -1845,7 +1845,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
                     serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
                 ),
             );
-            return Err("DEVICE_OFFLINE".into());
+            return Err(gas_command_error(error));
         }
     };
     st.audit.write(
@@ -1872,6 +1872,9 @@ async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), Stri
 fn gas_command_error(error: MfcCommandError) -> String {
     match error {
         MfcCommandError::NoRestorableSetpoint(_) => "该通道没有可恢复流量，请先设定".into(),
+        MfcCommandError::UnrepresentableSetpoint => {
+            "流量超出通讯协议可表示范围，请修改设定值".into()
+        }
         MfcCommandError::SafetyLatched => "保护已锁存，请先确认保护状态并复位".into(),
         MfcCommandError::InvalidGas(_) => "无效的气体通道".into(),
         MfcCommandError::QueueFull => "气体命令队列已满，请稍后重试".into(),
@@ -3672,6 +3675,10 @@ mod tests {
         login(&state, "admin", "admin-password");
         let result = tauri::async_runtime::block_on(switch_gas(&state, 0, true));
         assert!(result.unwrap_err().contains("没有可恢复"));
+        let invalid = tauri::async_runtime::block_on(state.hub.request_set_flow(1, 1e308))
+            .unwrap()
+            .unwrap_err();
+        assert!(gas_command_error(invalid).contains("超出通讯协议"));
         state.auth.lock();
         assert_eq!(
             tauri::async_runtime::block_on(set_all_valves(&state, true, "open_all")),

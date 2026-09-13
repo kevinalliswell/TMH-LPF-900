@@ -146,7 +146,13 @@ fn unrepresentable_finite_setpoint_is_rejected_without_blocking_zero_shutoff() {
     // N2 is not safety-clamped. This finite request needs a raw value above i64::MAX.
     let result = mfc.set_flow(1, 1e308);
 
-    assert!(result.is_err(), "unrepresentable flow must be rejected");
+    assert!(
+        matches!(
+            result,
+            Err(tmh_core::bus::MfcCommandError::UnrepresentableSetpoint)
+        ),
+        "invalid input must not masquerade as a transport failure"
+    );
     assert_eq!(
         *frames.lock().unwrap(),
         frames_before,
