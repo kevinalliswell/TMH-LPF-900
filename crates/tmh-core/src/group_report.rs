@@ -168,18 +168,25 @@ pub fn render(record: &TestGroupRevision) -> Result<String, String> {
     }
     let mut process = String::new();
     for trial in &snapshot.trials {
+        let analysis = trial
+            .experiment
+            .analysis_results_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+        let sampling = crate::report::reduction_sample_evidence_html(analysis.as_ref());
         let summary = trial
             .process_assessment
             .as_ref()
             .map(crate::process_evidence::render)
             .unwrap_or_else(|| "<p>此组版本未保存全过程摘要，请查看原始证据。</p>".into());
         process.push_str(&format!(
-            "<details><summary>{}</summary>{}</details>",
+            "<details><summary>{}</summary>{}{}</details>",
             esc(trial
                 .experiment
                 .sample_id
                 .as_deref()
                 .unwrap_or(&trial.experiment.experiment_id)),
+            sampling,
             summary
         ));
     }

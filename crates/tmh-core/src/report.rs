@@ -125,6 +125,39 @@ fn meta_row(label: &str, value: &str) -> String {
     format!("<tr><th>{}</th><td>{}</td></tr>", esc(label), esc(value))
 }
 
+/// Read frozen analysis counts only; report-time rows must not rewrite their meaning.
+pub fn reduction_sample_evidence_html(analysis: Option<&serde_json::Value>) -> String {
+    use crate::gb::{ReductionSampleEvidence, REDUCTION_SAMPLE_EVIDENCE_VERSION};
+    let Some(analysis) = analysis.filter(|a| a["standard"] == "GB/T 13241") else {
+        return String::new();
+    };
+    let evidence = analysis
+        .get("sample_evidence")
+        .and_then(|value| serde_json::from_value::<ReductionSampleEvidence>(value.clone()).ok())
+        .filter(|value| {
+            value.version == REDUCTION_SAMPLE_EVIDENCE_VERSION
+                && value.scope == "stored_reduction_rows"
+        });
+    let Some(e) = evidence else {
+        return "<p>采样筛选统计：未记录</p>".into();
+    };
+    let rows = [
+        ("分析时存储记录", e.total_sample_count),
+        ("还原段记录", e.reduction_sample_count),
+        ("还原曲线可用称量点", e.valid_sample_count),
+        ("天平离线排除", e.excluded_offline_rows),
+        ("其他质量标记排除", e.excluded_other_quality_rows),
+        ("缺少阶段时间排除", e.excluded_time_rows),
+        ("称量值无法计算排除", e.excluded_value_rows),
+        ("非还原段记录", e.non_reduction_rows),
+        ("其中基准称量点", e.valid_baseline_count),
+    ]
+    .into_iter()
+    .map(|(label, value)| meta_row(label, &value.to_string()))
+    .collect::<String>();
+    format!("<h3>采样筛选统计</h3><table class=\"kv\">{rows}</table><p>统计覆盖分析时存储的全部还原段记录（含终点后记录），不代表决定终点或速率的点数。人工补录、插值点和缺测断点不计入采样数量；基准称量是可用点的子集。统计不能推定全过程符合国标。</p>")
+}
+
 /// Format the stored analysis JSON as an HTML block (standard-specific rows).
 fn analysis_html(analysis: Option<&serde_json::Value>) -> String {
     let Some(a) = analysis else {
@@ -180,7 +213,7 @@ fn analysis_html(analysis: Option<&serde_json::Value>) -> String {
     }
     let raw = serde_json::to_string_pretty(a.get("input").unwrap_or(&serde_json::Value::Null))
         .unwrap_or_default();
-    format!("<table class=\"kv\">{rows}</table><p>单次计算结果；最终检验需过程记录、外部步骤与重复性验收。</p><p>计算版本：{}</p><h3>原始分析输入（人工录入）</h3><pre>{}</pre>",esc(a["calculation_version"].as_str().unwrap_or("旧版：待复核")),esc(&raw))
+    format!("<table class=\"kv\">{rows}</table>{}<p>单次计算结果；最终检验需过程记录、外部步骤与重复性验收。</p><p>计算版本：{}</p><h3>原始分析输入（人工录入）</h3><pre>{}</pre>",reduction_sample_evidence_html(Some(a)),esc(a["calculation_version"].as_str().unwrap_or("旧版：待复核")),esc(&raw))
 }
 
 /// Check each measured reduction point against the actual standard method.
@@ -862,5 +895,43 @@ mod tests {
         assert!(html.contains("Tube &lt;removed&gt;"));
         assert!(html.contains("2026-09-08T12:00:00Z"));
         assert!(html.contains("不能替代真实仪器"));
+    }
+
+    #[test]
+    fn analysis_sample_evidence_uses_saved_counts_instead_of_recounting_report_rows() {
+        let analysis = serde_json::json!({
+            "standard":"GB/T 13241", "rt":55.0,
+            "sample_evidence":{
+                "version":"REDUCTION-SAMPLES-2026-09-13.1", "scope":"stored_reduction_rows",
+                "total_sample_count":12,"reduction_sample_count":10,"valid_sample_count":4,
+                "excluded_offline_rows":2,"excluded_other_quality_rows":1,"excluded_time_rows":2,
+                "excluded_value_rows":1,"non_reduction_rows":2,"valid_baseline_count":1
+            }
+        });
+        // Reporting with another row set must still describe the saved analysis.
+        let html = render_report_html(&exp(), &[], Some(&analysis), None);
+        for (label, count) in [
+            ("还原曲线可用称量点", 4),
+            ("天平离线排除", 2),
+            ("其他质量标记排除", 1),
+            ("缺少阶段时间排除", 2),
+            ("称量值无法计算排除", 1),
+            ("非还原段记录", 2),
+            ("其中基准称量点", 1),
+        ] {
+            assert!(
+                html.contains(&format!("<th>{label}</th><td>{count}</td>")),
+                "{label}"
+            );
+        }
+        assert!(html.contains("不代表决定终点或速率的点数"));
+    }
+
+    #[test]
+    fn analysis_sample_evidence_missing_in_legacy_results_is_unknown_not_zero() {
+        let analysis = serde_json::json!({"standard":"GB/T 13241","rt":55.0});
+        let html = render_report_html(&exp(), &[], Some(&analysis), None);
+        assert!(html.contains("采样筛选统计：未记录"));
+        assert!(!html.contains("<th>还原曲线可用称量点</th><td>0</td>"));
     }
 }

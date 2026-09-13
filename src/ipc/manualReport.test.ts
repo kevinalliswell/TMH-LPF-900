@@ -48,4 +48,6 @@ it("calculates manual reduction data, preserves provenance, and exports escaped 
   expect(report).toContain("&lt;script&gt;");
   expect(report).not.toContain("<script>");
   expect(report).toContain("LAB-001");
+  // Browser legacy records have no native stage/quality evidence: unknown is not zero.
+  expect(report).toContain("采样筛选统计：未记录");
 });

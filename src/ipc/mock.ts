@@ -1,4 +1,5 @@
 import { programSnapshotHtml } from "./reportPreview";
+import { SAMPLE_EVIDENCE_NOTE, sampleEvidenceRows } from "./sampleEvidence";
 import {
   programValueErrors,
   customShapeError,
@@ -733,8 +734,12 @@ export function mockReportHtml(id: string): string {
   ]
     .map(([k, v]) => `<tr><th>${esc(k!)}</th><td>${esc(v!)}</td></tr>`)
     .join("");
+  const counts = a?.standard === "GB/T 13241" ? sampleEvidenceRows(a) : null;
+  const sampling = a?.standard !== "GB/T 13241" ? "" : counts
+    ? `<h3>采样筛选统计</h3><table>${counts.map(([label, value]) => `<tr><th>${esc(label)}</th><td>${value}</td></tr>`).join("")}</table><p>${esc(SAMPLE_EVIDENCE_NOTE)}</p>`
+    : "<p>采样筛选统计：未记录</p>";
   const analysis = a
-    ? `<pre>${esc(JSON.stringify(a, null, 2))}</pre>`
+    ? `${sampling}<pre>${esc(JSON.stringify(a, null, 2))}</pre>`
     : '<p style="color:#999">尚未进行结果分析。</p>';
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>检测报告 ${d.experiment_id}</title>\
 <style>body{font-family:'Microsoft YaHei',system-ui,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;color:#1a1a1a}\
