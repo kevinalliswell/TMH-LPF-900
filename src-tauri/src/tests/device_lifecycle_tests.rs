@@ -119,27 +119,34 @@ fn old_reset_ack_does_not_publish_idle_over_a_new_run_or_update() {
     running.experiment_id = Some("new-run".into());
     state.exp.set_status(running);
 
-    assert!(!publish_safety_reset(&state, |_| panic!("stale reset must not emit")));
+    assert!(!publish_safety_reset(&state, |_| panic!(
+        "stale reset must not emit"
+    )));
     let current = state.exp.snapshot();
     assert!(current.running);
     assert_eq!(current.experiment_id.as_deref(), Some("new-run"));
 
     state.exp.set_status(ExperimentStatus::idle());
     let lease = UpdateLease::begin(state.exp.clone()).unwrap();
-    assert!(!publish_safety_reset(&state, |_| panic!("stale reset must not emit")));
+    assert!(!publish_safety_reset(&state, |_| panic!(
+        "stale reset must not emit"
+    )));
     assert!(state.exp.snapshot().updating);
     drop(lease);
 
     lock(&state.exp.recovery_errors).push("new persistence failure".into());
-    assert!(!publish_safety_reset(&state, |_| panic!("stale reset must not emit")));
+    assert!(!publish_safety_reset(&state, |_| panic!(
+        "stale reset must not emit"
+    )));
     assert!(state.exp.persistence_pending());
     lock(&state.exp.recovery_errors).clear();
 
     let _protection = state.hub.request_shutoff_flammable();
     assert!(state.hub.safety_latched());
-    assert!(!publish_safety_reset(&state, |_| panic!("stale reset must not emit")));
+    assert!(!publish_safety_reset(&state, |_| panic!(
+        "stale reset must not emit"
+    )));
 }
-
 
 #[test]
 fn reset_status_event_is_published_before_a_new_lifecycle_can_start() {
@@ -147,7 +154,13 @@ fn reset_status_event_is_published_before_a_new_lifecycle_can_start() {
     let mut held_during_event = false;
     assert!(publish_safety_reset(&state, |status| {
         assert!(!status.running);
-        held_during_event = matches!(state.exp.lifecycle.try_lock(), Err(TryLockError::WouldBlock));
+        held_during_event = matches!(
+            state.exp.lifecycle.try_lock(),
+            Err(TryLockError::WouldBlock)
+        );
     }));
-    assert!(held_during_event, "a new run must not emit Running before the preceding reset emits Idle");
+    assert!(
+        held_during_event,
+        "a new run must not emit Running before the preceding reset emits Idle"
+    );
 }

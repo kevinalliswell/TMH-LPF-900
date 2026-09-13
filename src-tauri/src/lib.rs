@@ -1747,7 +1747,9 @@ async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
-    let st = app.state::<AppState>();
+    let st = app
+        .try_state::<AppState>()
+        .ok_or("设备服务未启动，无法确认保护气氛；请按现场应急规程处置")?;
     // Deliberately callable without a session; still attributed, so the trail shows whether
     // a logged-in operator or someone at a locked screen triggered it (#41).
     let operator = audit_operator(&st);
@@ -3525,7 +3527,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Both restart entry points have already awaited protection under an
+                // update lease. Tauri ignores prevent_exit for this reserved code;
+                // ordinary close checks would therefore only record a false failure.
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    return;
+                }
                 if prepare_exit(app) {
                     api.prevent_exit();
                 }
