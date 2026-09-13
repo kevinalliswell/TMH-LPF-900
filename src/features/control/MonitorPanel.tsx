@@ -1,3 +1,4 @@
+import { formatFlow } from "./formatFlow";
 import { GAS_NAMES } from "../../ipc";
 import { useTelemetry, useTelemetryStale } from "../../stores/telemetry";
 
@@ -94,7 +95,7 @@ export function MonitorPanel() {
                     {g == null ? "—" : g.pv.toFixed(2)}
                   </div>
                   <div className="mono text-[11px]" style={{ color: "var(--fg-faint)" }}>
-                    SV {g == null ? "—" : g.sv.toFixed(1)}
+                    SV {g == null ? "—" : formatFlow(g.sv)}
                   </div>
                 </div>
               );

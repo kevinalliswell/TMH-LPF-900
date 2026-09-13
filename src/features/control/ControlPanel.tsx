@@ -1,3 +1,4 @@
+import { formatFlow } from "./formatFlow";
 import { useEffect, useState } from "react";
 import {
   GAS,
@@ -41,8 +42,8 @@ export function ControlPanel() {
   const doSet = async (g: number) => {
     try {
       const r = await setGasFlow(g, inputs[g] ?? 0);
-      if (r.clamped) flash(`${GAS_NAMES[g]}：已按安全上限 ${r.applied.toFixed(1)} L/min 执行`, true);
-      else flash(`${GAS_NAMES[g]} 设定为 ${r.applied.toFixed(1)} L/min`);
+      if (r.clamped) flash(`${GAS_NAMES[g]}：已按安全上限 ${formatFlow(r.applied)} L/min 执行`, true);
+      else flash(`${GAS_NAMES[g]} 设定为 ${formatFlow(r.applied)} L/min`);
     } catch (e) {
       toastError(e);
     }
@@ -101,7 +102,7 @@ export function ControlPanel() {
                 </span>
                 <input
                   type="number"
-                  step="0.1"
+                  step={limits?.flow_steps?.[g] ?? "any"}
                   min="0"
                   value={inputs[g] ?? 0}
                   onChange={(e) =>
