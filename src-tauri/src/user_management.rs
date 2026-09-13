@@ -39,6 +39,46 @@ fn finish<T>(
     outcome
 }
 
+pub(crate) fn login(
+    state: &AppState,
+    username: String,
+    password: String,
+) -> Result<AuthSnapshot, String> {
+    let storage = lock(&state.storage);
+    let authenticated = state
+        .auth
+        .login(&storage, &username, &password, epoch_now());
+    // Until credentials are verified, the attempted username is the only attribution.
+    // Keep the verified actor even if constructing the final response fails afterward.
+    let operator = authenticated
+        .as_ref()
+        .map_or_else(|_| username.clone(), |user| user.display_name.clone());
+    let outcome = authenticated
+        .and_then(|_| state.auth.snapshot(&storage, epoch_now()))
+        .map_err(auth_error);
+    finish(
+        state,
+        "login",
+        operator,
+        json!({"username": username}),
+        outcome,
+    )
+}
+
+pub(crate) fn change_own_password(
+    state: &AppState,
+    current_password: String,
+    new_password: String,
+) -> Result<(), String> {
+    let storage = lock(&state.storage);
+    let operator = operator_for(state, &storage);
+    let outcome = state
+        .auth
+        .change_own_password(&storage, &current_password, &new_password, epoch_now())
+        .map_err(auth_error);
+    finish(state, "change_password", operator, json!({}), outcome)
+}
+
 pub(crate) fn bootstrap_admin(
     state: &AppState,
     username: String,
@@ -186,13 +226,13 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn fixture() -> AppState {
+    pub(super) fn fixture() -> AppState {
         let state = crate::tests::test_state();
         std::fs::create_dir_all(state.recovery_dir.parent().unwrap().join("logs")).unwrap();
         state
     }
 
-    fn entries(state: &AppState) -> Vec<Value> {
+    pub(super) fn entries(state: &AppState) -> Vec<Value> {
         std::fs::read_dir(state.recovery_dir.parent().unwrap().join("logs"))
             .unwrap()
             .flat_map(|file| {
@@ -223,7 +263,7 @@ mod tests {
         assert!(!text.contains("$argon2"));
     }
 
-    fn admin(state: &AppState) -> PublicUser {
+    pub(super) fn admin(state: &AppState) -> PublicUser {
         bootstrap_admin(
             state,
             "admin".into(),
@@ -434,3 +474,7 @@ mod tests {
         assert!(!text.contains("$argon2"));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/auth_audit_tests.rs"]
+mod auth_audit_tests;

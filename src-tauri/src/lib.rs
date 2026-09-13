@@ -1392,36 +1392,7 @@ fn login(
     username: String,
     password: String,
 ) -> Result<AuthSnapshot, String> {
-    let outcome = state
-        .auth
-        .login(&lock(&state.storage), &username, &password, epoch_now());
-    // A rejected login has no session, so "who tried" — the attempted username — is the
-    // only attribution available. A successful one uses the authenticated display name, so
-    // it matches every other entry in the trail even when the account's display name
-    // differs from its username or the operator typed odd casing. Passwords never appear.
-    let code = outcome.as_ref().err().map(|error| error.as_str());
-    let operator = match outcome.as_ref() {
-        Ok(user) => user.display_name.clone(),
-        Err(_) => username.clone(),
-    };
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "login",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(operator)
-        .detail(serde_json::json!({ "username": username, "code": code })),
-    );
-    outcome.map_err(auth_error)?;
-    state
-        .auth
-        .snapshot(&lock(&state.storage), epoch_now())
-        .map_err(auth_error)
+    user_management::login(&state, username, password)
 }
 
 #[tauri::command]
@@ -1455,26 +1426,7 @@ fn change_own_password(
     current_password: String,
     new_password: String,
 ) -> Result<(), String> {
-    let operator = audit_operator(&state);
-    let outcome = state.auth.change_own_password(
-        &lock(&state.storage),
-        &current_password,
-        &new_password,
-        epoch_now(),
-    );
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Auth,
-            "change_password",
-            if outcome.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Rejected
-            },
-        )
-        .operator(operator),
-    );
-    outcome.map_err(auth_error)
+    user_management::change_own_password(&state, current_password, new_password)
 }
 
 #[tauri::command]

@@ -4380,6 +4380,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "dirs",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

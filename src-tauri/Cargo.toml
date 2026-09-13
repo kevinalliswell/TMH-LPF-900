@@ -32,3 +32,6 @@ tauri-plugin-single-instance = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 tauri-plugin-process = { workspace = true }
+
+[dev-dependencies]
+rusqlite.workspace = true
