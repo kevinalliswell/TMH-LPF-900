@@ -48,7 +48,7 @@ enum MfcReq {
     SetOnOff {
         gas: usize,
         on: bool,
-        reply: oneshot::Sender<Result<(), MfcCommandError>>,
+        reply: oneshot::Sender<Result<ClampResult, MfcCommandError>>,
     },
     SetAtmosphere {
         values: [f64; 4],
@@ -62,13 +62,13 @@ enum MfcReq {
 impl MfcReq {
     fn reject(self, error: MfcCommandError) {
         match self {
-            Self::SetFlow { reply, .. } => {
+            Self::SetFlow { reply, .. } | Self::SetOnOff { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::SetAtmosphere { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            Self::SetOnOff { reply, .. } | Self::Shutoff { reply } | Self::Reset { reply } => {
+            Self::Shutoff { reply } | Self::Reset { reply } => {
                 let _ = reply.send(Err(error));
             }
         }
@@ -104,10 +104,7 @@ fn handle_mfc_req(mfc: &mut MfcActor, req: MfcReq) {
             let _ = reply.send(mfc.set_flow(gas, value));
         }
         MfcReq::SetOnOff { gas, on, reply } => {
-            let result = mfc
-                .handle_command(&MfcCommand::SetOnOff { gas, on })
-                .map(|_| ());
-            let _ = reply.send(result);
+            let _ = reply.send(mfc.set_on_off(gas, on));
         }
         MfcReq::SetAtmosphere { values, reply } => {
             let _ = reply.send(mfc.set_atmosphere(values));
@@ -305,7 +302,7 @@ impl DeviceHub {
         &self,
         gas: usize,
         on: bool,
-    ) -> oneshot::Receiver<Result<(), MfcCommandError>> {
+    ) -> oneshot::Receiver<Result<ClampResult, MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
         self.enqueue(MfcReq::SetOnOff { gas, on, reply });
         rx
@@ -447,6 +444,8 @@ mod tests {
             5.0,
             5.0,
         );
+        actor.set_flow(0, 3.0).unwrap();
+        actor.set_on_off(0, false).unwrap();
         for _ in 0..4 {
             actor.poll_next(Instant::now());
         }
@@ -455,6 +454,7 @@ mod tests {
         let epoch = safety.epoch();
         let (reset_tx, reset_rx) = oneshot::channel();
         let (flow_tx, flow_rx) = oneshot::channel();
+        let (on_tx, on_rx) = oneshot::channel();
         let reset = QueuedMfc {
             epoch,
             req: MfcReq::Reset { reply: reset_tx },
@@ -467,6 +467,14 @@ mod tests {
                 reply: flow_tx,
             },
         };
+        let on = QueuedMfc {
+            epoch,
+            req: MfcReq::SetOnOff {
+                gas: 0,
+                on: true,
+                reply: on_tx,
+            },
+        };
         dispatch_mfc(&mut actor, reset);
         assert!(reset_rx.blocking_recv().unwrap().is_ok());
         dispatch_mfc(&mut actor, flow);
@@ -474,10 +482,16 @@ mod tests {
             flow_rx.blocking_recv().unwrap(),
             Err(MfcCommandError::SafetyLatched)
         );
+        dispatch_mfc(&mut actor, on);
+        assert_eq!(
+            on_rx.blocking_recv().unwrap(),
+            Err(MfcCommandError::SafetyLatched)
+        );
         assert_eq!(actor.snapshot().gas[0].sv, 0.0);
         assert!(
-            actor.set_flow(0, 3.0).is_ok(),
+            actor.set_on_off(0, true).is_ok(),
             "a genuinely new command after acknowledged reset is allowed"
         );
+        assert_eq!(actor.snapshot().gas[0].sv, 3.0);
     }
 }

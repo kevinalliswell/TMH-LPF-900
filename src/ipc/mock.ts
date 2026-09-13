@@ -38,6 +38,8 @@ const H2_ABS = 10;
 const CO_ABS = 10;
 const limits = { h2: 5, co: 5 };
 const sv = [0, 0, 0, 0]; // display L/min per gas [H2, N2, CO2, CO]
+const flowSteps = [0.01, 0.1, 0.01, 0.01];
+const restorableFlow: Array<number | null> = [null, null, null, null];
 let pv = [0, 0, 0, 0];
 let temps = new Array(9).fill(24).map((t, i) => t + i * 0.2);
 let furnaceTarget = 25; // °C the furnace eases toward (idle ambient)
@@ -95,13 +97,34 @@ export function mockSetFlow(gas: number, value: number): ClampResult {
       : gas === 3
         ? Math.min(limits.co, CO_ABS)
         : Infinity;
-  sv[gas] = applied;
+  rememberFlow(gas, applied);
   return { applied, clamped: applied < value, limit };
+}
+
+function rememberFlow(gas: number, applied: number): void {
+  sv[gas] = applied;
+  const step = flowSteps[gas]!;
+  const wireValue = Math.round(applied / step) * step;
+  if (Number.isFinite(wireValue) && wireValue > 0) restorableFlow[gas] = wireValue;
 }
 
 export function mockSetOnOff(gas: number, on: boolean): void {
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
-  if (!on) sv[gas] = 0;
+  const target = on ? restorableFlow[gas] : 0;
+  if (target == null) throw new Error("该通道没有可恢复流量，请先设定");
+  mockSetFlow(gas, target);
+}
+
+export function mockSetAllValves(on: boolean): void {
+  const errors: string[] = [];
+  for (const [gas, name] of ["H₂", "N₂", "CO₂", "CO"].entries()) {
+    try {
+      mockSetOnOff(gas, on);
+    } catch (error) {
+      errors.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (errors.length) throw new Error(`部分通道操作未成功：${errors.join("；")}`);
 }
 
 let safetyLatched = false;
@@ -109,7 +132,7 @@ export function mockShutoff(): void {
   safetyLatched = true;
   if (run) mockStopExperiment();
   sv[0] = 0;
-  sv[1] = 5;
+  rememberFlow(1, 5);
   sv[2] = 0;
   sv[3] = 0;
 }
@@ -173,7 +196,7 @@ function stageReached(s: StageDto, t8: number, elapsedS: number): boolean {
 }
 
 function applyStage(s: StageDto, w0: number): void {
-  s.gas.forEach((v, i) => (sv[i] = clampGas(i, v)));
+  s.gas.forEach((v, i) => rememberFlow(i, clampGas(i, v)));
   furnaceTarget = ["COOLING", "MANUAL"].includes(s.kind) ? 25 : s.target_temp;
   if (s.kind === "REDUCING") weightTarget = w0 * (1 - MOCK_LOSS);
 }
@@ -387,7 +410,7 @@ export function mockStartExperiment(p: ExperimentParams): string {
 export function mockStopExperiment(): void {
   // Safety atmosphere: N2=5, flammables 0.
   sv[0] = 0;
-  sv[1] = 5;
+  rememberFlow(1, 5);
   sv[2] = 0;
   sv[3] = 0;
   furnaceTarget = 25;

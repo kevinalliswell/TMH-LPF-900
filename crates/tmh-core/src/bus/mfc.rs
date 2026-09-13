@@ -56,6 +56,8 @@ pub enum MfcCommandError {
     InvalidGas(usize),
     #[error("safety interlock is latched; acknowledge safe state before resuming")]
     SafetyLatched,
+    #[error("gas channel {0} has no acknowledged nonzero setpoint to restore")]
+    NoRestorableSetpoint(usize),
     #[error("command queue is full")]
     QueueFull,
     #[error(transparent)]
@@ -102,6 +104,9 @@ pub struct MfcActor {
     limit_h2: f64,
     limit_co: f64,
     gas: [GasReading; 4],
+    /// Last positive wire setpoint acknowledged in this actor's lifetime. OFF does
+    /// not erase it; failed writes and zero-only startup never establish it.
+    restorable_flow: [Option<f64>; 4],
     poll_cursor: usize,
     pub health: Health,
     freshness: [ReadFreshness; 4],
@@ -136,6 +141,7 @@ impl MfcActor {
                 sv: 0.0,
                 on: false,
             }; 4],
+            restorable_flow: [None; 4],
             poll_cursor: 0,
             health: Health::new(),
             freshness: [ReadFreshness::default(); 4],
@@ -226,25 +232,38 @@ impl MfcActor {
         self.health.on_success(Instant::now());
         self.gas[gas_idx].sv = clamp.applied;
         self.gas[gas_idx].on = clamp.applied > 0.0;
+        let wire_value = raw as f64 / 10.0 * self.scaling[gas_idx];
+        if wire_value.is_finite() && wire_value > 0.0 {
+            self.restorable_flow[gas_idx] = Some(wire_value);
+        }
         Ok(clamp)
     }
 
-    /// Handle one HIGH-priority command; returns the clamp result for `SetFlow`.
+    /// ON resumes only an acknowledged positive setpoint. It remains an ordinary
+    /// clamped write, so neither restore memory nor an ON request bypasses protection.
+    pub fn set_on_off(&mut self, gas: usize, on: bool) -> Result<ClampResult, MfcCommandError> {
+        if gas >= self.gas.len() {
+            return Err(MfcCommandError::InvalidGas(gas));
+        }
+        let target = if on {
+            if self.safety.is_latched() {
+                return Err(MfcCommandError::SafetyLatched);
+            }
+            self.restorable_flow[gas].ok_or(MfcCommandError::NoRestorableSetpoint(gas))?
+        } else {
+            0.0
+        };
+        self.set_flow(gas, target)
+    }
+
+    /// Handle one HIGH-priority command; flow and ON/OFF return their applied value.
     pub fn handle_command(
         &mut self,
         cmd: &MfcCommand,
     ) -> Result<Option<ClampResult>, MfcCommandError> {
         match cmd {
             MfcCommand::SetFlow { gas, value } => self.set_flow(*gas, *value).map(Some),
-            MfcCommand::SetOnOff { gas, on } => {
-                // Bounds-guard the untrusted index (see `set_flow`): out of range -> error.
-                let target = if *on {
-                    self.gas.get(*gas).map(|g| g.sv.max(0.0)).unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                self.set_flow(*gas, target).map(|_| None)
-            }
+            MfcCommand::SetOnOff { gas, on } => self.set_on_off(*gas, *on).map(Some),
             MfcCommand::ShutoffFlammable => {
                 self.safety.trip();
                 self.apply_protection().map(|_| None)
