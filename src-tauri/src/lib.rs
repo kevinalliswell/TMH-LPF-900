@@ -747,6 +747,20 @@ fn next_deadline(previous: Instant, period: Duration, now: Instant) -> Instant {
     }
 }
 
+/// Decide whether this control tick should capture a sample. Forced boundary
+/// samples also establish the next interval for the new stage.
+fn sample_due(deadline: &mut Instant, period: Duration, now: Instant, forced: bool) -> bool {
+    if !forced && now < *deadline {
+        return false;
+    }
+    *deadline = if forced {
+        now + period
+    } else {
+        next_deadline(*deadline, period, now)
+    };
+    true
+}
+
 /// Publish + emit the current running status.
 #[allow(clippy::too_many_arguments)]
 fn publish_running(
@@ -977,16 +991,10 @@ fn spawn_experiment_task(
         // and stage advancement run at least once a second even when a site configures a
         // slower sampling cadence. A faster configured cadence still samples every tick.
         let control_period = control_period(sample_period);
-        let sample_period_s = sample_period.as_secs_f64();
-        let mut since_sample = f64::INFINITY; // sample on the very first tick
-                                              // Wall-clock driven (#43): the engine is advanced by the time that ACTUALLY
-                                              // passed and the next wake-up is a fixed deadline, not "one second after this
-                                              // tick's work finished". Counting ticks made every hold stage run long by
-                                              // however much the tick's own work (sampling, SQLite, waiting for MFC
-                                              // acknowledgements) cost — for GB/T 13241's 180 min reduction hold that is
-                                              // neither accurate nor reproducible.
+        // Engine time uses the monotonic elapsed time, including work between ticks.
         let mut previous = Instant::now();
         let mut deadline = previous + control_period;
+        let mut sample_deadline = deadline;
 
         loop {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -994,7 +1002,6 @@ fn spawn_experiment_task(
             deadline = next_deadline(deadline, control_period, now);
             let real_dt = now.duration_since(previous).as_secs_f64();
             let dt = real_dt * sim_speed;
-            since_sample += real_dt;
             previous = now;
 
             if exp.stop.load(Ordering::Relaxed) {
@@ -1137,9 +1144,13 @@ fn spawn_experiment_task(
                 }
             };
 
-            if since_sample >= sample_period_s || result.apply_stage.is_some() || result.completed {
+            if sample_due(
+                &mut sample_deadline,
+                sample_period,
+                now,
+                result.apply_stage.is_some() || result.completed,
+            ) {
                 buffer.push(measured);
-                since_sample = 0.0;
                 samples_since_flush += 1;
             }
             if result.apply_stage.is_some() && !exp.stop.load(Ordering::Relaxed) {
@@ -1206,6 +1217,7 @@ fn spawn_experiment_task(
                     engine.confirm_stage_started(switching_s);
                     previous = confirmed_at;
                     deadline = previous + control_period;
+                    sample_deadline = previous + sample_period;
                     if reducing && lock(&storage).patch_runtime_metadata(&id,&serde_json::json!({"reduction_start_s":engine.total_elapsed_s(),"gas_switch_confirmed_at":iso_now(),"gas_switch_delay_s":switching_s}).to_string()).is_err() {
                         exp.stop.store(true,Ordering::SeqCst);continue;
                     }
@@ -4264,6 +4276,72 @@ mod tests {
         assert_eq!(curve.len(), 3);
         assert!(curve[1].1.is_nan());
         assert!(curve[2].1.is_nan());
+    }
+
+    #[test]
+    fn sample_deadlines_preserve_the_ri_endpoint_despite_normal_tick_jitter() {
+        let start = Instant::now();
+        let period = Duration::from_secs(1);
+        let mut deadline = start + period;
+        let mut samples = vec![row("REDUCING", 0, 100.0, false)];
+        samples[0].record_json = Some("{\"stage_elapsed_s\":0}".into());
+        for tick in 1..=60 {
+            // The desktop run alternated slightly early/late durations around a
+            // fixed control deadline. Resetting the sample interval from "now"
+            // skipped alternate rows and broke the 180-minute endpoint bracket.
+            let jitter_ms = if tick % 2 == 0 { 5 } else { 1 };
+            let elapsed = Duration::from_secs(tick) + Duration::from_millis(jitter_ms);
+            if sample_due(&mut deadline, period, start + elapsed, tick == 60) {
+                let mut sample = row("REDUCING", tick * 3, 88.0, false);
+                sample.record_json = Some(
+                    serde_json::json!({"stage_elapsed_s":elapsed.as_secs_f64()*180.0}).to_string(),
+                );
+                samples.push(sample);
+            }
+        }
+        let input = ReductionInput {
+            w1: 10.0,
+            w2: 60.0,
+            manual_m1: None,
+            manual_m180: None,
+            manual_mt: None,
+            manual_rate_points: None,
+            source_record: None,
+        };
+        let curve = reduction_curve(&samples, 100.0, 100.0, &input, 270.0);
+        assert!(
+            value_at(&curve, 180.0).is_some(),
+            "normal scheduling must retain the endpoint bracket"
+        );
+        assert_eq!(
+            samples.len(),
+            61,
+            "every scheduled tick plus the baseline is recorded"
+        );
+    }
+
+    #[test]
+    fn sample_deadlines_capture_boundaries_without_a_catch_up_burst() {
+        let start = Instant::now();
+        let period = Duration::from_secs(5);
+        let mut deadline = start + period;
+        assert!(!sample_due(
+            &mut deadline,
+            period,
+            start + Duration::from_secs(2),
+            false
+        ));
+        assert!(sample_due(
+            &mut deadline,
+            period,
+            start + Duration::from_secs(3),
+            true
+        ));
+        assert_eq!(deadline, start + Duration::from_secs(8));
+        let stalled = start + Duration::from_secs(30);
+        assert!(sample_due(&mut deadline, period, stalled, false));
+        assert_eq!(deadline, stalled + period);
+        assert!(!sample_due(&mut deadline, period, stalled, false));
     }
 
     #[test]
