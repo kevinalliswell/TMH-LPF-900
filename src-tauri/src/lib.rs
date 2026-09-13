@@ -31,7 +31,7 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
 use tmh_core::auth::{hash_password, validate_display_name, warm_password_hashing, UserRole};
-use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, TempActor};
+use tmh_core::bus::{BalanceActor, DeviceHub, HubIntervals, MfcActor, MfcCommandError, TempActor};
 use tmh_core::clamp::ClampResult;
 use tmh_core::config::CommConfig;
 use tmh_core::engine::{
@@ -1866,16 +1866,30 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 
 #[tauri::command]
 async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
+    switch_gas(&app.state::<AppState>(), gas, on).await
+}
+
+fn gas_command_error(error: MfcCommandError) -> String {
+    match error {
+        MfcCommandError::NoRestorableSetpoint(_) => "该通道没有可恢复流量，请先设定".into(),
+        MfcCommandError::SafetyLatched => "保护已锁存，请先确认保护状态并复位".into(),
+        MfcCommandError::InvalidGas(_) => "无效的气体通道".into(),
+        MfcCommandError::QueueFull => "气体命令队列已满，请稍后重试".into(),
+        MfcCommandError::Transport(_) => "设备未确认气体操作，请检查连接和实际流量".into(),
+    }
+}
+
+async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
+    let operator = require_experiment_controller(st)?.display_name;
     if gas >= GAS_COUNT {
         return Err("INVALID_PARAMS".into());
     }
-    let hub = app.state::<AppState>().hub.clone();
+    let hub = st.hub.clone();
     let result = match hub.request_set_on_off(gas, on).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+        Ok(result) => result.map_err(gas_command_error),
+        Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
     };
-    app.state::<AppState>().audit.write(
+    st.audit.write(
         &AuditEntry::new(
             Category::Gas,
             "on_off",
@@ -1886,42 +1900,58 @@ async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), Stri
             },
         )
         .operator(operator)
-        .detail(serde_json::json!({ "gas": gas, "on": on })),
+        .detail(serde_json::json!({
+            "gas": gas, "on": on,
+            "applied": result.as_ref().ok().map(|clamp| clamp.applied),
+            "error": result.as_ref().err()
+        })),
     );
-    result
+    result.map(|_| ())
 }
 
-async fn set_all_valves(
-    app: &AppHandle,
-    on: bool,
-    action: &str,
-    operator: String,
-) -> Result<(), String> {
-    let hub = app.state::<AppState>().hub.clone();
+async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), String> {
+    let operator = require_experiment_controller(st)?.display_name;
+    let hub = st.hub.clone();
     let mut replies = Vec::with_capacity(GAS_COUNT);
     for g in 0..GAS_COUNT {
         replies.push(hub.request_set_on_off(g, on));
     }
-    let mut failed = false;
-    for reply in replies {
-        if !matches!(reply.await, Ok(Ok(()))) {
-            failed = true;
+    let mut channels = Vec::with_capacity(GAS_COUNT);
+    let mut errors = Vec::new();
+    for (gas, reply) in replies.into_iter().enumerate() {
+        let result = match reply.await {
+            Ok(result) => result.map_err(gas_command_error),
+            Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
+        };
+        if let Err(error) = &result {
+            errors.push(format!("{}：{error}", ["H₂", "N₂", "CO₂", "CO"][gas]));
         }
+        channels.push(serde_json::json!({
+            "gas": gas, "on": on,
+            "applied": result.as_ref().ok().map(|clamp| clamp.applied),
+            "error": result.as_ref().err()
+        }));
     }
-    app.state::<AppState>().audit.write(
+    st.audit.write(
         &AuditEntry::new(
             Category::Gas,
             action,
-            if failed {
+            if !errors.is_empty() {
                 AuditResult::Failure
             } else {
                 AuditResult::Success
             },
         )
-        .operator(operator),
+        .operator(operator)
+        .detail(serde_json::json!({"channels": channels})),
     );
-    if failed {
-        Err("DEVICE_OFFLINE".into())
+    if !errors.is_empty() {
+        let status = if errors.len() < GAS_COUNT {
+            "部分通道已执行"
+        } else {
+            "全部通道均未确认成功"
+        };
+        Err(format!("{status}；未成功通道：{}", errors.join("；")))
     } else {
         Ok(())
     }
@@ -1929,14 +1959,12 @@ async fn set_all_valves(
 
 #[tauri::command]
 async fn open_all_valves(app: AppHandle) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    set_all_valves(&app, true, "open_all", operator).await
+    set_all_valves(&app.state::<AppState>(), true, "open_all").await
 }
 
 #[tauri::command]
 async fn close_all_valves(app: AppHandle) -> Result<(), String> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    set_all_valves(&app, false, "close_all", operator).await
+    set_all_valves(&app.state::<AppState>(), false, "close_all").await
 }
 
 #[tauri::command]
@@ -3631,6 +3659,54 @@ mod tests {
             .auth
             .login(&lock(&state.storage), username, password, epoch_now())
             .expect("login");
+    }
+
+    #[test]
+    fn native_gas_switch_rejects_missing_restore_without_claiming_device_offline() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        assert_eq!(
+            tauri::async_runtime::block_on(switch_gas(&state, 0, true)),
+            Err("AUTH_REQUIRED".into())
+        );
+        login(&state, "admin", "admin-password");
+        let result = tauri::async_runtime::block_on(switch_gas(&state, 0, true));
+        assert!(result.unwrap_err().contains("没有可恢复"));
+        state.auth.lock();
+        assert_eq!(
+            tauri::async_runtime::block_on(set_all_valves(&state, true, "open_all")),
+            Err("AUTH_REQUIRED".into())
+        );
+    }
+
+    #[test]
+    fn native_gas_batch_reports_partial_application_and_audits_each_applied_value() {
+        let state = test_state();
+        seed_users_and_experiments(&state);
+        login(&state, "admin", "admin-password");
+        let logs = state.recovery_dir.parent().unwrap().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        tauri::async_runtime::block_on(async {
+            state.hub.request_set_flow(1, 5.0).await.unwrap().unwrap();
+            switch_gas(&state, 1, false).await.unwrap();
+            let failure = set_all_valves(&state, true, "open_all").await.unwrap_err();
+            assert!(failure.contains("部分通道已执行"));
+            assert!(failure.contains("H₂") && failure.contains("CO₂") && failure.contains("CO"));
+        });
+        let text = std::fs::read_to_string(
+            std::fs::read_dir(logs)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(audit["operator"], "管理员");
+        assert_eq!(audit["result"], "FAILURE");
+        assert_eq!(audit["detail"]["channels"][1]["applied"], 5.0);
+        assert!(audit["detail"]["channels"][0]["error"].is_string());
     }
 
     // Paste inside src-tauri/src/lib.rs's existing `tests` module.

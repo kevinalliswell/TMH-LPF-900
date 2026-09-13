@@ -59,6 +59,7 @@ import {
   mockReportHtml,
   mockSetFlow,
   mockSetOnOff,
+  mockSetAllValves,
   mockShutoff,
   mockResetSafety,
   mockSkipStage,
@@ -266,14 +267,12 @@ export async function setGasOnOff(gas: number, on: boolean): Promise<void> {
 }
 
 export async function openAllValves(): Promise<void> {
-  if (!isTauri())
-    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, true));
+  if (!isTauri()) return mockSetAllValves(true);
   await invoke("open_all_valves");
 }
 
 export async function closeAllValves(): Promise<void> {
-  if (!isTauri())
-    return void [0, 1, 2, 3].forEach((g) => mockSetOnOff(g, false));
+  if (!isTauri()) return mockSetAllValves(false);
   await invoke("close_all_valves");
 }
 
