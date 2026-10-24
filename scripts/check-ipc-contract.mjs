@@ -73,7 +73,11 @@ function parseRustCommands(source) {
     if (!found || found.index > attribute.lastIndex + 40) {
       throw new Error(`no fn found after ${match[0]}`);
     }
-    const [inner] = readGroup(source, signature.lastIndex - 1);
+    const [inner, afterParams] = readGroup(source, signature.lastIndex - 1);
+    const returnType = source.slice(afterParams, source.indexOf("{", afterParams)).trim();
+    if (returnType.includes("Result<") && !returnType.startsWith("-> CommandResult<")) {
+      throw new Error(`${found[1]}: fallible commands must return CommandResult<T>`);
+    }
     const params = splitTopLevel(inner)
       .map((param) => {
         const colon = param.indexOf(":");

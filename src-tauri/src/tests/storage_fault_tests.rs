@@ -305,12 +305,12 @@ fn samples_command_parses_snake_case_limit_and_enforces_access_through_real_ipc(
     );
     login(&state, "bob", "temp-password");
     assert_eq!(
-        invoke(json!({"id": "exp-alice", "max_points": 4})).unwrap_err(),
+        invoke(json!({"id": "exp-alice", "max_points": 4})).unwrap_err()["code"],
         json!("FORBIDDEN")
     );
     state.auth.logout();
     assert_eq!(
-        invoke(json!({"id": "exp-alice", "max_points": 4})).unwrap_err(),
+        invoke(json!({"id": "exp-alice", "max_points": 4})).unwrap_err()["code"],
         json!("AUTH_REQUIRED")
     );
 }
