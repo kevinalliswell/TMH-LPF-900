@@ -180,7 +180,7 @@ export function ModeView() {
       .catch(() => setLimitsFailed(true));
     getRuntimeMode()
       .then(setRuntimeMode)
-      .catch(() => setRuntimeMode("mock"));
+      .catch(() => setRuntimeMode("unknown"));
   }, []);
 
   const selected = useMemo(
@@ -206,7 +206,7 @@ export function ModeView() {
     !!active &&
     (!selected ||
       JSON.stringify(active) !== JSON.stringify(cloneProgram(selected)));
-  const canSimulate = runtimeMode !== "real";
+  const canSimulate = runtimeMode === "mock" || runtimeMode === "web";
 
   const selectProgram = (program: ProgramDto) => {
     setSelectedId(program.id);

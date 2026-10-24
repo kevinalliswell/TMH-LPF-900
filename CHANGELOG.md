@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- 启动模式严格解析，unsupported real/replay 与路径/配置失败进入明确错误页；requested/effective 模式 DTO 与未确认水印避免前端自行退回 mock（#19/#79）。
+
 - 统一可失败命令的结构化错误 DTO，保留权限/预检/分析错误码；前端统一读取并增加真实 IPC 拒绝不改数据的回归（#21/#82/#83）。
 
 - 还原分析保存有效称量、天平离线、其他质量、时间和数值排除计数；单次及组报告读取冻结统计，旧记录显示未记录，人工补录不冒充自动采样。

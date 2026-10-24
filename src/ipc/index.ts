@@ -251,17 +251,21 @@ export async function setExperimentOwner(
   });
 }
 
-export type RuntimeMode = "real" | "mock" | "replay" | "web";
+export type RuntimeMode = "real" | "mock" | "replay" | "web" | "unknown";
+export interface RuntimeModeStatus {
+  requested_mode: "real" | "mock" | "replay";
+  effective_mode: "real" | "mock" | "replay";
+}
 
-/** True runtime mode. In Tauri this asks the backend (TMH_DEVICE_MODE = real|mock|replay)
- *  so real hardware is never mislabelled as a simulation; a plain browser is always "web". */
+/** A failed query never establishes a mode. Only a confirmed effective mode is displayed. */
 export async function getRuntimeMode(): Promise<RuntimeMode> {
   if (!isTauri()) return "web";
-  try {
-    return await invoke<RuntimeMode>("get_runtime_mode");
-  } catch {
-    return "mock";
+  const status = await invoke<RuntimeModeStatus>("get_runtime_mode");
+  if (!status || !["real", "mock", "replay"].includes(status.effective_mode) ||
+      !["real", "mock", "replay"].includes(status.requested_mode)) {
+    throw new Error("运行模式响应无效，请检查应用版本");
   }
+  return status.effective_mode;
 }
 
 export async function getGasSafetyLimits(): Promise<GasLimits> {

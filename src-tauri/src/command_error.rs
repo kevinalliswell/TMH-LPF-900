@@ -3,7 +3,7 @@ use serde::Serialize;
 
 pub(crate) type CommandResult<T> = Result<T, CommandError>;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct CommandError {
     pub code: String,
     pub message_zh: String,
