@@ -15,7 +15,9 @@
     "tauri": "tauri",
     "sync-version": "node scripts/sync-version.mjs",
     "check:tauri-security": "node scripts/check-tauri-security.mjs",
-    "check:ipc-contract": "node scripts/check-ipc-contract.mjs"
+    "check:ipc-contract": "node scripts/check-ipc-contract.mjs",
+    "test:scripts": "node --test scripts/*.test.mjs",
+    "verify:context": "node scripts/verification-context.mjs"
   },
   "dependencies": {
     "echarts": "^6.1.0",

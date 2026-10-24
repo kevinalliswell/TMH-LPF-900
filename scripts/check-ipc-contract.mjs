@@ -10,6 +10,8 @@
 // `src/ipc/index.ts` actually sends.
 
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RUST = "src-tauri/src/lib.rs";
 const TS = "src/ipc/index.ts";
@@ -127,12 +129,13 @@ function parseInvocations(source) {
   return calls;
 }
 
-const [rust, ts] = await Promise.all([readFile(RUST, "utf8"), readFile(TS, "utf8")]);
+export function checkIpcContract(rust, ts) {
 const commands = parseRustCommands(rust);
 const registered = parseRegisteredHandlers(rust);
 const calls = parseInvocations(ts);
 
 const errors = [];
+const notes = [];
 
 for (const name of registered) {
   if (!commands.has(name)) errors.push(`${name}: registered in generate_handler! but has no #[tauri::command] fn`);
@@ -166,17 +169,20 @@ for (const { name, keys, hasPayload } of calls) {
 
 for (const name of registered) {
   if (!invoked.has(name)) {
-    console.warn(`note: command ${name} is registered but never invoked from ${TS}`);
+    notes.push(`command ${name} is registered but never invoked from ${TS}`);
   }
 }
 
-if (errors.length > 0) {
-  for (const error of errors) console.error(`IPC contract error: ${error}`);
-  console.error(
-    `\n${errors.length} mismatch(es). Fix by renaming the frontend key, or by adding` +
-      ` #[tauri::command(rename_all = "snake_case")] to the Rust command.`,
-  );
-  process.exitCode = 1;
-} else {
-  console.log(`IPC contract OK: ${calls.length} invocations across ${commands.size} commands`);
+return { errors, notes, invocations: calls.length, commands: commands.size };
+}
+
+async function main() {
+  const [rust, ts] = await Promise.all([readFile(RUST, "utf8"), readFile(TS, "utf8")]);
+  const result = checkIpcContract(rust, ts);
+  for (const note of result.notes) console.warn(`note: ${note}`);
+  if (result.errors.length) throw new Error(result.errors.join("\n"));
+  console.log(`IPC contract OK: ${result.invocations} invocations across ${result.commands} commands`);
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => { console.error(`IPC contract error: ${error.message}`); process.exitCode = 1; });
 }

@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- 为IPC/发布/版本同步脚本补回归；修正预发布后缀残留与缺标记误通过；正式release要求annotated tag、受保护main和同提交成功CI。CI/candidate保留测试日志与环境SHA索引（#23/#82/#85/#89）。
+
 - 启动模式严格解析，unsupported real/replay 与路径/配置失败进入明确错误页；requested/effective 模式 DTO 与未确认水印避免前端自行退回 mock（#19/#79）。
 
 - 统一可失败命令的结构化错误 DTO，保留权限/预检/分析错误码；前端统一读取并增加真实 IPC 拒绝不改数据的回归（#21/#82/#83）。

@@ -19,6 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -56,8 +57,17 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
+      - name: Record verification context
+        run: pnpm verify:context
+
       - name: Frontend typecheck / lint / test
-        run: pnpm typecheck && pnpm lint && pnpm test
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm typecheck
+          pnpm lint
+          pnpm test:scripts 2>&1 | tee verification/script-tests.log
+          pnpm test 2>&1 | tee verification/frontend-tests.log
 
       - name: Frontend build (produces dist/ for tauri context)
         run: pnpm build
@@ -77,7 +87,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked 2>&1 | tee verification/rust-tests.log
 
       - name: Compile serial feature (skeleton, not hardware-tested)
         run: cargo build -p tmh-core --features serial
@@ -86,8 +99,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run -p tmh-core --example soak -- --replay fixtures/dirty-session.jsonl
-          cargo run -p tmh-core --example soak -- --minutes 5
+          cargo run -p tmh-core --example soak -- --replay fixtures/dirty-session.jsonl 2>&1 | tee verification/replay.log
+          cargo run -p tmh-core --example soak -- --minutes 5 2>&1 | tee verification/mock-soak.log
 
       - name: Version consistency
         run: node scripts/sync-version.mjs --check
@@ -107,3 +120,12 @@ jobs:
             fi
           done
           exit $fail
+
+      - name: Preserve verification evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ matrix.os }}-${{ github.run_id }}
+          path: verification/
+          if-no-files-found: warn
+          retention-days: 30

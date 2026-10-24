@@ -8,7 +8,10 @@ jobs:
   verify-version:
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.validation.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,14 +19,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-      - name: Verify tag metadata and main provenance
+      - name: Verify tag metadata and protected main provenance
+        id: validation
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          node scripts/check-release.mjs "${GITHUB_REF_NAME}"
           git fetch origin main
-          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
-            echo "::error::release tag must point at the current main tip"
+          node scripts/check-release.mjs "${GITHUB_REF_NAME}"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq '.protected')" = true || {
+            echo "::error::main must be protected before a formal release"
+            exit 1
+          }
+          test "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --commit "$(git rev-parse HEAD)" --event push --status success --limit 1 --json databaseId --jq length)" = 1 || {
+            echo "::error::main commit must have a successful push CI run before tagging"
             exit 1
           }
 
@@ -82,5 +92,5 @@ jobs:
           releaseName: TMH-LPF-900 ${{ github.ref_name }}
           releaseBody: "See CHANGELOG.md. NSIS offline installer + signed updater artifacts (latest.json). Windows Authenticode signing requires a certificate — see docs/09."
           releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }}
