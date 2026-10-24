@@ -3,7 +3,7 @@
 - [x] 核实 main、全部开放 issue、既有 PR 和实验规范
 - [x] 基线：前端 74 项、Rust 工作区、typecheck/lint/build、IPC/安全/版本通过
 - [x] 第一批：结构化命令错误及真实 IPC 回归，全面测试、开 PR
-- [ ] 第二批：严格启动模式与可定位错误、requested/effective 契约，全面测试、开 PR
+- [x] 第二批：严格启动模式与可定位错误、requested/effective 契约，全面测试、开 PR
 - [ ] 第三批：持续验证/发布门禁与逐项证据索引，全面测试、开 PR
 - [ ] 核对每批远端 CI 和 candidate，记录未通过/未运行原因
 - [ ] 真机协议/接线/抓包与故障注入（外部前置未具备）

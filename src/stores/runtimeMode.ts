@@ -16,6 +16,8 @@ export function useRuntimeMode(): RuntimeMode | null {
     void getRuntimeMode().then((m) => {
       cached = m;
       if (alive) setMode(m);
+    }).catch(() => {
+      if (alive) setMode("unknown");
     });
     return () => {
       alive = false;

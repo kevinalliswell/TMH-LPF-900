@@ -42,7 +42,7 @@ export function StatusBar() {
         </span>
       )}
       <div className="flex-1" />
-      {mode !== null && mode !== "real" && (
+      {mode !== "real" && (
         // Simulation watermark only in non-real modes (docs/07, docs/08 §8.1); real
         // hardware shows no watermark so it is never mislabelled as a simulation (#13).
         <span
@@ -53,7 +53,7 @@ export function StatusBar() {
             border: "1px solid rgba(214,164,25,0.32)",
           }}
         >
-          {mode === "web" ? "浏览器模拟数据" : mode === "replay" ? "回放模式" : "模拟模式"}
+          {mode === "web" ? "浏览器模拟数据" : mode === "replay" ? "回放模式" : mode === "mock" ? "模拟模式" : "运行模式未确认"}
         </span>
       )}
       <span className="mono" style={{ color: "var(--fg-faint)" }}>

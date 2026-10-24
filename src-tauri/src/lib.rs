@@ -18,6 +18,8 @@ mod custom_programs;
 mod groups;
 mod persistence;
 mod procedure;
+mod runtime_mode;
+use runtime_mode::{DeviceMode, RuntimeModeStatus};
 mod user_management;
 use persistence::recover_unfinished;
 #[cfg(test)]
@@ -86,7 +88,7 @@ struct AppState {
     _data_lock: recovery::DataDirectoryLock,
     recovery_dir: PathBuf,
     hub: Arc<DeviceHub>,
-    mode: String,
+    runtime_mode: RuntimeModeStatus,
     limit_h2: f64,
     limit_co: f64,
     flow_steps: [f64; 4],
@@ -473,18 +475,6 @@ fn idle_timeout_s() -> i64 {
         .and_then(|v| v.parse::<i64>().ok())
         .map(|v| v.clamp(60, 8 * 60 * 60))
         .unwrap_or(DEFAULT_IDLE_TIMEOUT_S)
-}
-
-/// Simulated-time acceleration: `TMH_SIM_SPEED` if set, else fast for mock, real (1.0)
-/// for hardware. Mock runs at 180× so a multi-hour program plays out in a few minutes.
-fn validate_runtime_mode(mode: &str) -> Result<(), String> {
-    if mode == "mock" {
-        Ok(())
-    } else {
-        Err(format!(
-            "当前版本仅支持 mock；{mode:?} 尚未接入，拒绝以模拟设备冒充该模式"
-        ))
-    }
 }
 
 fn sim_speed(mode: &str) -> f64 {
@@ -1368,8 +1358,10 @@ struct PublicSafetyStatus {
 #[tauri::command]
 fn get_auth_state(app: AppHandle) -> CommandResult<AuthSnapshot> {
     let state = app.try_state::<AppState>().ok_or_else(|| {
-        app.try_state::<StartupFailure>()
-            .map_or_else(|| "应用尚未初始化".into(), |failure| failure.0.clone())
+        app.try_state::<StartupFailure>().map_or_else(
+            || CommandError::new("STARTUP_NOT_READY", "应用尚未初始化"),
+            |failure| failure.0.clone(),
+        )
     })?;
     let snapshot = state
         .auth
@@ -1532,9 +1524,9 @@ fn get_app_info() -> AppInfo {
 }
 
 #[tauri::command]
-fn get_runtime_mode(state: State<AppState>) -> CommandResult<String> {
+fn get_runtime_mode(state: State<AppState>) -> CommandResult<RuntimeModeStatus> {
     current_user(&state)?;
-    Ok(state.mode.clone())
+    Ok(state.runtime_mode.clone())
 }
 
 #[tauri::command]
@@ -2305,7 +2297,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> CommandResult<S
         .patch_runtime_metadata(
             &id,
             &serde_json::json!({
-                "schema_version":1,"outcome":"running","device_mode":st.mode,"started_at_utc":started_at_utc,
+                "schema_version":1,"outcome":"running","device_mode":st.runtime_mode.effective_mode,"started_at_utc":started_at_utc,
                 "sample_interval_s":st.cadence.sampling.as_secs_f64()*st.sim_speed,
                 "calculation_version":CALCULATION_VERSION,
                 "gas_safety_limits":{"h2":st.limit_h2,"co":st.limit_co,"flow_steps":st.flow_steps}
@@ -3385,15 +3377,21 @@ fn prepare_exit(app: &AppHandle) -> bool {
 }
 
 /// Called only after single-instance plugin initialization.
-struct StartupFailure(String);
+struct StartupFailure(CommandError);
 
-fn initialize_state() -> Result<AppState, String> {
-    let mode = std::env::var("TMH_DEVICE_MODE").unwrap_or_else(|_| "mock".into());
-    if let Err(message) = validate_runtime_mode(&mode) {
-        eprintln!("TMH 启动失败: {message}");
-        std::process::exit(1);
-    }
-    let sim_speed = sim_speed(&mode);
+fn initialize_state() -> CommandResult<AppState> {
+    let raw_mode = match std::env::var("TMH_DEVICE_MODE") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "mock".into(),
+        Err(_) => {
+            return Err(CommandError::new(
+                "INVALID_RUNTIME_MODE",
+                "TMH_DEVICE_MODE 不是有效文本",
+            ))
+        }
+    };
+    let mode = DeviceMode::parse(&raw_mode)?.require_available()?;
+    let sim_speed = sim_speed("mock");
     // Software update checking is OFF by default (docs/09 §9.3); config/env enables it.
     let updater_enabled = build_profile::updater_allowed(matches!(
         std::env::var("TMH_UPDATER").as_deref(),
@@ -3406,23 +3404,54 @@ fn initialize_state() -> Result<AppState, String> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::data_dir().map(|dir| dir.join(build_profile::data_folder())))
-        .expect("无法确定持久数据目录，请设置 TMH_DATA_DIR");
+        .ok_or_else(|| {
+            CommandError::new(
+                "DATA_DIRECTORY_UNAVAILABLE",
+                "无法确定持久数据目录，请设置 TMH_DATA_DIR",
+            )
+        })?;
+    initialize_profile(
+        mode,
+        data_root,
+        std::env::var_os("TMH_COMM_CONFIG").map(PathBuf::from),
+        sim_speed,
+        updater_enabled,
+    )
+}
+
+fn initialize_profile(
+    mode: DeviceMode,
+    data_root: PathBuf,
+    explicit_config: Option<PathBuf>,
+    sim_speed: f64,
+    updater_enabled: bool,
+) -> CommandResult<AppState> {
+    let mode = mode.require_available()?;
     let audit_dir = data_root.join("logs");
-    let data_lock = recovery::DataDirectoryLock::acquire(&data_root).expect("无法独占实验数据目录");
+    let data_lock = recovery::DataDirectoryLock::acquire(&data_root).map_err(|error| {
+        CommandError::new(
+            "DATA_DIRECTORY_LOCKED",
+            format!("无法独占实验数据目录：{error}"),
+        )
+    })?;
     let db_dir = data_root.join("data");
     let exports_dir = data_root.join("exports");
     let recovery_dir = data_root.join("recovery");
     let exp = Arc::new(ExpControl::new());
-    let _ = std::fs::create_dir_all(&audit_dir);
-    let _ = std::fs::create_dir_all(&db_dir);
-    let _ = std::fs::create_dir_all(&exports_dir);
-    // Pay the Argon2 cost once here, before any login can be attempted.
+    for path in [&audit_dir, &db_dir, &exports_dir] {
+        std::fs::create_dir_all(path).map_err(|error| {
+            CommandError::new(
+                "DATA_DIRECTORY_UNAVAILABLE",
+                format!("无法创建数据目录 {}：{error}", path.display()),
+            )
+        })?;
+    }
+    let config = config_commands::open_store(&data_root, explicit_config)
+        .map_err(|message| CommandError::new("CONFIG_INVALID", message))?;
     warm_password_hashing();
-    let mut storage = Storage::open(&db_dir.join("experiments.db")).expect("open experiments db");
-    let config = config_commands::open_store(
-        &data_root,
-        std::env::var_os("TMH_COMM_CONFIG").map(PathBuf::from),
-    )?;
+    let mut storage = Storage::open(&db_dir.join("experiments.db")).map_err(|error| {
+        CommandError::new("STORAGE_ERROR", format!("实验数据库无法打开：{error}"))
+    })?;
     let comm_config = config.snapshot().applied;
     let hub = Arc::new(build_mock_hub(&comm_config));
     let audit = Arc::new(AuditLog::new(audit_dir));
@@ -3438,7 +3467,10 @@ fn initialize_state() -> Result<AppState, String> {
         _data_lock: data_lock,
         recovery_dir,
         hub,
-        mode,
+        runtime_mode: RuntimeModeStatus {
+            requested_mode: mode,
+            effective_mode: mode,
+        },
         limit_h2: comm_config
             .gas_safety_limits
             .h2
@@ -3592,6 +3624,7 @@ mod tests {
     mod command_error_tests;
     mod device_lifecycle_tests;
     mod group_tests;
+    mod startup_tests;
     mod storage_fault_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
@@ -3615,7 +3648,10 @@ mod tests {
             _data_lock: recovery::DataDirectoryLock::acquire(&dir).unwrap(),
             recovery_dir: dir.join("recovery"),
             hub: Arc::new(build_mock_hub(&cfg)),
-            mode: "mock".into(),
+            runtime_mode: RuntimeModeStatus {
+                requested_mode: DeviceMode::Mock,
+                effective_mode: DeviceMode::Mock,
+            },
             limit_h2: cfg.gas_safety_limits.h2,
             limit_co: cfg.gas_safety_limits.co,
             flow_steps: custom_programs::flow_steps(&cfg),
@@ -4273,9 +4309,17 @@ mod tests {
 
     #[test]
     fn unsupported_modes_cannot_label_mock_devices_as_real() {
-        assert!(validate_runtime_mode("mock").is_ok());
+        assert!(DeviceMode::parse("mock")
+            .unwrap()
+            .require_available()
+            .is_ok());
         for mode in ["real", "replay", "", "MOCK", "typo"] {
-            assert!(validate_runtime_mode(mode).is_err(), "{mode}");
+            assert!(
+                DeviceMode::parse(mode)
+                    .and_then(DeviceMode::require_available)
+                    .is_err(),
+                "{mode}"
+            );
         }
     }
 
