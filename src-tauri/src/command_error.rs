@@ -1,0 +1,77 @@
+//! Public command failures. Internal diagnostics are never used as UI control codes.
+use serde::Serialize;
+
+pub(crate) type CommandResult<T> = Result<T, CommandError>;
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CommandError {
+    pub code: String,
+    pub message_zh: String,
+    pub detail: Option<String>,
+}
+
+impl CommandError {
+    pub(crate) fn new(code: impl Into<String>, message_zh: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message_zh: message_zh.into(),
+            detail: None,
+        }
+    }
+}
+
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self::from(message.as_str())
+    }
+}
+
+impl From<&str> for CommandError {
+    fn from(message: &str) -> Self {
+        let translated = match message {
+            "AUTH_REQUIRED" => "请先登录或解锁会话",
+            "AUTH_FAILED" => "用户名或密码错误",
+            "ACCOUNT_LOCKED" => "登录失败次数过多，账户已锁定15分钟",
+            "ACCOUNT_DISABLED" => "账户已停用，请联系管理员",
+            "SESSION_EXPIRED" => "会话已过期，请重新登录",
+            "PASSWORD_CHANGE_REQUIRED" => "请先修改临时密码",
+            "FORBIDDEN" => "当前账户无权执行此操作",
+            "ALREADY_INITIALIZED" => "管理员已初始化，请登录",
+            "USERNAME_EXISTS" => "用户名已存在",
+            "USER_NOT_FOUND" => "用户不存在",
+            "LAST_ADMIN" => "必须保留至少一个可用管理员",
+            "STORAGE_ERROR" => "数据存储失败，请检查磁盘并重试",
+            "INVALID_PARAMS" => "参数校验失败，请核对输入",
+            "DEVICE_OFFLINE" => "设备离线，请检查连接",
+            "EXPERIMENT_RUNNING" => "实验运行中，禁止此操作",
+            "PORT_IN_USE" => "串口被占用，请关闭其他串口程序",
+            // Preserve existing localized diagnostics during the boundary migration.
+            // Callers must use COMMAND_FAILED, never parse these messages for logic.
+            _ => return Self::new("COMMAND_FAILED", message),
+        };
+        Self::new(message, translated)
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message_zh)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_codes_have_localized_messages_without_reflecting_credentials() {
+        for code in ["AUTH_REQUIRED", "AUTH_FAILED", "FORBIDDEN", "STORAGE_ERROR"] {
+            let value = serde_json::to_value(CommandError::from(code)).unwrap();
+            assert_eq!(value["code"], code);
+            assert_ne!(value["message_zh"], code);
+            assert!(value["detail"].is_null());
+        }
+    }
+}

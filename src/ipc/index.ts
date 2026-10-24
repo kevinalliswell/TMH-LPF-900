@@ -2,7 +2,7 @@
 // plain browser it dispatches to the synthetic mock (docs/08). A single `isTauri()`
 // switch keeps the UI identical in both.
 
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ReductionInput,
@@ -73,6 +73,18 @@ import {
 } from "./mock";
 
 export * from "./types";
+export { CommandFailure } from "./errors";
+export type { CommandError } from "./errors";
+import { normalizeCommandError } from "./errors";
+
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args);
+  } catch (cause) {
+    throw normalizeCommandError(cause);
+  }
+}
+
 export * from "./groupTypes";
 export * from "./configTypes";
 import type { CommConfig, ConfigSnapshot } from "./configTypes";

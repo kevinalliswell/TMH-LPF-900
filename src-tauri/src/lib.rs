@@ -11,7 +11,9 @@ use tmh_core::storage::RunCompletion;
 mod auth_service;
 mod auth_session;
 mod build_profile;
+mod command_error;
 mod config_commands;
+use command_error::{CommandError, CommandResult};
 mod custom_programs;
 mod groups;
 mod persistence;
@@ -1280,7 +1282,7 @@ fn spawn_experiment_task<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-fn retry_pending_save(app: AppHandle) -> Result<(), String> {
+fn retry_pending_save(app: AppHandle) -> CommandResult<()> {
     let st = app.state::<AppState>();
     let user = current_user(&st)?;
     if st.exp.is_running() {
@@ -1306,7 +1308,7 @@ fn retry_pending_save(app: AppHandle) -> Result<(), String> {
         .operator(user.display_name),
     );
     emit_experiment_status(&app, &st.exp.snapshot());
-    result
+    result.map_err(CommandError::from)
 }
 
 // ---- DTOs -------------------------------------------------------------------
@@ -1364,7 +1366,7 @@ struct PublicSafetyStatus {
 // ---- Commands ---------------------------------------------------------------
 
 #[tauri::command]
-fn get_auth_state(app: AppHandle) -> Result<AuthSnapshot, String> {
+fn get_auth_state(app: AppHandle) -> CommandResult<AuthSnapshot> {
     let state = app.try_state::<AppState>().ok_or_else(|| {
         app.try_state::<StartupFailure>()
             .map_or_else(|| "应用尚未初始化".into(), |failure| failure.0.clone())
@@ -1373,7 +1375,7 @@ fn get_auth_state(app: AppHandle) -> Result<AuthSnapshot, String> {
         .auth
         .snapshot(&lock(&state.storage), epoch_now())
         .map_err(auth_error);
-    snapshot
+    snapshot.map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1382,8 +1384,9 @@ fn bootstrap_admin(
     username: String,
     display_name: String,
     password: String,
-) -> Result<PublicUser, String> {
+) -> CommandResult<PublicUser> {
     user_management::bootstrap_admin(&state, username, display_name, password)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -1391,8 +1394,8 @@ fn login(
     state: State<AppState>,
     username: String,
     password: String,
-) -> Result<AuthSnapshot, String> {
-    user_management::login(&state, username, password)
+) -> CommandResult<AuthSnapshot> {
+    user_management::login(&state, username, password).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -1416,8 +1419,12 @@ fn lock_session(state: State<AppState>) {
 }
 
 #[tauri::command]
-fn touch_session(state: State<AppState>) -> Result<(), String> {
-    state.auth.touch(epoch_now()).map_err(auth_error)
+fn touch_session(state: State<AppState>) -> CommandResult<()> {
+    state
+        .auth
+        .touch(epoch_now())
+        .map_err(auth_error)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1425,12 +1432,13 @@ fn change_own_password(
     state: State<AppState>,
     current_password: String,
     new_password: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     user_management::change_own_password(&state, current_password, new_password)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-fn list_users(state: State<AppState>) -> Result<Vec<PublicUser>, String> {
+fn list_users(state: State<AppState>) -> CommandResult<Vec<PublicUser>> {
     current_admin(&state)?;
     let users = lock(&state.storage)
         .list_users()
@@ -1445,8 +1453,9 @@ fn create_user(
     display_name: String,
     temporary_password: String,
     role: UserRole,
-) -> Result<PublicUser, String> {
+) -> CommandResult<PublicUser> {
     user_management::create_user(&state, username, display_name, temporary_password, role)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1456,8 +1465,9 @@ fn update_user(
     display_name: String,
     role: UserRole,
     is_active: bool,
-) -> Result<PublicUser, String> {
+) -> CommandResult<PublicUser> {
     user_management::update_user(&state, user_id, display_name, role, is_active)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1465,8 +1475,9 @@ fn reset_user_password(
     state: State<AppState>,
     user_id: String,
     temporary_password: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     user_management::reset_user_password(&state, user_id, temporary_password)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1474,7 +1485,7 @@ fn set_experiment_owner(
     state: State<AppState>,
     experiment_id: String,
     owner_user_id: Option<String>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let actor = current_admin(&state)?;
     if state.exp.snapshot().experiment_id.as_deref() == Some(experiment_id.as_str()) {
         return Err("无法变更正在运行实验的归属".into());
@@ -1490,7 +1501,7 @@ fn set_experiment_owner(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
         if !owner.is_active {
-            return Err(AuthCode::AccountDisabled.to_string());
+            return Err(AuthCode::AccountDisabled.to_string().into());
         }
     }
     storage
@@ -1521,13 +1532,13 @@ fn get_app_info() -> AppInfo {
 }
 
 #[tauri::command]
-fn get_runtime_mode(state: State<AppState>) -> Result<String, String> {
+fn get_runtime_mode(state: State<AppState>) -> CommandResult<String> {
     current_user(&state)?;
     Ok(state.mode.clone())
 }
 
 #[tauri::command]
-fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
+fn get_gas_safety_limits(state: State<AppState>) -> CommandResult<GasLimits> {
     current_user(&state)?;
     Ok(GasLimits {
         h2: state.limit_h2,
@@ -1539,8 +1550,8 @@ fn get_gas_safety_limits(state: State<AppState>) -> Result<GasLimits, String> {
 #[tauri::command]
 fn get_comm_config(
     state: State<AppState>,
-) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
-    config_commands::snapshot(&state)
+) -> CommandResult<tmh_core::config_store::ConfigSnapshot> {
+    config_commands::snapshot(&state).map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1549,12 +1560,12 @@ fn save_comm_config(
     expected_revision: String,
     config: CommConfig,
     reason: String,
-) -> Result<tmh_core::config_store::ConfigSnapshot, String> {
-    config_commands::save(&state, &expected_revision, config, &reason)
+) -> CommandResult<tmh_core::config_store::ConfigSnapshot> {
+    config_commands::save(&state, &expected_revision, config, &reason).map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn restart_for_config(app: AppHandle, expected_revision: String) -> Result<(), String> {
+async fn restart_for_config(app: AppHandle, expected_revision: String) -> CommandResult<()> {
     let state = app.state::<AppState>();
     let lease = config_commands::prepare_restart(&state, &expected_revision).await?;
     emit_experiment_status(&app, &state.exp.snapshot());
@@ -1564,7 +1575,7 @@ async fn restart_for_config(app: AppHandle, expected_revision: String) -> Result
 }
 
 #[tauri::command]
-fn get_runtime_settings(state: State<AppState>) -> Result<RuntimeSettings, String> {
+fn get_runtime_settings(state: State<AppState>) -> CommandResult<RuntimeSettings> {
     current_user(&state)?;
     Ok(RuntimeSettings {
         sampling_interval_s: state.cadence.sampling.as_secs_f64(),
@@ -1575,7 +1586,7 @@ fn get_runtime_settings(state: State<AppState>) -> Result<RuntimeSettings, Strin
 }
 
 #[tauri::command]
-fn get_device_health(state: State<AppState>) -> Result<DeviceHealthDto, String> {
+fn get_device_health(state: State<AppState>) -> CommandResult<DeviceHealthDto> {
     current_user(&state)?;
     let t = state.hub.temp_rx().borrow().clone();
     let m = state.hub.mfc_rx().borrow().clone();
@@ -1681,7 +1692,7 @@ fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) 
 }
 
 #[tauri::command]
-async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
+async fn reset_safety_interlock(app: AppHandle) -> CommandResult<()> {
     let st = app.state::<AppState>();
     let (user, reply) = enqueue_safety_reset(&st)?;
     reply.await?;
@@ -1698,7 +1709,7 @@ async fn reset_safety_interlock(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
+async fn emergency_safe_shutdown(app: AppHandle) -> CommandResult<()> {
     let st = app
         .try_state::<AppState>()
         .ok_or("设备服务未启动，无法确认保护气氛；请按现场应急规程处置")?;
@@ -1725,11 +1736,11 @@ async fn emergency_safe_shutdown(app: AppHandle) -> Result<(), String> {
         .operator(operator)
         .detail(serde_json::json!({ "authenticated": authenticated })),
     );
-    result
+    result.map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampResult, String> {
+async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> CommandResult<ClampResult> {
     let st = app.state::<AppState>();
     let (operator, reply) = enqueue_manual_gas(&st, |hub| {
         if gas >= GAS_COUNT {
@@ -1760,7 +1771,7 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
                     serde_json::json!({ "gas": gas, "requested": value, "error": error.to_string() }),
                 ),
             );
-            return Err(gas_command_error(error));
+            return Err(gas_command_error(error).into());
         }
     };
     st.audit.write(
@@ -1780,8 +1791,10 @@ async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> Result<ClampRes
 }
 
 #[tauri::command]
-async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> Result<(), String> {
-    switch_gas(&app.state::<AppState>(), gas, on).await
+async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> CommandResult<()> {
+    switch_gas(&app.state::<AppState>(), gas, on)
+        .await
+        .map_err(CommandError::from)
 }
 
 fn gas_command_error(error: MfcCommandError) -> String {
@@ -1876,17 +1889,21 @@ async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn open_all_valves(app: AppHandle) -> Result<(), String> {
-    set_all_valves(&app.state::<AppState>(), true, "open_all").await
+async fn open_all_valves(app: AppHandle) -> CommandResult<()> {
+    set_all_valves(&app.state::<AppState>(), true, "open_all")
+        .await
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn close_all_valves(app: AppHandle) -> Result<(), String> {
-    set_all_valves(&app.state::<AppState>(), false, "close_all").await
+async fn close_all_valves(app: AppHandle) -> CommandResult<()> {
+    set_all_valves(&app.state::<AppState>(), false, "close_all")
+        .await
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
+async fn shutoff_flammable_gases(app: AppHandle) -> CommandResult<()> {
     let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
     app.state::<AppState>()
         .exp
@@ -1909,11 +1926,11 @@ async fn shutoff_flammable_gases(app: AppHandle) -> Result<(), String> {
         )
         .operator(operator),
     );
-    result
+    result.map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
+async fn tare_balance(app: AppHandle) -> CommandResult<TareResultDto> {
     let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
     let hub = app.state::<AppState>().hub.clone();
     let r = hub
@@ -1940,7 +1957,7 @@ async fn tare_balance(app: AppHandle) -> Result<TareResultDto, String> {
 }
 
 #[tauri::command]
-fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> Result<(), String> {
+fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> CommandResult<()> {
     let st = app.state::<AppState>();
     current_user(&st)?;
     let temp_rx = st.hub.temp_rx();
@@ -1974,7 +1991,7 @@ fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> R
 
 /// Stop the current telemetry pump thread (issue #8). The frontend calls this on unsubscribe.
 #[tauri::command]
-fn unsubscribe_telemetry(state: State<AppState>) -> Result<(), String> {
+fn unsubscribe_telemetry(state: State<AppState>) -> CommandResult<()> {
     current_user(&state)?;
     state.telemetry_gen.fetch_add(1, Ordering::SeqCst);
     Ok(())
@@ -2047,7 +2064,7 @@ fn next_sample_id(program: &Program, experiment_time: &str, rows: &[ExperimentRo
 // ---- Experiment -------------------------------------------------------------
 
 #[tauri::command]
-fn get_experiment_state(state: State<AppState>) -> Result<ExperimentStatus, String> {
+fn get_experiment_state(state: State<AppState>) -> CommandResult<ExperimentStatus> {
     let user = current_user(&state)?;
     Ok(redact_experiment_status(
         state.exp.snapshot(),
@@ -2187,7 +2204,7 @@ fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPre
 fn preflight_experiment(
     state: State<AppState>,
     params: ExperimentParams,
-) -> Result<ExperimentPreflightResult, String> {
+) -> CommandResult<ExperimentPreflightResult> {
     current_user(&state)?;
     Ok(build_preflight(&state, &params))
 }
@@ -2197,7 +2214,7 @@ fn generate_sample_id(
     state: State<AppState>,
     program_id: String,
     experiment_time: String,
-) -> Result<String, String> {
+) -> CommandResult<String> {
     let program = program_by_id(&state, &program_id)?;
     let user = current_user(&state)?;
     let rows = visible_rows(&lock(&state.storage), &user)?;
@@ -2208,7 +2225,7 @@ fn generate_sample_id(
 fn get_experiment_start_defaults(
     state: State<AppState>,
     program_id: String,
-) -> Result<ExperimentStartDefaults, String> {
+) -> CommandResult<ExperimentStartDefaults> {
     let program = program_by_id(&state, &program_id)?;
     let now = iso_now();
     let user = current_user(&state)?;
@@ -2242,8 +2259,9 @@ fn visible_rows(storage: &Storage, user: &UserRow) -> Result<Vec<ExperimentRow>,
 }
 
 #[tauri::command]
-fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, String> {
-    validate_experiment_params(&params)?;
+fn start_experiment(app: AppHandle, params: ExperimentParams) -> CommandResult<String> {
+    validate_experiment_params(&params)
+        .map_err(|message| CommandError::new("INVALID_PARAMS", message))?;
 
     let st = app.state::<AppState>();
     let _lifecycle = lock(&st.exp.lifecycle);
@@ -2253,7 +2271,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
     }
     let preflight = build_preflight(&st, &params);
     if let Some(issue) = preflight.blocking.first() {
-        return Err(issue.message_zh.clone());
+        return Err(CommandError::new(&issue.code, &issue.message_zh));
     }
     let program = preflight.program.ok_or("未知实验模式")?;
     validate_executable_program(&program)?;
@@ -2354,7 +2372,7 @@ fn start_experiment(app: AppHandle, params: ExperimentParams) -> Result<String, 
 }
 
 #[tauri::command]
-async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
+async fn stop_experiment(app: AppHandle, reason: String) -> CommandResult<()> {
     let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
     let (hub, audit, exp) = {
         let st = app.state::<AppState>();
@@ -2395,7 +2413,7 @@ async fn stop_experiment(app: AppHandle, reason: String) -> Result<(), String> {
         exp.set_status(status.clone());
         emit_experiment_status(&app, &status);
     }
-    safety_result
+    safety_result.map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -2404,7 +2422,7 @@ fn skip_stage(
     experiment_id: String,
     stage_index: usize,
     reason: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     procedure::queue_action(
         &state,
         experiment_id,
@@ -2412,6 +2430,7 @@ fn skip_stage(
         procedure::ActionKind::Skip,
         reason,
     )
+    .map_err(CommandError::from)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -2420,7 +2439,7 @@ fn acknowledge_stage(
     experiment_id: String,
     stage_index: usize,
     notes: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     procedure::queue_action(
         &state,
         experiment_id,
@@ -2428,13 +2447,14 @@ fn acknowledge_stage(
         procedure::ActionKind::Confirm,
         notes,
     )
+    .map_err(CommandError::from)
 }
 
 /// The three GB standard programs (docs/05 §5.3) for the experiment-mode page.
 #[tauri::command]
-fn list_programs(state: State<AppState>) -> Result<Vec<Program>, String> {
+fn list_programs(state: State<AppState>) -> CommandResult<Vec<Program>> {
     current_user(&state)?;
-    all_programs(&lock(&state.storage))
+    all_programs(&lock(&state.storage)).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -2442,21 +2462,21 @@ fn save_custom_program(
     state: State<AppState>,
     program: Program,
     reason: String,
-) -> Result<Program, String> {
-    custom_programs::save(&state, program, &reason)
+) -> CommandResult<Program> {
+    custom_programs::save(&state, program, &reason).map_err(CommandError::from)
 }
 
 #[tauri::command]
 fn list_custom_program_revisions(
     state: State<AppState>,
     id: String,
-) -> Result<Vec<Program>, String> {
-    custom_programs::history(&state, &id)
+) -> CommandResult<Vec<Program>> {
+    custom_programs::history(&state, &id).map_err(CommandError::from)
 }
 
 #[tauri::command]
-fn delete_custom_program(state: State<AppState>, id: String) -> Result<(), String> {
-    custom_programs::delete(&state, &id)
+fn delete_custom_program(state: State<AppState>, id: String) -> CommandResult<()> {
+    custom_programs::delete(&state, &id).map_err(CommandError::from)
 }
 
 // ---- History query ----------------------------------------------------------
@@ -2587,7 +2607,7 @@ fn sample_dto(r: SampleRow) -> SampleDto {
 }
 
 #[tauri::command]
-fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, String> {
+fn list_experiments(state: State<AppState>) -> CommandResult<Vec<ExperimentSummary>> {
     let user = current_user(&state)?;
     let storage = lock(&state.storage);
     let rows = if user.role.is_admin() {
@@ -2600,7 +2620,7 @@ fn list_experiments(state: State<AppState>) -> Result<Vec<ExperimentSummary>, St
 }
 
 #[tauri::command]
-fn get_experiment_detail(state: State<AppState>, id: String) -> Result<ExperimentDetail, String> {
+fn get_experiment_detail(state: State<AppState>, id: String) -> CommandResult<ExperimentDetail> {
     let user = current_user(&state)?;
     authorize_experiment(&state, &id, &user)?;
     let s = lock(&state.storage);
@@ -2621,7 +2641,7 @@ fn get_experiment_samples(
     state: State<AppState>,
     id: String,
     max_points: Option<usize>,
-) -> Result<Vec<SampleDto>, String> {
+) -> CommandResult<Vec<SampleDto>> {
     let user = current_user(&state)?;
     authorize_experiment(&state, &id, &user)?;
     let rows = lock(&state.storage)
@@ -2631,14 +2651,17 @@ fn get_experiment_samples(
 }
 
 #[tauri::command]
-fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
+fn delete_experiment(state: State<AppState>, id: String) -> CommandResult<()> {
     let actor = current_admin(&state)?;
     if state.exp.persistence_pending() {
-        return Err("存在尚未保存的数据，请先重试保存".into());
+        return Err(CommandError::new(
+            "INVALID_STATE",
+            "存在尚未保存的数据，请先重试保存",
+        ));
     }
     // Never delete the run currently in progress.
     if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
-        return Err("无法删除正在运行的实验".into());
+        return Err(CommandError::new("INVALID_STATE", "无法删除正在运行的实验"));
     }
     let mut storage = lock(&state.storage);
     if storage
@@ -2646,7 +2669,10 @@ fn delete_experiment(state: State<AppState>, id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .is_some_and(|r| r.end_time.is_none())
     {
-        return Err("实验尚未完成保存，不能删除".into());
+        return Err(CommandError::new(
+            "INVALID_STATE",
+            "实验尚未完成保存，不能删除",
+        ));
     }
     storage.delete_experiment(&id).map_err(|e| e.to_string())?;
     state.audit.write(
@@ -2764,7 +2790,7 @@ fn analysis_context(
     state: &AppState,
     id: &str,
     expected: &str,
-) -> Result<(UserRow, ExperimentRow, Vec<SampleRow>, serde_json::Value), String> {
+) -> CommandResult<(UserRow, ExperimentRow, Vec<SampleRow>, serde_json::Value)> {
     let user = require_experiment(state, id)?;
     let db = lock(&state.storage);
     let row = db
@@ -2772,7 +2798,7 @@ fn analysis_context(
         .map_err(|e| e.to_string())?
         .ok_or("实验不存在")?;
     if row.end_time.is_none() {
-        return Err("实验未结束，暂不可分析".into());
+        return Err(CommandError::new("INVALID_STATE", "实验未结束，暂不可分析"));
     }
     let program: Option<Program> = row
         .program_snapshot_json
@@ -2783,7 +2809,10 @@ fn analysis_context(
         .and_then(|p| p.base_standard_id.as_deref())
         .or(row.experiment_type.as_deref());
     if method != Some(expected) {
-        return Err("分析方法与本次执行程序不匹配".into());
+        return Err(CommandError::new(
+            "ANALYSIS_TYPE_MISMATCH",
+            "分析方法与本次执行程序不匹配",
+        ));
     }
     let meta = serde_json::from_str(&db.runtime_metadata(id).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -2800,7 +2829,7 @@ fn analyze_gb13241(
     state: State<AppState>,
     id: String,
     input: ReductionInput,
-) -> Result<serde_json::Value, String> {
+) -> CommandResult<serde_json::Value> {
     let (user, row, samples, meta) = analysis_context(&state, &id, "REDUCIBILITY")?;
     let value = calculate_reduction(&row, &samples, &meta, &input)?;
     persist_analysis(&state, &id, "GB/T 13241", &user.display_name, &value)?;
@@ -2837,10 +2866,14 @@ fn calculate_reduction(
     samples: &[SampleRow],
     meta: &serde_json::Value,
     input: &ReductionInput,
-) -> Result<serde_json::Value, String> {
-    let (endpoint_min, custom) = reduction_endpoint(row)?;
+) -> CommandResult<serde_json::Value> {
+    let (endpoint_min, custom) = reduction_endpoint(row)
+        .map_err(|message| CommandError::new("ANALYSIS_DATA_INVALID", message))?;
     if input.manual_m180.is_some() && (endpoint_min != 180.0 || input.manual_mt.is_some()) {
-        return Err("m₁₈₀ 仅适用于 180 分钟终点且不能与 mₜ 重复补录".into());
+        return Err(CommandError::new(
+            "INVALID_PARAMS",
+            "m₁₈₀ 仅适用于 180 分钟终点且不能与 mₜ 重复补录",
+        ));
     }
     let manual_used = input.manual_m1.is_some()
         || input.manual_mt.is_some()
@@ -2852,37 +2885,54 @@ fn calculate_reduction(
             .as_ref()
             .map_or(true, |v| v.trim().is_empty())
     {
-        return Err("人工补录须填写原始记录编号或来源说明".into());
+        return Err(CommandError::new(
+            "INVALID_PARAMS",
+            "人工补录须填写原始记录编号或来源说明",
+        ));
     }
     let m1 = input
         .manual_m1
         .or_else(|| meta["reduction_m1"].as_f64())
-        .ok_or("缺少还原开始前有效总称量 m₁，可依据原始记录人工补录")?;
+        .ok_or_else(|| {
+            CommandError::new(
+                "ANALYSIS_DATA_INSUFFICIENT",
+                "缺少还原开始前有效总称量 m₁，可依据原始记录人工补录",
+            )
+        })?;
     let max_gap = meta["sample_interval_s"]
         .as_f64()
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(0.0)
         * 1.5;
-    reducibility(row.sample_weight, m1, m1, input.w1, input.w2).ok_or("亚铁/全铁含量或称量无效")?;
+    reducibility(row.sample_weight, m1, m1, input.w1, input.w2)
+        .ok_or_else(|| CommandError::new("INVALID_PARAMS", "亚铁/全铁含量或称量无效"))?;
     let curve = reduction_curve(samples, row.sample_weight, m1, input, max_gap);
     let points = &curve.points;
     let rt = if let Some(mt) = input.manual_mt.or(input.manual_m180) {
         reducibility(row.sample_weight, m1, mt, input.w1, input.w2)
-            .ok_or("还原终点总称量无效")?
+            .ok_or_else(|| CommandError::new("INVALID_PARAMS", "还原终点总称量无效"))?
             .rt
     } else {
         value_at(points, endpoint_min).ok_or_else(|| {
-            format!("{endpoint_min} 分钟处没有连续有效称量，可依据原始记录人工补录 mₜ")
+            CommandError::new(
+                "ANALYSIS_DATA_INSUFFICIENT",
+                format!("{endpoint_min} 分钟处没有连续有效称量，可依据原始记录人工补录 mₜ"),
+            )
         })?
     };
     let rate = if let Some(manual) = &input.manual_rate_points {
         if manual.iter().any(|(t, _)| *t > endpoint_min) {
-            return Err("人工速率曲线时间不能超出本次程序的还原终点".into());
+            return Err(CommandError::new(
+                "INVALID_PARAMS",
+                "人工速率曲线时间不能超出本次程序的还原终点",
+            ));
         }
-        Some(
-            reduction_rate(manual)
-                .ok_or("人工速率曲线须按时间递增并覆盖 30% 与 60%、55% 或 50% 还原度")?,
-        )
+        Some(reduction_rate(manual).ok_or_else(|| {
+            CommandError::new(
+                "INVALID_PARAMS",
+                "人工速率曲线须按时间递增并覆盖 30% 与 60%、55% 或 50% 还原度",
+            )
+        })?)
     } else {
         // A delayed transition sample can bracket the endpoint, but thresholds
         // reached after the programmed hold must not affect this result.
@@ -2914,17 +2964,24 @@ fn analyze_gb13242(
     state: State<AppState>,
     id: String,
     input: RdiInput,
-) -> Result<serde_json::Value, String> {
+) -> CommandResult<serde_json::Value> {
     let (user, _, _, meta) = analysis_context(&state, &id, "LOW_TEMP_DEGRADATION")?;
-    let result = rdi(input.m0, input.m1, input.m2, input.m3)
-        .ok_or("入鼓质量或筛上质量无效：须为有限非负值且筛上合计不大于入鼓质量")?;
+    let result = rdi(input.m0, input.m1, input.m2, input.m3).ok_or_else(|| {
+        CommandError::new(
+            "INVALID_PARAMS",
+            "入鼓质量或筛上质量无效：须为有限非负值且筛上合计不大于入鼓质量",
+        )
+    })?;
     if !input.drum_rpm.is_finite()
         || input.drum_rpm <= 0.0
         || input.drum_revolutions == 0
         || !input.sieve_seconds.is_finite()
         || input.sieve_seconds <= 0.0
     {
-        return Err("请填写实际转鼓与筛分记录".into());
+        return Err(CommandError::new(
+            "INVALID_PARAMS",
+            "请填写实际转鼓与筛分记录",
+        ));
     }
     let external_conditions_met = (input.drum_rpm - 30.0).abs() <= 1.0
         && input.drum_revolutions == 300
@@ -2940,12 +2997,16 @@ fn analyze_gb13240(
     state: State<AppState>,
     id: String,
     input: SwellingInput,
-) -> Result<serde_json::Value, String> {
+) -> CommandResult<serde_json::Value> {
     let (user, _, _, meta) = analysis_context(&state, &id, "FREE_SWELLING")?;
     if input.pellet_count != 18 || input.volume_method.trim().is_empty() || !input.same_method {
-        return Err("须为同一份 18 颗球团的总体积，并确认还原前后采用相同体积测定方法".into());
+        return Err(CommandError::new(
+            "INVALID_PARAMS",
+            "须为同一份 18 颗球团的总体积，并确认还原前后采用相同体积测定方法",
+        ));
     }
-    let result = free_swelling(&[(input.v0, input.v1)]).ok_or("整份体积必须为有限正值")?;
+    let result = free_swelling(&[(input.v0, input.v1)])
+        .ok_or_else(|| CommandError::new("INVALID_PARAMS", "整份体积必须为有限正值"))?;
     let value = serde_json::json!({"standard":"GB/T 13240","standard_version":"2018","calculation_version":CALCULATION_VERSION,
       "input":input,"swelling_index":result.swelling_index,"runtime_evidence":meta,
       "result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
@@ -2972,7 +3033,7 @@ fn save_report_details(
     state: State<AppState>,
     id: String,
     details: ReportDetails,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let user = require_experiment(&state, &id)?;
     let value = serde_json::to_value(&details).map_err(|e| e.to_string())?;
     if value
@@ -3000,33 +3061,33 @@ fn save_report_details(
 fn preview_test_group(
     state: State<'_, AppState>,
     request: groups::GroupRequest,
-) -> Result<groups::GroupSnapshot, String> {
-    groups::preview(&state, request)
+) -> CommandResult<groups::GroupSnapshot> {
+    groups::preview(&state, request).map_err(CommandError::from)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn save_test_group(
     state: State<'_, AppState>,
     request: groups::GroupRequest,
-) -> Result<tmh_core::storage::TestGroupRevision, String> {
-    groups::save(&state, request)
+) -> CommandResult<tmh_core::storage::TestGroupRevision> {
+    groups::save(&state, request).map_err(CommandError::from)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn list_test_groups(
     state: State<'_, AppState>,
     offset: u32,
-) -> Result<Vec<tmh_core::storage::TestGroupRevision>, String> {
-    groups::list(&state, offset)
+) -> CommandResult<Vec<tmh_core::storage::TestGroupRevision>> {
+    groups::list(&state, offset).map_err(CommandError::from)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn get_test_group(
     state: State<'_, AppState>,
     id: String,
     revision: Option<u64>,
-) -> Result<tmh_core::storage::TestGroupRevision, String> {
-    groups::get(&state, &id, revision)
+) -> CommandResult<tmh_core::storage::TestGroupRevision> {
+    groups::get(&state, &id, revision).map_err(CommandError::from)
 }
 #[tauri::command(rename_all = "snake_case")]
-fn generate_test_group_report(app: AppHandle, id: String, revision: u64) -> Result<String, String> {
+fn generate_test_group_report(app: AppHandle, id: String, revision: u64) -> CommandResult<String> {
     let path = groups::export_report(&app.state::<AppState>(), &id, revision)?;
     app.opener()
         .open_path(path.clone(), None::<&str>)
@@ -3048,7 +3109,7 @@ fn reducing_target(mode: Option<&str>) -> Option<f64> {
 
 /// Generate a self-contained HTML report to the exports dir and open it. Returns the path.
 #[tauri::command]
-fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
+fn generate_report(app: AppHandle, id: String) -> CommandResult<String> {
     let st = app.state::<AppState>();
     let user = current_user(&st)?;
     authorize_experiment(&st, &id, &user)?;
@@ -3096,7 +3157,7 @@ fn generate_report(app: AppHandle, id: String) -> Result<String, String> {
 
 /// Export the sample series as csv / txt / xlsx to the exports dir and open it.
 #[tauri::command]
-fn export_experiment(app: AppHandle, id: String, format: String) -> Result<String, String> {
+fn export_experiment(app: AppHandle, id: String, format: String) -> CommandResult<String> {
     let st = app.state::<AppState>();
     let user = current_user(&st)?;
     authorize_experiment(&st, &id, &user)?;
@@ -3163,7 +3224,7 @@ impl UpdateCheck {
 }
 
 #[tauri::command]
-fn get_updater_status(app: AppHandle) -> Result<UpdateCheck, String> {
+fn get_updater_status(app: AppHandle) -> CommandResult<UpdateCheck> {
     current_user(&app.state::<AppState>())?;
     let enabled = app.state::<AppState>().updater_enabled;
     Ok(UpdateCheck::base(
@@ -3175,7 +3236,7 @@ fn get_updater_status(app: AppHandle) -> Result<UpdateCheck, String> {
 /// Check the manifest endpoint for a newer version. Gated; never errors into the UI —
 /// an unreachable endpoint yields a friendly `error` string (offline is normal here).
 #[tauri::command]
-async fn check_for_update(app: AppHandle) -> Result<UpdateCheck, String> {
+async fn check_for_update(app: AppHandle) -> CommandResult<UpdateCheck> {
     let operator = current_user(&app.state::<AppState>())?.display_name;
     let current = app.package_info().version.to_string();
     let (enabled, audit) = {
@@ -3221,7 +3282,7 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateCheck, String> {
 
 /// Download + verify (minisign) + install the update, then restart. Gated.
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
+async fn install_update(app: AppHandle) -> CommandResult<()> {
     let st = app.state::<AppState>();
     let operator = current_admin(&st)?.display_name;
     if !st.updater_enabled {
@@ -3232,7 +3293,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     let result = perform_update(&app, operator).await;
     drop(lease);
     emit_experiment_status(&app, &st.exp.snapshot());
-    result
+    result.map_err(CommandError::from)
 }
 
 struct UpdateLease(Arc<ExpControl>);
@@ -3528,6 +3589,7 @@ mod tests {
     use super::*;
     use tmh_core::auth::UserRole;
     mod analysis_sample_tests;
+    mod command_error_tests;
     mod device_lifecycle_tests;
     mod group_tests;
     mod storage_fault_tests;
