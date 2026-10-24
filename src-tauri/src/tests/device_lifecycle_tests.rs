@@ -11,10 +11,15 @@ fn update_lease_rejects_manual_enqueue_and_safety_reset_before_device_checks() {
     let _lease = UpdateLease::begin(state.exp.clone()).unwrap();
     let called = AtomicBool::new(false);
 
-    let manual = enqueue_manual_gas(&state, |hub| {
-        called.store(true, Ordering::SeqCst);
-        Ok(hub.request_set_flow(0, 3.0))
-    });
+    let manual = enqueue_manual_gas(
+        &state,
+        "set_flow",
+        serde_json::json!({"gas":0,"requested":3.0}),
+        |hub| {
+            called.store(true, Ordering::SeqCst);
+            Ok(hub.request_set_flow(0, 3.0))
+        },
+    );
 
     assert!(manual.is_err(), "an update excludes manual gas commands");
     assert!(
@@ -41,11 +46,16 @@ fn update_lease_cannot_cross_an_authorized_manual_enqueue() {
     let (manual_done_tx, manual_done_rx) = mpsc::channel();
     let worker_state = state.clone();
     let manual_worker = std::thread::spawn(move || {
-        let acknowledged = enqueue_manual_gas(&worker_state, |hub| {
-            entered_tx.send(()).map_err(|e| e.to_string())?;
-            release_rx.recv_timeout(WAIT).map_err(|e| e.to_string())?;
-            Ok(hub.request_set_flow(0, 3.0))
-        })
+        let acknowledged = enqueue_manual_gas(
+            &worker_state,
+            "set_flow",
+            serde_json::json!({"gas":0,"requested":3.0}),
+            |hub| {
+                entered_tx.send(()).map_err(|e| e.to_string())?;
+                release_rx.recv_timeout(WAIT).map_err(|e| e.to_string())?;
+                Ok(hub.request_set_flow(0, 3.0))
+            },
+        )
         .and_then(|(_, reply)| {
             reply
                 .blocking_recv()

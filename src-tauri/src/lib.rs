@@ -318,10 +318,13 @@ fn may_access_experiment(role: UserRole, user_id: &str, owner_user_id: Option<&s
 }
 
 fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
+    controller_for_user(state, current_user(state)?)
+}
+
+fn controller_for_user(state: &AppState, user: UserRow) -> Result<UserRow, String> {
     if state.exp.updating.load(Ordering::SeqCst) {
         return Err("正在安装更新，暂不能修改设备或实验".into());
     }
-    let user = current_user(state)?;
     let status = state.exp.snapshot();
     if !status.running
         || user.role.is_admin()
@@ -1620,11 +1623,28 @@ fn with_device_lifecycle<T>(
 
 fn enqueue_manual_gas<T>(
     state: &AppState,
+    action: &str,
+    detail: serde_json::Value,
     enqueue: impl FnOnce(&DeviceHub) -> Result<T, String>,
 ) -> Result<(String, T), String> {
     with_device_lifecycle(state, || {
-        let operator = require_experiment_controller(state)?.display_name;
-        Ok((operator, enqueue(&state.hub)?))
+        let (operator, authorization) = state
+            .auth
+            .require_user_with_operator(&lock(&state.storage), epoch_now());
+        let outcome: Result<(String, T), String> = (|| {
+            let user = controller_for_user(state, authorization.map_err(auth_error)?)?;
+            Ok((user.display_name, enqueue(&state.hub)?))
+        })();
+        if let Err(error) = &outcome {
+            let result = if error == AuthCode::Storage.as_str() {
+                AuditResult::Failure
+            } else {
+                AuditResult::Rejected
+            };
+            state.audit.write(&AuditEntry::new(Category::Gas, action, result)
+                .operator(operator).detail(serde_json::json!({"request":detail,"code":CommandError::from(error.clone()).code})));
+        }
+        outcome
     })
 }
 
@@ -1732,14 +1752,23 @@ async fn emergency_safe_shutdown(app: AppHandle) -> CommandResult<()> {
 }
 
 #[tauri::command]
-async fn set_gas_flow(app: AppHandle, gas: usize, value: f64) -> CommandResult<ClampResult> {
+async fn set_gas_flow<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    gas: usize,
+    value: f64,
+) -> CommandResult<ClampResult> {
     let st = app.state::<AppState>();
-    let (operator, reply) = enqueue_manual_gas(&st, |hub| {
-        if gas >= GAS_COUNT {
-            return Err("无效的气体通道".into());
-        }
-        Ok(hub.request_set_flow(gas, value))
-    })?;
+    let (operator, reply) = enqueue_manual_gas(
+        &st,
+        "set_flow",
+        serde_json::json!({"gas":gas,"requested":value}),
+        |hub| {
+            if gas >= GAS_COUNT || !value.is_finite() || value < 0.0 {
+                return Err("INVALID_PARAMS".into());
+            }
+            Ok(hub.request_set_flow(gas, value))
+        },
+    )?;
     let result = match reply.await {
         Ok(result) => result,
         Err(_) => {
@@ -1803,12 +1832,17 @@ fn gas_command_error(error: MfcCommandError) -> String {
 }
 
 async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
-    let (operator, reply) = enqueue_manual_gas(st, |hub| {
-        if gas >= GAS_COUNT {
-            return Err("INVALID_PARAMS".into());
-        }
-        Ok(hub.request_set_on_off(gas, on))
-    })?;
+    let (operator, reply) = enqueue_manual_gas(
+        st,
+        "on_off",
+        serde_json::json!({"gas":gas,"on":on}),
+        |hub| {
+            if gas >= GAS_COUNT {
+                return Err("INVALID_PARAMS".into());
+            }
+            Ok(hub.request_set_on_off(gas, on))
+        },
+    )?;
     let result = match reply.await {
         Ok(result) => result.map_err(gas_command_error),
         Err(_) => Err("气体控制服务不可用，请检查设备连接".into()),
@@ -1834,11 +1868,12 @@ async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
 }
 
 async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), String> {
-    let (operator, replies) = enqueue_manual_gas(st, |hub| {
-        Ok((0..GAS_COUNT)
-            .map(|gas| hub.request_set_on_off(gas, on))
-            .collect::<Vec<_>>())
-    })?;
+    let (operator, replies) =
+        enqueue_manual_gas(st, action, serde_json::json!({"on":on}), |hub| {
+            Ok((0..GAS_COUNT)
+                .map(|gas| hub.request_set_on_off(gas, on))
+                .collect::<Vec<_>>())
+        })?;
     let mut channels = Vec::with_capacity(GAS_COUNT);
     let mut errors = Vec::new();
     for (gas, reply) in replies.into_iter().enumerate() {
@@ -3623,6 +3658,7 @@ mod tests {
     mod analysis_sample_tests;
     mod command_error_tests;
     mod device_lifecycle_tests;
+    mod gas_authorization_tests;
     mod group_tests;
     mod startup_tests;
     mod storage_fault_tests;

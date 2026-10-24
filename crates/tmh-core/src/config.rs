@@ -185,6 +185,16 @@ impl CommConfig {
         if !self.gas_safety_limits.co.is_finite() || self.gas_safety_limits.co <= 0.0 {
             return Err(ConfigError::NonPositiveLimit("CO"));
         }
+        if self.gas_safety_limits.h2 > crate::clamp::H2_ABS_MAX {
+            return Err(ConfigError::InvalidField(
+                "GAS_SAFETY_LIMITS.H2 exceeds absolute ceiling",
+            ));
+        }
+        if self.gas_safety_limits.co > crate::clamp::CO_ABS_MAX {
+            return Err(ConfigError::InvalidField(
+                "GAS_SAFETY_LIMITS.CO exceeds absolute ceiling",
+            ));
+        }
         if !self.temp.scale.is_finite() || self.temp.scale <= 0.0 {
             return Err(ConfigError::ZeroScale("COM_RS485_TEMP.scale"));
         }

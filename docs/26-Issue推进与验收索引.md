@@ -61,3 +61,16 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 2026-10-24：Node24.18.0、pnpm11.10.0、Rust1.95.0、macOS arm64。11项Node脚本回归、前端85项、原生应用102项及工作区普通/candidate套件全部通过；fmt/clippy/typecheck/lint/build、IPC/安全/版本、生产依赖审计、serial编译、dirty replay、5分钟mock soak、actionlint均通过。预发布版本后缀缺陷在修改前复现失败。独立审查发现并修复构建元数据误判预发布、浅克隆父提交丢失两项问题，新增真实临时仓库回归。
 
 PR#98的Ubuntu CI已通过；其余Windows/candidate及后续批次跨平台状态以PR checks实时记录为准，尚未作为本机验证结论的一部分。后续可继续推进逐命令矩阵、拒绝审计、Rust安全审计、SBOM与正式资产校验；不等待无关现场输入。
+
+## 第四批燃气边界复核
+
+复现发现：命令负流量此前被actor防御性归零并当作成功；编译期上限10与规格5 L/min不符；探针另行构造写帧并将任意返回字节视作ACK。修复在命令边界拒绝无效值、记录REJECTED；actor最终上限5、配置只允许降低。Probe写入经过同一actor与ACK解析，只允许N2 0–5 L/min或所有气路归零，现场协议合格前不开放H₂/CO/CO₂正流量。标准程序CO 4.5 L/min保留。旧配置若H₂/CO限值大于5会明确拒绝，请按实验室规定核对配置后再启动，不自动改写文件。
+
+此批增加真实燃气IPC授权矩阵和审计四元组、无效设定不写设备、探针错ACK/非法值/关断、编译期与配置上限回归；完整应用命令矩阵仍作为后续项。
+
+
+第四批审查补充：探针先由actor同一构帧/量化路径预览actual applied，拒绝N2量化后超过5（scaling=4、requested=5→5.2的用例已先复现）；无效负限值下归零仍可放行。燃气拒绝审计与权限校验使用同一次会话决定，避免等待生命周期锁期间账户切换造成归属漂移。探针示例补明确MFC偶校验、天平1200波特；这些仍是协议规范示例，不是现场参数确认记录。
+
+第四批本机最终验证（2026-10-24）：前端86项、Node脚本12项、原生应用107项、core单元108项及工作区普通/candidate所有套件通过，probe新增3项回归。fmt/clippy/typecheck/lint/build、IPC/安全/版本、生产依赖审计、serial编译、dirty replay与5分钟mock soak、actionlint均通过。独立安全审查未发现新增阻断。负流量、10→5编译上限、负限值归零、N2量化超限均先复现失败再修复。此证据仍为软件模拟验证。
+
+远端状态更新：PR#98 Linux/Windows CI、Windows NSIS安装冒烟与macOS universal候选均已成功；#99 Linux/Windows CI及macOS候选成功，Windows候选仍以实时checks为准；#100 Linux/Windows CI及macOS候选成功，Windows候选仍以checks为准。#98是较早批次，不能作为第四批新代码已跨平台通过的证据。

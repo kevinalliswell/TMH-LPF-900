@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- 燃气命令拒绝非有限/负流量并审计拒绝；H₂/CO编译期上限对齐5 L/min，配置不得抬高。探针写入统一经过MFC actor与完整ACK，仅开放N2 0–5 L/min及任意气路归零（#21/#41/#81/#85）。
+
 - 为IPC/发布/版本同步脚本补回归；修正预发布后缀残留与缺标记误通过；正式release要求annotated tag、受保护main和同提交成功CI。CI/candidate保留测试日志与环境SHA索引（#23/#82/#85/#89）。
 
 - 启动模式严格解析，unsupported real/replay 与路径/配置失败进入明确错误页；requested/effective 模式 DTO 与未确认水印避免前端自行退回 mock（#19/#79）。

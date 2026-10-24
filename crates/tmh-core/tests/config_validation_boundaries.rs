@@ -105,3 +105,17 @@ fn configuration_must_preserve_the_fixed_nitrogen_protection_setpoint() {
         "wire resolution must not underflow to zero"
     );
 }
+
+#[test]
+fn field_configuration_cannot_raise_either_flammable_ceiling() {
+    for gas in [0, 3] {
+        let mut config = base();
+        if gas == 0 {
+            config.gas_safety_limits.h2 = 5.01;
+        } else {
+            config.gas_safety_limits.co = 5.01;
+        }
+        assert!(config.validate().is_err());
+    }
+    assert!(base().validate().is_ok());
+}

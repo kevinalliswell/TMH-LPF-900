@@ -6,9 +6,9 @@
 //! shutoff must never be blocked).
 
 /// Compile-time absolute ceiling for H2 (L/min). Config cannot exceed this.
-pub const H2_ABS_MAX: f64 = 10.0;
+pub const H2_ABS_MAX: f64 = 5.0;
 /// Compile-time absolute ceiling for CO (L/min). Config cannot exceed this.
-pub const CO_ABS_MAX: f64 = 10.0;
+pub const CO_ABS_MAX: f64 = 5.0;
 
 /// The four gas channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,13 +30,21 @@ pub struct ClampResult {
     pub limit: f64,
 }
 
+fn effective_limit(configured: f64, absolute: f64) -> f64 {
+    if configured.is_finite() {
+        configured.clamp(0.0, absolute)
+    } else {
+        0.0
+    }
+}
+
 /// Clamp a requested setpoint for `gas`. `cfg_h2` / `cfg_co` are the configured
 /// `GAS_SAFETY_LIMITS`. Only H2 and CO are limited; N2/CO2 pass through. The
 /// effective limit is `min(config, absolute_ceiling)`.
 pub fn clamp_setpoint(gas: Gas, requested: f64, cfg_h2: f64, cfg_co: f64) -> ClampResult {
     let limit = match gas {
-        Gas::H2 => cfg_h2.min(H2_ABS_MAX),
-        Gas::Co => cfg_co.min(CO_ABS_MAX),
+        Gas::H2 => effective_limit(cfg_h2, H2_ABS_MAX),
+        Gas::Co => effective_limit(cfg_co, CO_ABS_MAX),
         // N2 and CO2 are unlimited; INFINITY means `requested > limit` is never true.
         Gas::N2 | Gas::Co2 => f64::INFINITY,
     };
@@ -71,12 +79,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compiled_flammable_limits_match_the_documented_five_litre_ceiling() {
+        for gas in [Gas::H2, Gas::Co] {
+            let result = clamp_setpoint(gas, 8.0, 999.0, 999.0);
+            assert_eq!(result.applied, 5.0);
+            assert!(result.clamped);
+        }
+    }
+
+    #[test]
     fn h2_over_config_limit_is_clamped() {
         // docs/10 M2: request H2=8.0 with limit 5.0 -> applied 5.0, clamped.
         let r = clamp_setpoint(Gas::H2, 8.0, 5.0, 5.0);
         assert_eq!(r.applied, 5.0);
         assert!(r.clamped);
         assert_eq!(r.limit, 5.0);
+    }
+
+    #[test]
+    fn zero_shutoff_survives_negative_corrupt_limits() {
+        for gas in [Gas::H2, Gas::Co] {
+            let result = clamp_setpoint(gas, 0.0, -1.0, f64::NEG_INFINITY);
+            assert_eq!(result.applied, 0.0);
+            assert!(!result.clamped);
+        }
     }
 
     #[test]
@@ -94,11 +120,11 @@ mod tests {
     fn corrupt_config_bounded_by_absolute_ceiling() {
         // config H2=999 must not raise the limit above the compile-time ceiling.
         let r = clamp_setpoint(Gas::H2, 12.0, 999.0, 999.0);
-        assert_eq!(r.applied, H2_ABS_MAX); // 10.0
+        assert_eq!(r.applied, H2_ABS_MAX); // 5.0
         assert!(r.clamped);
         // a request under the ceiling still passes even with the corrupt config
-        let r2 = clamp_setpoint(Gas::H2, 8.0, 999.0, 999.0);
-        assert_eq!(r2.applied, 8.0);
+        let r2 = clamp_setpoint(Gas::H2, 4.5, 999.0, 999.0);
+        assert_eq!(r2.applied, 4.5);
         assert!(!r2.clamped);
     }
 

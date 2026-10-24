@@ -27,3 +27,8 @@ test("unknown invocations fail and macro mentions in comments do not invent comm
   const source = '// #[tauri::command]\n' + rust();
   assert.equal(checkIpcContract(source, 'invoke("query", { max_points: 4 })').commands, 1);
 });
+
+test("generic runtime injection keeps the same wire argument contract", () => {
+  const source = rust().replace("fn query(", "fn query<R: tauri::Runtime>(").replace("state: State<AppState>,", "app: AppHandle<R>, state: State<AppState>,");
+  assert.deepEqual(checkIpcContract(source, 'invoke("query", { max_points: 4 })').errors, []);
+});

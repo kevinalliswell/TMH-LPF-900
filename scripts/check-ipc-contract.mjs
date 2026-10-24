@@ -69,7 +69,7 @@ function parseRustCommands(source) {
   while ((match = attribute.exec(source)) !== null) {
     if (isCommented(source, match.index)) continue; // e.g. a doc comment mentioning the macro
     const snakeCase = (match[1] ?? "").includes('rename_all = "snake_case"');
-    const signature = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(/g;
+    const signature = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)(?:<[^>]+>)?\s*\(/g;
     signature.lastIndex = attribute.lastIndex;
     const found = signature.exec(source);
     if (!found || found.index > attribute.lastIndex + 40) {
