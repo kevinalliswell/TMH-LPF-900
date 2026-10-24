@@ -37,3 +37,6 @@ Thumbs.db
 # --- Misc ---
 *.local
 coverage/
+
+# Local/CI verification evidence (uploaded as artifacts, never experiment data)
+verification/

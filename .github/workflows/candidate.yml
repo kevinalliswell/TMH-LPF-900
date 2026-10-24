@@ -56,9 +56,11 @@ jobs:
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile
+          pnpm verify:context
+          pnpm test:scripts 2>&1 | tee verification/script-tests.log
           pnpm typecheck
           pnpm lint
-          pnpm test
+          pnpm test 2>&1 | tee verification/frontend-tests.log
           pnpm build
           pnpm check:ipc-contract
           pnpm check:tauri-security
@@ -70,7 +72,7 @@ jobs:
           set -euo pipefail
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --features tmh-app/candidate -- -D warnings
-          cargo test --workspace --features tmh-app/candidate
+          cargo test --workspace --locked --features tmh-app/candidate 2>&1 | tee verification/rust-tests.log
       - name: Build isolated candidate installers
         run: pnpm tauri build --ci --features candidate --config src-tauri/tauri.candidate.conf.json ${{ matrix.args }}
       - name: Windows installed application smoke
@@ -94,4 +96,13 @@ jobs:
           name: TMH-LPF-900-candidate-${{ matrix.platform }}-${{ github.run_id }}
           path: candidate-assets/${{ matrix.platform }}/
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Preserve candidate verification evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-candidate-${{ matrix.platform }}-${{ github.run_id }}
+          path: verification/
+          if-no-files-found: warn
           retention-days: 30

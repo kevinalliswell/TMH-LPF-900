@@ -12,11 +12,15 @@ const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const version = pkg.version;
 const title = `TMH-LPF-900 v${version}`;
 
+function replaceRequired(source, pattern, replacement) {
+  if (!source.match(pattern)) throw new Error(`version marker missing: ${pattern}`);
+  return source.replace(pattern, replacement);
+}
 const targets = [
   {
     file: "Cargo.toml",
     transform: (s) =>
-      s.replace(
+      replaceRequired(s,
         /(\[workspace\.package\][\s\S]*?^version\s*=\s*")[^"]+("\s*$)/m,
         `$1${version}$2`,
       ),
@@ -32,17 +36,17 @@ const targets = [
   },
   {
     file: "index.html",
-    transform: (s) => s.replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`),
+    transform: (s) => replaceRequired(s, /<title>[^<]*<\/title>/, `<title>${title}</title>`),
   },
   {
     file: "src/App.tsx",
-    transform: (s) => s.replace(/TMH-LPF-900 v\d+\.\d+\.\d+/g, title),
+    transform: (s) => replaceRequired(s, /TMH-LPF-900 v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g, title),
   },
   {
     // Browser-preview fallback version (no backend to report it) — keep it in sync too (#13).
     file: "src/ipc/index.ts",
     transform: (s) =>
-      s.replace(/const APP_VERSION = "\d+\.\d+\.\d+"/, `const APP_VERSION = "${version}"`),
+      replaceRequired(s, /const APP_VERSION = "[^"]*"/, `const APP_VERSION = "${version}"`),
   },
 ];
 
