@@ -9,6 +9,7 @@ fn app_fixture() -> tauri::App<MockRuntime> {
     mock_builder()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            set_gas_flow,
             list_experiments,
             get_experiment_detail,
             get_experiment_samples,
@@ -227,4 +228,67 @@ fn analysis_type_and_insufficient_data_rejections_have_distinct_codes() {
     let wrong_type = invoke(&view, "analyze_gb13240", json!({"id":"exp-alice", "input":{"v0":1.0,"v1":1.2,"pellet_count":18,"volume_method":"volume","same_method":true}})).unwrap_err();
     assert_command_error(&wrong_type, "ANALYSIS_TYPE_MISMATCH");
     assert_eq!(experiment_snapshot(&state, "exp-alice"), before);
+}
+
+#[test]
+fn invalid_manual_flow_is_rejected_without_changing_confirmed_setpoints() {
+    let app = app_fixture();
+    let state = app.state::<AppState>();
+    login(&state, "admin", "admin-password");
+    let view = webview(&app);
+    invoke(&view, "set_gas_flow", json!({"gas":0,"value":2.0})).unwrap();
+    for body in [json!({"gas":0,"value":-1.0}), json!({"gas":99,"value":1.0})] {
+        let error = invoke(&view, "set_gas_flow", body).unwrap_err();
+        assert_command_error(&error, "INVALID_PARAMS");
+        let entries: Vec<Value> =
+            std::fs::read_dir(state.recovery_dir.parent().unwrap().join("logs"))
+                .unwrap()
+                .flat_map(|entry| {
+                    std::fs::read_to_string(entry.unwrap().path())
+                        .unwrap()
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect::<Vec<Value>>()
+                })
+                .collect();
+        let last = entries.last().unwrap();
+        assert_eq!(last["category"], "GAS");
+        assert_eq!(last["action"], "set_flow");
+        assert_eq!(last["result"], "REJECTED");
+        assert_eq!(last["operator"], "管理员");
+        assert_eq!(last["detail"]["code"], "INVALID_PARAMS");
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let error = tauri::async_runtime::block_on(set_gas_flow(app.handle().clone(), 0, value))
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_PARAMS");
+    }
+}
+
+#[test]
+fn gas_authorization_storage_fault_is_failure_and_never_reaches_the_device() {
+    let app = app_fixture();
+    let state = app.state::<AppState>();
+    login(&state, "admin", "admin-password");
+    let path = state.recovery_dir.parent().unwrap().join("broken-users.db");
+    *lock(&state.storage) = Storage::open(&path).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("DROP TABLE users").unwrap();
+    let view = webview(&app);
+    let error = invoke(&view, "set_gas_flow", json!({"gas":0,"value":1.0})).unwrap_err();
+    assert_command_error(&error, "STORAGE_ERROR");
+    let log = std::fs::read_dir(state.recovery_dir.parent().unwrap().join("logs"))
+        .unwrap()
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["category"], "GAS");
+    assert_eq!(log[0]["result"], "FAILURE");
+    assert_eq!(log[0]["detail"]["code"], "STORAGE_ERROR");
 }

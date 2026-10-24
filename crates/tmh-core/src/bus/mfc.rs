@@ -172,6 +172,37 @@ fn wire_setpoint(
 }
 
 impl MfcActor {
+    /// Exact actor-applied value without I/O, for tighter bring-up operating limits.
+    pub fn preview_flow(&self, gas_idx: usize, value: f64) -> Result<ClampResult, MfcCommandError> {
+        self.prepare_flow(gas_idx, value).map(|(clamp, _, _)| clamp)
+    }
+
+    fn prepare_flow(
+        &self,
+        gas_idx: usize,
+        value: f64,
+    ) -> Result<(ClampResult, i64, Vec<u8>), MfcCommandError> {
+        // The webview is untrusted (docs/03): an out-of-range gas index must never panic
+        // this bus thread — a panic drops the command receiver and silently disables ALL
+        // gas control, including the emergency shutoff. Out of range is safely rejected.
+        if gas_idx >= self.gas.len() {
+            return Err(MfcCommandError::InvalidGas(gas_idx));
+        }
+        let mut clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
+        let (raw, applied, capped) =
+            wire_setpoint(clamp.applied, self.scaling[gas_idx], clamp.limit)?;
+        clamp.applied = applied;
+        clamp.clamped |= capped;
+        let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
+        Ok((clamp, raw, frame))
+    }
+
+    /// Reclaim a standalone actor's transport for the read-only bring-up probe.
+    /// Gas writes must still use set_flow so clamping, quantization and ACK stay unique.
+    pub fn into_transport(self) -> Box<dyn Transport> {
+        self.transport
+    }
+
     pub fn new(
         transport: Box<dyn Transport>,
         addr: [u8; 4],
@@ -248,18 +279,7 @@ impl MfcActor {
         self.write_flow(gas_idx, value)
     }
     fn write_flow(&mut self, gas_idx: usize, value: f64) -> Result<ClampResult, MfcCommandError> {
-        // The webview is untrusted (docs/03): an out-of-range gas index must never panic
-        // this bus thread — a panic drops the command receiver and silently disables ALL
-        // gas control, including the emergency shutoff. Out of range is safely rejected.
-        if gas_idx >= self.gas.len() {
-            return Err(MfcCommandError::InvalidGas(gas_idx));
-        }
-        let mut clamp = clamp_setpoint(gas_enum(gas_idx), value, self.limit_h2, self.limit_co);
-        let (raw, applied, capped) =
-            wire_setpoint(clamp.applied, self.scaling[gas_idx], clamp.limit)?;
-        clamp.applied = applied;
-        clamp.clamped |= capped;
-        let frame = cpl::build_write(self.addr[gas_idx], REG_SV, &[raw]);
+        let (clamp, raw, frame) = self.prepare_flow(gas_idx, value)?;
         let response = match self
             .transport
             .reset_buffers()

@@ -315,31 +315,51 @@ impl AuthService {
             .map_err(|_| AuthCode::Storage)
     }
 
+    /// Attribution and permission use the same session decision, including rejections.
+    pub fn require_user_with_operator(
+        &self,
+        storage: &Storage,
+        now_epoch_s: i64,
+    ) -> (String, Result<UserRow, AuthCode>) {
+        self.require_with_operator(storage, now_epoch_s, false)
+    }
+
     fn require(
         &self,
         storage: &Storage,
         now_epoch_s: i64,
         allow_password_change: bool,
     ) -> Result<UserRow, AuthCode> {
-        let user_id = self
-            .session()
-            .require(now_epoch_s)
-            .map_err(map_session_error)?;
-        let user = storage
-            .get_user(&user_id)
-            .map_err(|_| AuthCode::Storage)?
-            .ok_or(AuthCode::Required)?;
-        if !user.is_active {
-            self.logout();
-            return Err(AuthCode::AccountDisabled);
-        }
-        if user.must_change_password && !allow_password_change {
-            return Err(AuthCode::PasswordChangeRequired);
-        }
-        self.session()
-            .touch(now_epoch_s)
-            .map_err(map_session_error)?;
-        Ok(user)
+        self.require_with_operator(storage, now_epoch_s, allow_password_change)
+            .1
+    }
+
+    fn require_with_operator(
+        &self,
+        storage: &Storage,
+        now_epoch_s: i64,
+        allow_password_change: bool,
+    ) -> (String, Result<UserRow, AuthCode>) {
+        let mut session = self.session();
+        let mut operator = "anonymous".to_string();
+        let outcome = (|| {
+            let user_id = session.require(now_epoch_s).map_err(map_session_error)?;
+            let user = storage
+                .get_user(&user_id)
+                .map_err(|_| AuthCode::Storage)?
+                .ok_or(AuthCode::Required)?;
+            operator.clone_from(&user.display_name);
+            if !user.is_active {
+                session.logout();
+                return Err(AuthCode::AccountDisabled);
+            }
+            if user.must_change_password && !allow_password_change {
+                return Err(AuthCode::PasswordChangeRequired);
+            }
+            session.touch(now_epoch_s).map_err(map_session_error)?;
+            Ok(user)
+        })();
+        (operator, outcome)
     }
 
     fn session(&self) -> MutexGuard<'_, AuthSession> {

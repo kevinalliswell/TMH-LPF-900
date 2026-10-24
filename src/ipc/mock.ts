@@ -35,8 +35,8 @@ import type {
 import { mockCurrentUser } from "./authMock";
 
 // ---- shared device state (targets drive the physics; tick() reports) ----
-const H2_ABS = 10;
-const CO_ABS = 10;
+const H2_ABS = 5;
+const CO_ABS = 5;
 const limits = { h2: 5, co: 5 };
 const sv = [0, 0, 0, 0]; // display L/min per gas [H2, N2, CO2, CO]
 const flowSteps = [0.01, 0.1, 0.01, 0.01];
@@ -127,6 +127,8 @@ function quantizeFlow(value: number, step: number, limit: number) {
 }
 
 export function mockSetFlow(gas: number, value: number): ClampResult {
+  if (!Number.isInteger(gas) || gas < 0 || gas >= flowSteps.length || !Number.isFinite(value) || value < 0)
+    throw new Error("INVALID_PARAMS");
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
   return rememberFlow(gas, value);
 }

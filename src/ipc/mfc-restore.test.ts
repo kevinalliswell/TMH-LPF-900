@@ -89,3 +89,12 @@ describe("MFC ON restores acknowledged nonzero flow (#28)", () => {
     expect(mock.snapshot().gas.map((gas) => gas.sv)).toEqual([0, 5, 0, 0]);
   });
 });
+
+it("rejects invalid manual flow rather than silently closing a channel", async () => {
+  const mock = await devices();
+  mock.mockSetFlow(0, 2);
+  for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => mock.mockSetFlow(0, value)).toThrow("INVALID_PARAMS");
+    expect(mock.snapshot().gas[0]!.sv).toBe(2);
+  }
+});

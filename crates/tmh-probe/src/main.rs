@@ -9,12 +9,13 @@ use clap::{Args, Parser, Subcommand};
 use serialport::{DataBits, Parity, StopBits};
 use std::path::PathBuf;
 use std::time::Duration;
+use tmh_core::bus::MfcActor;
+use tmh_core::clamp::{CO_ABS_MAX, H2_ABS_MAX};
 use tmh_core::transport::{ReplayTransport, SerialConfig, SerialTransport, Transport};
 use tmh_protocols::{balance, cpl, modbus};
 
 /// Azbil CPL registers (match the MFC bus actor).
 const REG_PV: u16 = 1206;
-const REG_SV: u16 = 1401;
 
 #[derive(Parser)]
 #[command(
@@ -52,8 +53,8 @@ enum Cmd {
         /// Four flow-scaling factors, comma-separated (order H2,N2,CO2,CO).
         #[arg(long, default_value = "0.1,1.0,0.1,0.1")]
         scaling: String,
-        /// DANGER — write a setpoint before reading: `--set GAS:VALUE` (GAS 0..3, L/min).
-        /// 0=H2 1=N2 2=CO2 3=CO. Flows gas; use N2 only for bring-up.
+        /// Bring-up writes: N2 0..5 L/min (`--set 1:VALUE`), or zero on any channel.
+        /// Positive H2/CO/CO2 writes remain disabled pending field qualification.
         #[arg(long)]
         set: Option<String>,
     },
@@ -123,8 +124,8 @@ fn run() -> Result<(), String> {
             set,
         } => {
             let plan = link.plan();
-            let mut t = link.transport()?;
-            probe_mfc(t.as_mut(), &addrs, &scaling, set.as_deref(), plan)
+            let t = link.transport()?;
+            probe_mfc(t, &addrs, &scaling, set.as_deref(), plan)
         }
         Cmd::Balance { link, tare } => {
             let plan = link.plan();
@@ -309,7 +310,7 @@ fn probe_temp(
 }
 
 fn probe_mfc(
-    t: &mut dyn Transport,
+    mut t: Box<dyn Transport>,
     addrs: &str,
     scaling: &str,
     set: Option<&str>,
@@ -322,18 +323,35 @@ fn probe_mfc(
     }
     let timeout = Duration::from_millis(plan.timeout_ms);
 
+    if scaling
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err("flow scaling must be finite and positive".into());
+    }
     if let Some(spec) = set {
         let (gas, value) = parse_set(spec)?;
-        let raw = (value / scaling[gas] * 10.0).round() as i64;
-        println!(
-            "⚠ WRITING setpoint: gas {gas} (addr {}) = {value} L/min (raw {raw}) — GAS WILL FLOW",
-            addrs[gas]
+        let mut actor = MfcActor::new(
+            t,
+            addrs.clone().try_into().unwrap(),
+            scaling.clone().try_into().unwrap(),
+            H2_ABS_MAX,
+            CO_ABS_MAX,
         );
-        let req = cpl::build_write(addrs[gas], REG_SV, &[raw]);
-        match t.transact(&req, timeout) {
-            Ok(rx) => println!("TX {} | RX {} | write acknowledged", hex(&req), hex(&rx)),
-            Err(e) => println!("TX {} | ✗ {e}", hex(&req)),
+        let preview = actor
+            .preview_flow(gas, value)
+            .map_err(|error| error.to_string())?;
+        if gas == 1 && preview.applied > 5.0 {
+            return Err("quantized N2 setpoint exceeds the probe bring-up limit".into());
         }
+        let confirmed = actor
+            .set_flow(gas, value)
+            .map_err(|error| format!("MFC write not confirmed: {error}"))?;
+        println!(
+            "WRITING confirmed: gas {gas} requested {value}, applied {} L/min, clamped {}",
+            confirmed.applied, confirmed.clamped
+        );
+        t = actor.into_transport();
     }
 
     println!("MFC PV (READ-ONLY) addrs={addrs:?} scaling={scaling:?}  [0=H2 1=N2 2=CO2 3=CO]\n");
@@ -374,6 +392,12 @@ fn parse_set(spec: &str) -> Result<(usize, f64), String> {
     if gas > 3 {
         return Err("gas index must be 0..3".into());
     }
+    if !value.is_finite() || value < 0.0 {
+        return Err("setpoint must be finite and non-negative".into());
+    }
+    if (gas != 1 && value != 0.0) || (gas == 1 && value > 5.0) {
+        return Err("probe writes permit N2 0..5 L/min or zero on any channel; other positive writes are disabled".into());
+    }
     Ok((gas, value))
 }
 
@@ -409,4 +433,107 @@ fn probe_balance(t: &mut dyn Transport, tare: bool, plan: Plan) -> Result<(), St
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tmh_core::transport::{BusError, MockTransport};
+    struct TraceTransport {
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        ack: bool,
+        inner: MockTransport,
+    }
+    impl Transport for TraceTransport {
+        fn transact(&mut self, tx: &[u8], deadline: Duration) -> Result<Vec<u8>, BusError> {
+            self.writes.lock().unwrap().push(tx.to_vec());
+            if self.ack {
+                self.inner.transact(tx, deadline)
+            } else {
+                Ok(b"not-an-ack".to_vec())
+            }
+        }
+        fn read_line(&mut self, deadline: Duration) -> Result<Vec<u8>, BusError> {
+            self.inner.read_line(deadline)
+        }
+        fn reset_buffers(&mut self) -> Result<(), BusError> {
+            self.inner.reset_buffers()
+        }
+        fn reopen(&mut self) -> Result<(), BusError> {
+            self.inner.reopen()
+        }
+    }
+    fn probe(spec: &str, ack: bool) -> (Result<(), String>, Vec<Vec<u8>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let transport = TraceTransport {
+            writes: writes.clone(),
+            ack,
+            inner: MockTransport::mfc(),
+        };
+        let result = probe_mfc(
+            Box::new(transport),
+            "1,2,3,4",
+            "0.1,1.0,0.1,0.1",
+            Some(spec),
+            Plan {
+                cycles: 0,
+                interval_ms: 0,
+                timeout_ms: 500,
+                stop_after_errs: None,
+            },
+        );
+        let frames = writes.lock().unwrap().clone();
+        (result, frames)
+    }
+    #[test]
+    fn probe_writes_use_actor_clamp_and_ack_instead_of_a_raw_write_path() {
+        let (result, frames) = probe("1:5.0", true);
+        result.unwrap();
+        assert_eq!(frames, vec![cpl::build_write(2, 1401, &[50])]);
+        let (failed, _) = probe("1:2.0", false);
+        assert!(failed.unwrap_err().contains("not confirmed"));
+        for spec in ["0:2.0", "3:2.0", "2:2.0"] {
+            let (result, frames) = probe(spec, true);
+            assert!(result.is_err());
+            assert!(frames.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_probe_setpoints_never_reach_the_transport() {
+        for spec in ["1:-1", "1:NaN", "1:inf", "1:5.01", "4:1"] {
+            let (result, frames) = probe(spec, true);
+            assert!(result.is_err());
+            assert!(frames.is_empty());
+        }
+        for gas in 0..4 {
+            let (zero, frames) = probe(&format!("{gas}:0"), true);
+            zero.unwrap();
+            assert_eq!(frames, vec![cpl::build_write(gas + 1, 1401, &[0])]);
+        }
+    }
+    #[test]
+    fn probe_rejects_nitrogen_quantization_above_its_bringup_limit() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let t = TraceTransport {
+            writes: writes.clone(),
+            ack: true,
+            inner: MockTransport::mfc(),
+        };
+        let result = probe_mfc(
+            Box::new(t),
+            "1,2,3,4",
+            "0.1,4.0,0.1,0.1",
+            Some("1:5"),
+            Plan {
+                cycles: 0,
+                interval_ms: 0,
+                timeout_ms: 500,
+                stop_after_errs: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(writes.lock().unwrap().is_empty());
+    }
 }
