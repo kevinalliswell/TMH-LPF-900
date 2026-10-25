@@ -239,7 +239,7 @@ pub fn assess(program: &Program, samples: &[SampleRow], runtime: &Value) -> Proc
                     if summary
                         .stable_elapsed_s
                         .zip(summary.required_seconds)
-                        .map_or(true, |(s, required)| s < required)
+                        .is_none_or(|(s, required)| s < required)
                     {
                         summary
                             .notes
@@ -255,7 +255,7 @@ pub fn assess(program: &Program, samples: &[SampleRow], runtime: &Value) -> Proc
                     if summary
                         .elapsed_s
                         .zip(summary.required_seconds)
-                        .map_or(true, |(s, required)| s < required)
+                        .is_none_or(|(s, required)| s < required)
                     {
                         summary.notes.push("固定阶段计时不足或缺失".into());
                     }
@@ -266,7 +266,7 @@ pub fn assess(program: &Program, samples: &[SampleRow], runtime: &Value) -> Proc
                     }
                 }
                 StageKind::Cooling => {
-                    if last_temperature.map_or(true, |t| t >= stage.target_temp) {
+                    if last_temperature.is_none_or(|t| t >= stage.target_temp) {
                         summary
                             .notes
                             .push("冷却末点未低于阈值，或末点温度缺失/无效".into());

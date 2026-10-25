@@ -1,0 +1,56 @@
+name: Rust dependency audit
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+  schedule:
+    - cron: "30 0 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Cache pinned audit binary
+        id: audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-0.22.2-rust-1.95.0
+      - name: Install pinned cargo-audit
+        if: steps.audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+      - name: Audit the committed lockfile against current RustSec advisories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          git rev-parse HEAD > verification/source-commit.txt
+          sha256sum Cargo.lock > verification/Cargo.lock.sha256
+          cargo audit --version > verification/audit-version.txt
+          git clone --depth 1 https://github.com/RustSec/advisory-db.git "$RUNNER_TEMP/rustsec-db"
+          cargo fetch --locked
+          node scripts/audit-rust.mjs "$RUNNER_TEMP/rustsec-db"
+      - name: Preserve audit evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verification/
+          if-no-files-found: warn
+          retention-days: 30

@@ -788,6 +788,46 @@ mod tests {
         assert_eq!(&bytes[0..2], b"PK"); // XLSX is a zip archive
         assert!(bytes.len() > 1000);
     }
+
+    #[test]
+    fn xlsx_archive_preserves_sheets_numeric_measurements_and_raw_evidence() {
+        use std::io::{Cursor, Read};
+        let mut row = sample(900.0, 88.0);
+        row.record_json = Some(serde_json::json!({
+            "telemetry": {"health": {"temp_valid": true, "mfc_valid": true, "balance_valid": true}}
+        }).to_string());
+        let mut missing = row.clone();
+        missing.weight = 0.0;
+        missing.system_message = Some("天平离线".into());
+        missing.record_json = Some(serde_json::json!({
+            "telemetry": {"health": {"temp_valid": true, "mfc_valid": true, "balance_valid": false}}
+        }).to_string());
+        let bytes = samples_to_xlsx(&exp(), &[row, missing]).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut part = |name| {
+            let mut xml = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            xml
+        };
+        let workbook = part("xl/workbook.xml");
+        assert!(workbook.contains("name=\"实验信息\""));
+        assert!(workbook.contains("name=\"数据\""));
+        let data = part("xl/worksheets/sheet2.xml");
+        assert!(data.contains("<c r=\"C2\"><v>900</v></c>"));
+        assert!(data.contains("<c r=\"D2\"><v>88</v></c>"));
+        assert!(!data.contains("<c r=\"D3\"><v>0</v></c>"));
+        let strings = part("xl/sharedStrings.xml");
+        for expected in ["鞍钢球团", "质量(g)", "天平离线", "balance_valid", "false"] {
+            assert!(
+                strings.contains(expected),
+                "missing workbook evidence: {expected}"
+            );
+        }
+    }
     #[test]
     fn isolated_temperature_excursion_is_not_hidden_by_the_mean() {
         let mut e = exp();

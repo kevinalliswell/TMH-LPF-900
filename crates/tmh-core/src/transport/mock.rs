@@ -156,7 +156,7 @@ impl Transport for MockTransport {
         if self.disconnected {
             return Err(BusError::Disconnected);
         }
-        if self.faults.drop_every != 0 && self.tx_count % self.faults.drop_every == 0 {
+        if self.faults.drop_every != 0 && self.tx_count.is_multiple_of(self.faults.drop_every) {
             return Err(BusError::Timeout);
         }
 
@@ -167,7 +167,8 @@ impl Transport for MockTransport {
                 }
                 let addr = tx.first().copied().unwrap_or(0);
                 let mut resp = build_temp_response(addr, regs);
-                if self.faults.bad_crc_every != 0 && self.tx_count % self.faults.bad_crc_every == 0
+                if self.faults.bad_crc_every != 0
+                    && self.tx_count.is_multiple_of(self.faults.bad_crc_every)
                 {
                     let last = resp.len() - 1;
                     resp[last] ^= 0xFF;

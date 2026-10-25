@@ -680,7 +680,9 @@ fn flush(
         Err(error) => {
             buffer.consecutive_failures = buffer.consecutive_failures.saturating_add(1);
             if buffer.consecutive_failures == 1
-                || buffer.consecutive_failures % FLUSH_FAILURE_AUDIT_EVERY == 0
+                || buffer
+                    .consecutive_failures
+                    .is_multiple_of(FLUSH_FAILURE_AUDIT_EVERY)
             {
                 audit.write(
                     &AuditEntry::new(
@@ -2910,7 +2912,7 @@ fn calculate_reduction(
         && input
             .source_record
             .as_ref()
-            .map_or(true, |v| v.trim().is_empty())
+            .is_none_or(|v| v.trim().is_empty())
     {
         return Err(CommandError::new(
             "INVALID_PARAMS",
@@ -3067,7 +3069,7 @@ fn save_report_details(
         .as_object()
         .unwrap()
         .values()
-        .any(|v| v.as_str().map_or(true, |s| s.len() > 4096))
+        .any(|v| v.as_str().is_none_or(|s| s.len() > 4096))
     {
         return Err("报告字段过长".into());
     }

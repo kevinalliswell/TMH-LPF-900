@@ -13,6 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-audit:
+    name: RustSec CI
+    uses: ./.github/workflows/rust-audit.yml
   check:
     strategy:
       fail-fast: false
@@ -84,7 +87,7 @@ jobs:
         run: pnpm audit --prod --audit-level moderate
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo test
         shell: bash
@@ -93,14 +96,14 @@ jobs:
           cargo test --workspace --locked 2>&1 | tee verification/rust-tests.log
 
       - name: Compile serial feature (skeleton, not hardware-tested)
-        run: cargo build -p tmh-core --features serial
+        run: cargo build -p tmh-core --features serial --locked
 
       - name: Headless soak (replay dirty session + short mock)
         shell: bash
         run: |
           set -euo pipefail
-          cargo run -p tmh-core --example soak -- --replay fixtures/dirty-session.jsonl 2>&1 | tee verification/replay.log
-          cargo run -p tmh-core --example soak -- --minutes 5 2>&1 | tee verification/mock-soak.log
+          cargo run -p tmh-core --example soak --locked -- --replay fixtures/dirty-session.jsonl 2>&1 | tee verification/replay.log
+          cargo run -p tmh-core --example soak --locked -- --minutes 5 2>&1 | tee verification/mock-soak.log
 
       - name: Version consistency
         run: node scripts/sync-version.mjs --check
@@ -111,9 +114,9 @@ jobs:
           set -euo pipefail
           fail=0
           for crate in tmh-core tmh-protocols; do
-            if cargo tree -p "$crate" -e normal,build --prefix none | grep -qiE '^tauri'; then
+            if cargo tree -p "$crate" -e normal,build --locked --prefix none | grep -qiE '^tauri'; then
               echo "::error::$crate must not depend on tauri"
-              cargo tree -p "$crate" -e normal,build
+              cargo tree -p "$crate" -e normal,build --locked
               fail=1
             else
               echo "ok: $crate has no tauri dependency"

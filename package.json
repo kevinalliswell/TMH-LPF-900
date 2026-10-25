@@ -17,7 +17,8 @@
     "check:tauri-security": "node scripts/check-tauri-security.mjs",
     "check:ipc-contract": "node scripts/check-ipc-contract.mjs",
     "test:scripts": "node --test scripts/*.test.mjs",
-    "verify:context": "node scripts/verification-context.mjs"
+    "verify:context": "node scripts/verification-context.mjs",
+    "audit:rust": "node scripts/audit-rust.mjs"
   },
   "dependencies": {
     "echarts": "^6.1.0",
