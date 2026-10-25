@@ -8,6 +8,9 @@ jobs:
   rust-audit:
     name: RustSec release
     uses: ./.github/workflows/rust-audit.yml
+  source-sbom:
+    name: Release source SBOM
+    uses: ./.github/workflows/source-sbom.yml
   verify-version:
     permissions:
       contents: read
@@ -41,7 +44,7 @@ jobs:
           }
 
   release:
-    needs: [verify-version, rust-audit]
+    needs: [verify-version, rust-audit, source-sbom]
     permissions:
       contents: write
     strategy:
@@ -97,3 +100,39 @@ jobs:
           releaseDraft: true
           prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }} -- --locked
+
+  inventory:
+    needs: [release, source-sbom]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-sbom-${{ github.run_id }}
+          path: verification/
+      - name: Inventory completed draft assets and source evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,url > verification/draft-release.json
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')" = true
+          gh release download "$GITHUB_REF_NAME" --dir release-assets
+          node scripts/package-release.mjs release-assets verification/source-sbom.cdx.json verification/draft-release.json "$GITHUB_REF_NAME"
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')" = true
+          gh release upload "$GITHUB_REF_NAME" release-assets/source-sbom.cdx.json release-assets/manifest.json release-assets/SHA256SUMS.txt release-assets/*.md --clobber
+      - name: Preserve complete draft inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/
+          if-no-files-found: warn
+          retention-days: 30

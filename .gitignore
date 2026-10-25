@@ -40,3 +40,5 @@ coverage/
 
 # Local/CI verification evidence (uploaded as artifacts, never experiment data)
 verification/
+/candidate-assets/
+/release-assets/
