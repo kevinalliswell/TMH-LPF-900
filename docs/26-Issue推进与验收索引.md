@@ -10,7 +10,8 @@
 | 2 | [#99](https://github.com/kevinalliswell/TMH-LPF-900/pull/99) → #98分支 | 启动错误页、严格模式及effective水印；docs/25 |
 | 3 | [#100](https://github.com/kevinalliswell/TMH-LPF-900/pull/100) → #99分支 | IPC/发布脚本测试、CI证据归档、版本同步和本索引 |
 | 4 | [#101](https://github.com/kevinalliswell/TMH-LPF-900/pull/101) → #100分支 | 燃气真实IPC矩阵、拒绝审计、5 L/min上限及探针ACK闭环 |
-| 5 | 基于#101分支，见关联PR | RustSec依赖修复/门禁与锁定构建，docs/27；SBOM另批推进 |
+| 5 | [#102](https://github.com/kevinalliswell/TMH-LPF-900/pull/102) → #101分支 | RustSec依赖修复/门禁与锁定构建，docs/27 |
+| 6 | 基于#102分支，见关联PR | 同源码source SBOM、候选全文件校验和正式草稿资产闭环，docs/28 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -22,7 +23,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 |---|---|---|
 | #19 | 配置不回退已在main；#99严格拒绝模式、启动错误可见、requested/effective | 真实三串口组合根与握手；显式三总线replay会话；厂家协议/现场记录 |
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归 | 命令逐项拒绝审计和全面授权矩阵需继续复核；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
-| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复 | main保护实际启用、glib临时风险到期复查、SBOM/正式checksum/签名与密钥负责人、现场发布证据 |
+| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
 | #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
@@ -41,7 +42,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
 | #87 | 已有Windows NSIS离线候选构建/安装冒烟及macOS universal候选验证 | 目标工控机/驱动/离线部署、备份恢复、证书、升级/回滚演练、现场支持负责人 |
 | #88 | main认证锁定/枚举防护/临时密码表单、存储上限及异常回归；文档已校正 | 长时间现场soak与后续文档状态维护 |
-| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建 | SBOM/正式资产checksum、glib到期复查、签名/公证、密钥轮换与灾备、发布/回滚实际演练 |
+| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建；第六批SBOM与全资产清单 | glib到期复查、签名/公证、密钥轮换与灾备、正式资产/发布/回滚实际演练 |
 | #90 | 明确为后续方向池 | v1.0现场通过后，按场景、网络边界和负责人立项，不自动开发 |
 
 ## 仓库策略实况与发布阻断
@@ -84,3 +85,11 @@ PR#98–#101的Linux/Windows CI、Windows NSIS安装冒烟和macOS universal候�
 第五批定向升级TLS/证书、Tokio、event-listener及XLSX依赖，移除未使用的旧ZIP更新解压路径。固定RustSec工具、官方数据库SHA、原始报告与stderr归档；已知漏洞和unsound必须经策略门，精确例外不隐藏公告。当前完整扫描为0条漏洞、1条glib0.18.5临时接受的unsound及9条未维护警告；例外2026-11-20 UTC到期，不能据此宣称风险清零，详见docs/27。
 
 本机全面验证通过：前端86项、Node脚本17项、原生应用107项、core单元109项及普通/candidate工作区全部套件；fmt、普通/candidate clippy、typecheck/lint/build、IPC/安全/版本、生产依赖审计、serial编译、dirty replay、5分钟mock soak、actionlint均通过。新增XLSX实际解包验证数值/缺测/原始证据。独立审查修复了扫描stderr误放行、审计后构建未锁依赖、干净runner缺registry metadata三项，并用全新CARGO_HOME执行fetch→完整审计通过。第五批跨平台状态在本批PR持续跟踪。
+
+## 第六批SBOM与交付证据（2026-10-25）
+
+固定且校验工具字节的Syft 1.55生成CycloneDX 1.7源码锁清单，实际扫描914组件，覆盖所有Cargo.lock包/版本及前端生产依赖。它包含其他平台和开发/构建依赖，不是二进制组成证明。candidate打包和正式草稿inventory同时检查实际检出干净、SBOM源码SHA/版本/dirty一致，再对所有交付字节及manifest计算校验和。正式脚本检查三个updater架构项、签名文件一致性、DMG和草稿/版本，不自动发布；离线CLI fixture不创建tag/release。
+
+本机前端86项、Node脚本26项、原生107项、core单元109项及普通/candidate全部工作区、fmt/两种clippy、typecheck/lint/build、IPC/安全/版本、生产依赖审计、当前RustSec策略、serial、dirty replay、5分钟mock soak、actionlint均通过。真实Syft执行通过；clean SBOM后修改源码仍被接受的问题已先复现再修复。实际构建SHA的干净SBOM会在提交后再次核对。第五批#102的Linux/Windows CI、两次RustSec和probe已通过，candidate仍按实时checks跟踪。
+
+重新核验历史状态：`v0.2.0`实际已于2026-08-31发布，指向`cbed665`且有原生EXE/DMG/tar.gz与updater资产。#23描述中的“没有任何tag”是旧基线事实，不能沿用到当前；docs/12已校正。main仍为`d54b75a`且protected=false。未修改历史发布、仓库策略、main、tag，未将任何现场门勾为完成。

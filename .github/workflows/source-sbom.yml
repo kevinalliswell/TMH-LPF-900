@@ -1,0 +1,41 @@
+name: Source lockfile SBOM
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install checksum-pinned Syft
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 https://github.com/anchore/syft/releases/download/v1.55.0/syft_1.55.0_linux_amd64.tar.gz -o "$RUNNER_TEMP/syft.tar.gz"
+          echo "bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d  $RUNNER_TEMP/syft.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/syft-bin"
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP/syft-bin" syft
+      - name: Generate and check full source lockfile inventory
+        run: node scripts/generate-sbom.mjs "$RUNNER_TEMP/syft-bin/syft"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-sbom-${{ github.run_id }}
+          path: verification/source-sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true

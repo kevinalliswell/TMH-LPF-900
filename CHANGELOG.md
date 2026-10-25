@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- candidate和正式草稿附同源码SBOM；manifest及SHA256覆盖安装包、清单、文档和manifest自身。草稿发布前核对updater资产/签名文件一致性，拒绝脏源码或错版本来源，保留签名/现场未验收范围（#23/#89）。
+
 - 固定RustSec审计及失败证据，绑定被测源码和锁定构建；定向修复TLS/Tokio/event-listener，升级XLSX依赖并移除旧ZIP更新路径。原报告保留glib 0.18.5的到期临时例外及未维护警告，见docs/27（#23/#89）。
 
 - 燃气命令拒绝非有限/负流量并审计拒绝；H₂/CO编译期上限对齐5 L/min，配置不得抬高。探针写入统一经过MFC actor与完整ACK，仅开放N2 0–5 L/min及任意气路归零（#21/#41/#81/#85）。
