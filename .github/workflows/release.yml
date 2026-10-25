@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
 
 jobs:
+  rust-audit:
+    name: RustSec release
+    uses: ./.github/workflows/rust-audit.yml
   verify-version:
     permissions:
       contents: read
@@ -38,7 +41,7 @@ jobs:
           }
 
   release:
-    needs: verify-version
+    needs: [verify-version, rust-audit]
     permissions:
       contents: write
     strategy:
@@ -93,4 +96,4 @@ jobs:
           releaseBody: "See CHANGELOG.md. NSIS offline installer + signed updater artifacts (latest.json). Windows Authenticode signing requires a certificate — see docs/09."
           releaseDraft: true
           prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} -- --locked

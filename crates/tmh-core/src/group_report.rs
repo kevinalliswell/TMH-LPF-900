@@ -42,7 +42,7 @@ pub fn render(record: &TestGroupRevision) -> Result<String, String> {
         snapshot
             .trials
             .get(*i)
-            .map_or(true, |t| t.exclusion_reason.is_some())
+            .is_none_or(|t| t.exclusion_reason.is_some())
     }) {
         return Err("检验组有效试验映射无效".into());
     }

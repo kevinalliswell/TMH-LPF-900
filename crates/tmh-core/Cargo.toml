@@ -28,3 +28,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true
+zip = { version = "9.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }

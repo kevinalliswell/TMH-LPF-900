@@ -1,0 +1,11 @@
+[
+  {
+    "id": "RUSTSEC-2024-0429",
+    "package": "glib",
+    "version": "0.18.5",
+    "reviewed_at": "2026-10-25",
+    "expires": "2026-11-20",
+    "owner": "kevinalliswell",
+    "reason": "Temporary Linux GTK3 transitive dependency acceptance, not a fix: Tauri 2 pins glib 0.18; Windows/macOS artifacts do not build glib. Current application and GUI dependency sources contain no array_iter_str/VariantStrIter calls. Linux is CI-only, not a qualified release target. Reassess upstream backport/migration by expiry; see docs/27-Rust依赖安全基线.md and #23/#89."
+  }
+]

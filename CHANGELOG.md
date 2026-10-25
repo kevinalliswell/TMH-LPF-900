@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- 固定RustSec审计及失败证据，绑定被测源码和锁定构建；定向修复TLS/Tokio/event-listener，升级XLSX依赖并移除旧ZIP更新路径。原报告保留glib 0.18.5的到期临时例外及未维护警告，见docs/27（#23/#89）。
+
 - 燃气命令拒绝非有限/负流量并审计拒绝；H₂/CO编译期上限对齐5 L/min，配置不得抬高。探针写入统一经过MFC actor与完整ACK，仅开放N2 0–5 L/min及任意气路归零（#21/#41/#81/#85）。
 
 - 为IPC/发布/版本同步脚本补回归；修正预发布后缀残留与缺标记误通过；正式release要求annotated tag、受保护main和同提交成功CI。CI/candidate保留测试日志与环境SHA索引（#23/#82/#85/#89）。

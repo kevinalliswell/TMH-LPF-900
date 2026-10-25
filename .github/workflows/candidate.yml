@@ -13,7 +13,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-audit:
+    name: RustSec candidate
+    uses: ./.github/workflows/rust-audit.yml
+    with:
+      source_ref: ${{ github.event.pull_request.head.sha || github.sha }}
   bundle:
+    needs: rust-audit
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -71,10 +77,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all --check
-          cargo clippy --workspace --all-targets --features tmh-app/candidate -- -D warnings
+          cargo clippy --workspace --all-targets --features tmh-app/candidate --locked -- -D warnings
           cargo test --workspace --locked --features tmh-app/candidate 2>&1 | tee verification/rust-tests.log
       - name: Build isolated candidate installers
-        run: pnpm tauri build --ci --features candidate --config src-tauri/tauri.candidate.conf.json ${{ matrix.args }}
+        run: pnpm tauri build --ci --features candidate --config src-tauri/tauri.candidate.conf.json ${{ matrix.args }} -- --locked
       - name: Windows installed application smoke
         if: runner.os == 'Windows'
         shell: pwsh

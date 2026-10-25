@@ -8,7 +8,9 @@
 |---|---|---|
 | 1 | [#98](https://github.com/kevinalliswell/TMH-LPF-900/pull/98) → main | 统一命令错误、真实IPC拒绝不改数据；docs/24 |
 | 2 | [#99](https://github.com/kevinalliswell/TMH-LPF-900/pull/99) → #98分支 | 启动错误页、严格模式及effective水印；docs/25 |
-| 3 | 基于#99分支，见关联PR | IPC/发布脚本测试、CI证据归档、版本同步和本索引 |
+| 3 | [#100](https://github.com/kevinalliswell/TMH-LPF-900/pull/100) → #99分支 | IPC/发布脚本测试、CI证据归档、版本同步和本索引 |
+| 4 | [#101](https://github.com/kevinalliswell/TMH-LPF-900/pull/101) → #100分支 | 燃气真实IPC矩阵、拒绝审计、5 L/min上限及探针ACK闭环 |
+| 5 | 基于#101分支，见关联PR | RustSec依赖修复/门禁与锁定构建，docs/27；SBOM另批推进 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -20,7 +22,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 |---|---|---|
 | #19 | 配置不回退已在main；#99严格拒绝模式、启动错误可见、requested/effective | 真实三串口组合根与握手；显式三总线replay会话；厂家协议/现场记录 |
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归 | 命令逐项拒绝审计和全面授权矩阵需继续复核；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
-| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁 | main保护实际启用、Rust依赖审计、SBOM/正式checksum/签名与密钥负责人、现场发布证据 |
+| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复 | main保护实际启用、glib临时风险到期复查、SBOM/正式checksum/签名与密钥负责人、现场发布证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
 | #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
@@ -39,7 +41,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
 | #87 | 已有Windows NSIS离线候选构建/安装冒烟及macOS universal候选验证 | 目标工控机/驱动/离线部署、备份恢复、证书、升级/回滚演练、现场支持负责人 |
 | #88 | main认证锁定/枚举防护/临时密码表单、存储上限及异常回归；文档已校正 | 长时间现场soak与后续文档状态维护 |
-| #89 | tag-only release与candidate分离；第三批来源/测试门禁 | SBOM/正式资产checksum、签名/公证、密钥轮换与灾备、发布/回滚实际演练 |
+| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建 | SBOM/正式资产checksum、glib到期复查、签名/公证、密钥轮换与灾备、发布/回滚实际演练 |
 | #90 | 明确为后续方向池 | v1.0现场通过后，按场景、网络边界和负责人立项，不自动开发 |
 
 ## 仓库策略实况与发布阻断
@@ -74,3 +76,11 @@ PR#98的Ubuntu CI已通过；其余Windows/candidate及后续批次跨平台状�
 第四批本机最终验证（2026-10-24）：前端86项、Node脚本12项、原生应用107项、core单元108项及工作区普通/candidate所有套件通过，probe新增3项回归。fmt/clippy/typecheck/lint/build、IPC/安全/版本、生产依赖审计、serial编译、dirty replay与5分钟mock soak、actionlint均通过。独立安全审查未发现新增阻断。负流量、10→5编译上限、负限值归零、N2量化超限均先复现失败再修复。此证据仍为软件模拟验证。
 
 远端状态更新：PR#98 Linux/Windows CI、Windows NSIS安装冒烟与macOS universal候选均已成功；#99 Linux/Windows CI及macOS候选成功，Windows候选仍以实时checks为准；#100 Linux/Windows CI及macOS候选成功，Windows候选仍以checks为准。#98是较早批次，不能作为第四批新代码已跨平台通过的证据。
+
+## 第五批依赖安全与最终状态更新（2026-10-25）
+
+PR#98–#101的Linux/Windows CI、Windows NSIS安装冒烟和macOS universal候选现已全部成功；#101另有probe Windows构建成功。结果分别对应各PR的被测源码，不能替代第五批新依赖的跨平台验证。
+
+第五批定向升级TLS/证书、Tokio、event-listener及XLSX依赖，移除未使用的旧ZIP更新解压路径。固定RustSec工具、官方数据库SHA、原始报告与stderr归档；已知漏洞和unsound必须经策略门，精确例外不隐藏公告。当前完整扫描为0条漏洞、1条glib0.18.5临时接受的unsound及9条未维护警告；例外2026-11-20 UTC到期，不能据此宣称风险清零，详见docs/27。
+
+本机全面验证通过：前端86项、Node脚本17项、原生应用107项、core单元109项及普通/candidate工作区全部套件；fmt、普通/candidate clippy、typecheck/lint/build、IPC/安全/版本、生产依赖审计、serial编译、dirty replay、5分钟mock soak、actionlint均通过。新增XLSX实际解包验证数值/缺测/原始证据。独立审查修复了扫描stderr误放行、审计后构建未锁依赖、干净runner缺registry metadata三项，并用全新CARGO_HOME执行fetch→完整审计通过。第五批跨平台状态在本批PR持续跟踪。

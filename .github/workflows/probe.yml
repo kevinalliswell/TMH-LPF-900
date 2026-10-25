@@ -22,7 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build tmh-probe (release)
-        run: cargo build --release -p tmh-probe
+        run: cargo build --release -p tmh-probe --locked
 
       - name: Upload probe exe
         uses: actions/upload-artifact@v4

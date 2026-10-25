@@ -13,6 +13,8 @@
 
 每批提交前：fmt、clippy、工作区 Rust（普通与 candidate）、前端 typecheck/lint/test/build、IPC/安全/版本门禁、serial 编译、dirty replay 与 mock soak、生产依赖审计。PR 的 Linux/Windows CI 和 Windows/macOS candidate 结果另行核对。
 
+2026-10-25进展：前四批PR #98–#101所有跨平台及candidate已成功。第五批加入RustSec门及定向依赖修复，glib0.18.5精确临时例外到2026-11-20；后续优先SBOM/正式资产checksum，再继续命令族的实际IPC授权/拒绝审计矩阵。风险、范围和证据见docs/27。
+
 ## 实验约束
 
 以 docs/13、16、18、19 的已核对国标与当前冻结证据为准。#42 中旧最小二乘/Rt 表述不能覆盖已修正的终点和 RVI 计算规则。H2/CO 唯一钳制点、已确认设定值恢复、保护气氛锁存与持久化恢复语义保持回归。

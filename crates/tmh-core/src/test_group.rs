@@ -81,7 +81,7 @@ pub fn validate_request(request: &GroupRequest) -> Result<(), String> {
         .as_object()
         .ok_or("报告资料无效")?
         .values()
-        .any(|v| v.as_str().map_or(true, |s| s.len() > 4096))
+        .any(|v| v.as_str().is_none_or(|s| s.len() > 4096))
     {
         return Err("组报告资料每项不能超过 4096 字节".into());
     }
@@ -156,7 +156,7 @@ fn analysis_of(trial: &FrozenTrial, policy: &GroupPolicy) -> Result<TrialIndices
             row.experiment_id
         ));
     }
-    if trial.analysis_revision_id.map_or(true, |v| v <= 0) {
+    if trial.analysis_revision_id.is_none_or(|v| v <= 0) {
         return Err("缺少可追溯的单次分析版本，请重新分析后再组检".into());
     }
     let analysis: Value = serde_json::from_str(
