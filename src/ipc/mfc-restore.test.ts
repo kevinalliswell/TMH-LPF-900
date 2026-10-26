@@ -4,6 +4,8 @@ import type { TelemetrySnapshot } from "./types";
 beforeEach(() => vi.resetModules());
 
 async function devices() {
+  const auth = await import("./authMock");
+  auth.mockBootstrapAdmin("admin", "测试员", "test-password");
   const mock = await import("./mock");
   const snapshot = () => {
     let value: TelemetrySnapshot | undefined;

@@ -61,6 +61,7 @@ import {
   mockSetOnOff,
   mockSetAllValves,
   mockShutoff,
+  mockShutoffFlammableGases,
   mockResetSafety,
   mockSkipStage,
   mockAcknowledgeStage,
@@ -311,7 +312,7 @@ export async function closeAllValves(): Promise<void> {
 }
 
 export async function shutoffFlammableGases(): Promise<void> {
-  if (!isTauri()) return void mockShutoff();
+  if (!isTauri()) return void mockShutoffFlammableGases();
   await invoke("shutoff_flammable_gases");
 }
 
