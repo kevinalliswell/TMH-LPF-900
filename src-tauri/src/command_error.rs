@@ -47,6 +47,7 @@ impl From<&str> for CommandError {
             "BALANCE_BUSY" => "天平去皮尚未完成，请等待回执",
             "APP_CLOSING" => "应用正在关闭，暂不能执行此操作",
             "UPDATE_IN_PROGRESS" => "正在安装更新，请等待完成",
+            "PERSISTENCE_PENDING" => "存在待保存数据，请先恢复保存",
             "SAFETY_LATCHED" => "保护仍锁存，请确认安全条件后重试",
             "DEVICE_BUSY" => "设备命令队列已满，请稍后重试",
             "DEVICE_COMMAND_FAILED" => "设备操作未完成，请检查设备状态",

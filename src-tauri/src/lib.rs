@@ -2578,7 +2578,7 @@ fn save_custom_program(
     program: Program,
     reason: String,
 ) -> CommandResult<Program> {
-    custom_programs::save(&state, program, &reason).map_err(CommandError::from)
+    custom_programs::save(&state, program, &reason)
 }
 
 #[tauri::command]
@@ -2591,7 +2591,7 @@ fn list_custom_program_revisions(
 
 #[tauri::command]
 fn delete_custom_program(state: State<AppState>, id: String) -> CommandResult<()> {
-    custom_programs::delete(&state, &id).map_err(CommandError::from)
+    custom_programs::delete(&state, &id)
 }
 
 // ---- History query ----------------------------------------------------------
@@ -3037,7 +3037,7 @@ fn save_test_group(
     state: State<'_, AppState>,
     request: groups::GroupRequest,
 ) -> CommandResult<tmh_core::storage::TestGroupRevision> {
-    groups::save(&state, request).map_err(CommandError::from)
+    groups::save(&state, request)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn list_test_groups(
@@ -3626,6 +3626,7 @@ mod tests {
     mod startup_tests;
     mod storage_fault_tests;
     mod tare_pending_tests;
+    mod template_group_audit_tests;
 
     /// A real database and mock hub for domain permission tests. Separate headless
     /// IPC matrices exercise the registered command wrappers, audit and device effects.

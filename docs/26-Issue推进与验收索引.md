@@ -14,6 +14,8 @@
 | 6 | [#103](https://github.com/kevinalliswell/TMH-LPF-900/pull/103) → #102分支 | 同源码source SBOM、候选全文件校验和正式草稿资产闭环，docs/28 |
 | 7 | [#104](https://github.com/kevinalliswell/TMH-LPF-900/pull/104) → #103分支 | 设备控制审计、去皮称量基准、忙碌与关闭保护 |
 | 8 | [#105](https://github.com/kevinalliswell/TMH-LPF-900/pull/105) → #104分支 | 实验控制完整审计、恢复互斥和过期回执保护 |
+| 9 | [#106](https://github.com/kevinalliswell/TMH-LPF-900/pull/106) → #105分支 | 实验数据/分析/补录授权及终局审计、损坏执行快照拒绝 |
+| 10 | [#107](https://github.com/kevinalliswell/TMH-LPF-900/pull/107) → #106分支 | 自定义程序/检验组保存审计及生命周期保护 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -127,3 +129,13 @@ PR#98–#101的Linux/Windows CI、Windows NSIS安装冒烟和macOS universal候�
 SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发器故障回归验证原记录、采样及历史分析版本回滚。存在但损坏的执行程序快照明确返回ANALYSIS_DATA_INVALID，不再回退为行上的实验类型；无快照旧记录保留现有兼容规则。计算公式、有效采样统计、computed_by和只追加历史结构不变，单次计算仍不冒称完整国标验收。
 
 新增6组真实IPC回归涵盖六主体、合法写入、状态/类型/输入拒绝、SQLite故障、更新/退出及损坏快照；独立审查无剩余阻断。本机前端89、脚本26、Rust普通/candidate工作区各432项（应用141/core单元110及其余套件）；fmt/两种clippy、typecheck/lint/build、IPC/安全/版本、生产依赖/RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。模板/检验组、导出和浏览器mock保持下一批；尚未启动本地服务。
+
+## 第十批模板与检验组写入审计（2026-10-26）
+
+自定义程序保存/删除、检验组版本保存现在在生命周期边界内使用一次授权身份，覆盖权限/目标版本检查、数据提交与单次终局审计。认证存储和SQLite故障分别记为FAILURE；SQL错误返回稳定STORAGE_ERROR。拒绝运行中、更新和接受关闭期间的自定义程序写入，检验组另保留待持久化保护。标准模板只读、版本乐观并发校验及派生关系保留；检验组仍只追加版本并冻结成员证据。预览与读取不写入、不审计；没有改动统计公式、成员选择或判定口径。
+
+新增6项真实IPC回归：六类主体矩阵和合法版本写入、陈旧/非法/运行中/待更新/接受关闭拒绝、SQLite触发器导致原值和版本完整回滚、认证数据库故障、待保存实验保护。另修正Windows CI暴露的设备关闭测试同步条件：先消费最终快照，再等待watch sender明确关闭，避免把transport析构与线程结束的短暂间隔误判为设备未关闭；真实控制流程未改。
+
+本机全面验证：前端89项、Node脚本26项，Rust普通/candidate工作区各438项（应用147、core单元110及其余协议/集成测试）通过；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay及300模拟秒/300行mock soak通过。RustSec仍有docs/27所列单一glib 0.18.5到期例外和9项未维护告警，不能表述为零风险。未启动本地服务。
+
+后续只余导出命令终局审计及浏览器mock/native权限和状态一致性的软件批次，再启动本地mock服务走用户流程。真实硬件、协议与新旧系统同批样品验收继续等待现场资料。
