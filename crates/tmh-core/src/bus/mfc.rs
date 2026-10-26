@@ -24,6 +24,7 @@ const IDX_CO2: usize = 2;
 const IDX_CO: usize = 3;
 
 /// One gas channel reading (display L/min).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct GasReading {
     pub pv: f64,

@@ -3,6 +3,7 @@ use serde::Serialize;
 
 pub(crate) type CommandResult<T> = Result<T, CommandError>;
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct CommandError {
     pub code: String,

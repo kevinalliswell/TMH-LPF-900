@@ -10,8 +10,10 @@ use uuid::Uuid;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ConfigSnapshot {
+    #[cfg_attr(feature = "typescript-export", ts(type = "string"))]
     pub path: PathBuf,
     pub revision: String,
     pub applied: CommConfig,

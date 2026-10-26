@@ -86,23 +86,34 @@ pub enum StorageError {
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 /// An `experiments` row.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExperimentRow {
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub sample_id: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub project_name: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub experiment_time: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub program_snapshot_json: Option<String>,
     pub experiment_id: String,
     pub experiment_name: String,
     pub sample_name: String,
     pub sample_weight: f64,
     pub start_time: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub end_time: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub description: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub operator: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub experiment_type: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub analysis_results_json: Option<String>,
     pub created_at: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub owner_user_id: Option<String>,
 }
 

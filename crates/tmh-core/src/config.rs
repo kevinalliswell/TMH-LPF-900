@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommConfig {
     #[serde(rename = "COM_RS485_MFC")]
@@ -26,6 +27,7 @@ pub struct CommConfig {
     pub gas_safety_limits: GasSafetyLimits,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SerialParams {
     pub port: String,
@@ -36,6 +38,7 @@ pub struct SerialParams {
     pub timeout: f64,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempParams {
     pub port: String,
@@ -54,11 +57,13 @@ pub struct TempParams {
     pub signed_registers: bool,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sampling {
     pub interval_s: f64,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Performance {
     pub data_collection_interval: f64,
@@ -67,6 +72,7 @@ pub struct Performance {
     pub heartbeat_timeout: f64,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SlaveAddrMfc {
     #[serde(rename = "H2")]
@@ -79,6 +85,7 @@ pub struct SlaveAddrMfc {
     pub co: u8,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowScaling {
     #[serde(rename = "H2")]
@@ -91,6 +98,7 @@ pub struct FlowScaling {
     pub co: f64,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GasSafetyLimits {
     #[serde(rename = "H2")]

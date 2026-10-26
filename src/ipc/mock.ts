@@ -307,6 +307,7 @@ function runningState(r: MockRun): ExperimentState {
 
 function sampleNow(r: MockRun, t8: number): SampleDto {
   return {
+    record: null,
     timestamp: new Date().toISOString(),
     experiment_duration: fmtHms(r.totalElapsedS),
     temperature: Number(t8.toFixed(1)),
@@ -322,6 +323,7 @@ function sampleNow(r: MockRun, t8: number): SampleDto {
 
 function archive(r: MockRun, completed = true, outcome = "completed"): void {
   const detail: ExperimentDetail = {
+    revisions: [],
     experiment_id: r.id,
     experiment_name: r.sample,
     sample_id: r.sampleId,
@@ -602,6 +604,7 @@ function simulate(program: ProgramDto, w0: number): SampleDto[] {
       n2_flow: s.gas[1] ?? 0,
       h2_flow: s.gas[0] ?? 0,
       experiment_status: "RUNNING",
+      record: null,
     });
     stableEl = Math.abs(t - s.target_temp) <= s.tolerance ? stableEl + 60 : 0;
     if (
@@ -628,6 +631,8 @@ function seed(
   const samples = simulate(program, w0);
   history.set(id, {
     detail: {
+      revisions: [],
+      runtime: {},
       experiment_id: id,
       experiment_name: name,
       sample_name: name,

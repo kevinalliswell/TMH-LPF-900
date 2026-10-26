@@ -1,4 +1,5 @@
 import type { ProgramDto, StageDto } from "../../ipc/types";
+import type { JsonValue } from "../../ipc/types.generated";
 import { conditionChanges, standardParent } from "../../ipc/programRules";
 import { gasSummary } from "./programUtils";
 
@@ -12,8 +13,12 @@ const labels: Record<keyof StageDto, string> = {
   ramp_rate: "升温率 (℃/min)",
   gas: "气体 (L/min)",
 };
-function display(value: string | number | number[]) {
-  return Array.isArray(value) ? gasSummary(value) : String(value);
+function display(value: JsonValue) {
+  if (Array.isArray(value) && value.every((item): item is number => typeof item === "number"))
+    return gasSummary(value);
+  return typeof value === "object" && value !== null
+    ? JSON.stringify(value)
+    : String(value);
 }
 export function ProgramProvenance({
   program,
@@ -75,7 +80,7 @@ export function ProgramProvenance({
                   style={{ borderTop: "1px solid var(--border)" }}
                 >
                   <td className="p-1">
-                    {c.stage_index + 1} · {labels[c.field]}
+                    {c.stage_index + 1} · {labels[c.field as keyof StageDto] ?? c.field}
                   </td>
                   <td className="p-1">{display(c.before)}</td>
                   <td className="p-1">{display(c.after)}</td>

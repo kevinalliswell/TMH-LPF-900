@@ -51,6 +51,7 @@ impl std::fmt::Display for AuthCode {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PublicUser {
     pub user_id: String,
@@ -60,6 +61,7 @@ pub struct PublicUser {
     pub is_active: bool,
     pub must_change_password: bool,
     pub created_at: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub last_login_at: Option<String>,
 }
 
@@ -78,6 +80,7 @@ impl From<&UserRow> for PublicUser {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AuthStatus {
@@ -88,6 +91,7 @@ pub enum AuthStatus {
     Locked,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthSnapshot {
     pub status: AuthStatus,

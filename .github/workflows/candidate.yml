@@ -88,6 +88,8 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --features tmh-app/candidate --locked -- -D warnings
           cargo test --workspace --locked --features tmh-app/candidate 2>&1 | tee verification/rust-tests.log
+      - name: Rust DTO to TypeScript contract
+        run: pnpm check:ipc-types
       - name: Build isolated candidate installers
         run: pnpm tauri build --ci --features candidate --config src-tauri/tauri.candidate.conf.json ${{ matrix.args }} -- --locked
       - name: Windows installed application smoke

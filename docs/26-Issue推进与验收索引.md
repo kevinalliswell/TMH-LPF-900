@@ -44,7 +44,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #79 | #99完成可拒绝的软件边界，模式和配置测试 | 与#19同项硬件/会话缺口；不得标记real-ready |
 | #80 | Probe工具与serial编译、模拟协议金帧回归 | 设备型号/手册/接线/原始抓包、冷启断线重连、完整四阶段真机soak |
 | #81 | main保护锁存/抢占/ACK、恢复SV；hub_emergency_priority、device_lifecycle_tests；#112区分窗口关闭与系统退出审计来源 | 断电、拔线、真实ACK与安全气氛现场验证及ON/OFF协议结论 |
-| #82 | IPC参数/注册/错误返回门禁、版本同步、docs/24；第三批为门禁本身补回归 | DTO仍手工映射，新增DTO需序列化/IPC断言；main实际保护与外部发布证据 |
+| #82 | #98统一错误DTO；#113将Rust/Serde wire DTO生成至TypeScript，并门禁62个已注册命令的返回DTO、59个invoke参数、handler注册；版本同步与docs/24 | main保护配置、跨平台CI与外部发布证据；非IPC UI草稿仍是前端模型 |
 | #83 | main配置/权限/预检；#98稳定错误；#99初始化失败不进入控制台；#109对齐浏览器mock设备、实验及历史权限；#111补配置保存关闭/授权/故障边界 | 逐命令拒绝审计与授权矩阵剩余项、真机配置重启验证 |
 | #84 | main计时、冻结分析与账户审计；#98补分析拒绝契约；#112修复窗口退出误记system | 同#41/#42/#43现场结果和剩余审计复核 |
 | #85 | 原生SQLite故障、锁中毒、幂等恢复、紧急优先级；第三批CI归档日志/上下文 | 桌面replay/real故障接口与逐命令矩阵；现场恢复/掉电证明 |
@@ -182,3 +182,11 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 新增3项Rust回归覆盖管理员窗口关闭、匿名窗口关闭、已登录用户下的系统退出，以及用户接受关闭后重复系统通知不改写归属。本机全面验证：前端101项、Node脚本26项，Rust普通/candidate工作区各460项（应用169、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。RustSec仍有docs/27所列临时glib例外和9项未维护告警；现场退出/断电行为仍需目标设备验收。未启动本地服务。
 
 远端状态：PR#112代码head `a0a585a` 的Ubuntu、Windows、两项RustSec及源码SBOM检查均因GitHub Actions预算阻止任务启动而失败，候选bundle跳过；这些不是远端代码测试失败，也不能算CI通过。
+
+## 第十六批 Rust/TypeScript IPC DTO 单一映射（2026-10-26）
+
+处理 #82：前端 IPC DTO 改由 Rust/Serde 类型生成，`typescript-export` 仅用于类型生成与检查，不进入默认生产构建。新增生成文件新鲜度检查，并将生成 DTO 纳入命令契约门禁；当前覆盖62个已注册命令及59处前端 invoke。新引用但未登记的响应 DTO 会使契约检查失败。仅将本来属于 IPC 的结构类型作为生成源；前端局部实验表单模型仍由 UI 自己维护。设备算法、实验流程、持久化语义和硬件控制未改动。
+
+新增生成文件过期和未登记返回 DTO 的回归。本机全面验证：前端101项、Node脚本27项，Rust普通/candidate工作区各460项（各有1项既有跨进程探测忽略）；另执行类型生成新鲜度检查并通过。`cargo fmt`、普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay、300模拟秒/300行soak及actionlint通过。RustSec仍有docs/27所列glib临时例外及9项未维护告警。远端CI以PR实际检查结果为准；未把本机结果当作远端通过。此阶段仍未启动服务。
+
+PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #112分支，保持未合并。该批完成后软件 Issue 推进进入收尾，下一步启动本地浏览器 mock 服务，验证主要交互和权限边界；真实设备、现场资料、传感器校准及硬件联锁仍须现场验收。

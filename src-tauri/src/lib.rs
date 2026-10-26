@@ -19,6 +19,8 @@ mod experiment_data;
 use command_error::{CommandError, CommandResult};
 mod custom_programs;
 mod groups;
+#[cfg(feature = "typescript-export")]
+mod ipc_types;
 mod persistence;
 mod procedure;
 mod report_exports;
@@ -195,6 +197,7 @@ impl ExpControl {
 
 /// The experiment snapshot published to the UI (serde snake_case, matching the M3 TS
 /// bindings; `phase`/`stage_kind` render as SCREAMING_SNAKE_CASE via their own attrs).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Clone, serde::Serialize)]
 struct ExperimentStatus {
     updating: bool,
@@ -1337,12 +1340,14 @@ fn retry_pending_save<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()>
 
 // ---- DTOs -------------------------------------------------------------------
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct AppInfo {
     name: String,
     version: String,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct GasLimits {
     h2: f64,
@@ -1352,6 +1357,7 @@ struct GasLimits {
 
 /// Cadences the UI needs to mirror the backend (docs/06 §6.3), so the staleness threshold
 /// and refresh rate come from `comm_config.json` instead of duplicated constants (#44).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct RuntimeSettings {
     sampling_interval_s: f64,
@@ -1360,12 +1366,14 @@ struct RuntimeSettings {
     idle_timeout_s: i64,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct HealthDot {
     connected: bool,
     consecutive_errors: u32,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct DeviceHealthDto {
     temp: HealthDot,
@@ -1373,6 +1381,7 @@ struct DeviceHealthDto {
     balance: HealthDot,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct TareResultDto {
     success: bool,
@@ -1380,6 +1389,7 @@ struct TareResultDto {
     weight: Option<f64>,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct PublicSafetyStatus {
     experiment_running: bool,
@@ -2079,6 +2089,7 @@ fn unsubscribe_telemetry(state: State<AppState>) -> CommandResult<()> {
     Ok(())
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct PreflightIssue {
     code: String,
@@ -2101,6 +2112,7 @@ impl PreflightIssue {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct ExperimentPreflightResult {
     ok: bool,
@@ -2109,6 +2121,7 @@ struct ExperimentPreflightResult {
     program: Option<Program>,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct ExperimentStartDefaults {
     sample_id: String,
@@ -2598,20 +2611,28 @@ fn delete_custom_program(state: State<AppState>, id: String) -> CommandResult<()
 
 // ---- History query ----------------------------------------------------------
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct ExperimentSummary {
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     sample_id: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     project_name: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     end_time: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     operator: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_type: Option<String>,
     has_analysis: bool,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     owner_user_id: Option<String>,
 }
 
@@ -2633,26 +2654,39 @@ fn summary_of(r: ExperimentRow) -> ExperimentSummary {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct ExperimentDetail {
+    #[cfg_attr(feature = "typescript-export", ts(type = "Record<string, unknown>[]"))]
     revisions: Vec<serde_json::Value>,
+    #[cfg_attr(feature = "typescript-export", ts(type = "Record<string, unknown>"))]
     runtime: serde_json::Value,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     program_snapshot: Option<Program>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     sample_id: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     project_name: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_time: Option<String>,
     experiment_id: String,
     experiment_name: String,
     sample_name: String,
     sample_weight: f64,
     start_time: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     end_time: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     description: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     operator: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_type: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(type = "Record<string, unknown> | null", optional = nullable))]
     analysis: Option<serde_json::Value>,
     created_at: String,
     sample_count: i64,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     owner_user_id: Option<String>,
 }
 
@@ -2687,11 +2721,15 @@ fn detail_of(r: ExperimentRow, sample_count: i64) -> ExperimentDetail {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize)]
 struct SampleDto {
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     quality: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(type = "Record<string, unknown> | null", optional = nullable))]
     record: Option<serde_json::Value>,
     timestamp: String,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_duration: Option<String>,
     temperature: f64,
     weight: f64,
@@ -2700,6 +2738,7 @@ struct SampleDto {
     co2_flow: f64,
     n2_flow: f64,
     h2_flow: f64,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     experiment_status: Option<String>,
 }
 
@@ -3003,6 +3042,7 @@ fn analyze_gb13240(
     experiment_data::analyze_gb13240(&state, id, input)
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Deserialize, serde::Serialize)]
 struct ReportDetails {
     lab_name: String,
@@ -3108,15 +3148,19 @@ fn export_experiment<R: tauri::Runtime>(
 
 // ---- Software update (docs/09 §9.3) -----------------------------------------
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(serde::Serialize, Clone)]
 struct UpdateCheck {
     /// Whether update checking is enabled (config/env gate; OFF by default).
     enabled: bool,
     current_version: String,
     available: bool,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     new_version: Option<String>,
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     notes: Option<String>,
     /// A friendly message when the manifest endpoint is unreachable (offline工控机).
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     error: Option<String>,
 }
 

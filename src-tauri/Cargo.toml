@@ -9,6 +9,7 @@ description = "TMH-LPF-900 desktop shell (Tauri v2)."
 [features]
 default = []
 candidate = []
+typescript-export = ["dep:ts-rs", "tmh-core/typescript-export"]
 
 [lib]
 name = "tmh_app_lib"
@@ -32,6 +33,7 @@ tauri-plugin-single-instance = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 tauri-plugin-process = { workspace = true }
+ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 tauri = { workspace = true, features = ["test"] }

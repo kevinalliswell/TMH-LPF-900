@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 
 pub const GROUP_CALCULATION_VERSION: &str = "GB-GROUP-2026-09-08.1";
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialKind {
@@ -15,6 +16,7 @@ pub enum MaterialKind {
     Natural,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitSpec {
     pub a: f64,
@@ -23,6 +25,7 @@ pub struct LimitSpec {
     pub basis: String,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupPolicy {
     pub method: String,
@@ -31,6 +34,7 @@ pub struct GroupPolicy {
     pub manual_limits: Option<LimitSpec>,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrialIndices {
     pub experiment_id: String,
@@ -40,12 +44,14 @@ pub struct TrialIndices {
     pub rdi_minus_0_5: Option<f64>,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupDecision {
     pub required_count: usize,
     pub selected_indices: Vec<usize>,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupEvaluation {
     pub calculation_version: String,

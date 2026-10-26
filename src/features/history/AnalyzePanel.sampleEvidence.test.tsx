@@ -45,6 +45,8 @@ function detailWith(analysis: Record<string, unknown>): ExperimentDetail {
     experiment_type: "REDUCIBILITY",
     start_time: "2026-09-13T10:00:00+08:00",
     end_time: "2026-09-13T13:00:00+08:00",
+    revisions: [],
+    runtime: {},
     created_at: "2026-09-13T10:00:00+08:00",
     sample_count: 12,
     analysis,

@@ -31,6 +31,7 @@ clap = { version = "4", features = ["derive"] }
 argon2 = { version = "0.5", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 uuid = { version = "1", features = ["v4"] }
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 
 [profile.release]
 strip = true

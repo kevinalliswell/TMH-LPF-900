@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Stage type.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum StageKind {
@@ -14,6 +15,7 @@ pub enum StageKind {
 }
 
 /// One program stage (docs/05 §5.3).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgramSource {
@@ -22,6 +24,7 @@ pub enum ProgramSource {
 }
 
 /// One program stage (docs/05 §5.3).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stage {
     pub name: String,
@@ -37,15 +40,20 @@ pub struct Stage {
 }
 
 /// A full experiment program.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub provenance: Option<crate::provenance::ProgramProvenance>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub template_revision: Option<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub base_standard_id: Option<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub base_standard_version: Option<String>,
     pub id: String,
     pub name: String,

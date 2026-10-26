@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const SAFETY_ATMOSPHERE: [f64; 4] = [0.0, 5.0, 0.0, 0.0];
 
 /// Experiment phase (docs/05 §5.1).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Phase {

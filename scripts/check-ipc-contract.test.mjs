@@ -32,3 +32,14 @@ test("generic runtime injection keeps the same wire argument contract", () => {
   const source = rust().replace("fn query(", "fn query<R: tauri::Runtime>(").replace("state: State<AppState>,", "app: AppHandle<R>, state: State<AppState>,");
   assert.deepEqual(checkIpcContract(source, 'invoke("query", { max_points: 4 })').errors, []);
 });
+
+test("registered command return DTOs must have generated TypeScript declarations", () => {
+  const source = rust(undefined, "CommandResult<QueryReply>");
+  const call = 'invoke("query", { max_points: 4 })';
+  assert(
+    checkIpcContract(source, call, "export type OtherReply = {}; ").errors.some((line) =>
+      line.includes('return DTO "QueryReply" has no generated TypeScript declaration'),
+    ),
+  );
+  assert.deepEqual(checkIpcContract(source, call, "export type QueryReply = {}; ").errors, []);
+});

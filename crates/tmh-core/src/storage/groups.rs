@@ -4,6 +4,7 @@ use super::{Result, Storage, StorageError};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TestGroupRevision {
     pub group_id: String,
@@ -11,6 +12,7 @@ pub struct TestGroupRevision {
     pub owner_user_id: String,
     pub recorded_by_user_id: String,
     pub created_at: String,
+    #[cfg_attr(feature = "typescript-export", ts(type = "GroupSnapshot"))]
     pub snapshot: serde_json::Value,
 }
 
