@@ -187,6 +187,6 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 
 处理 #82：前端 IPC DTO 改由 Rust/Serde 类型生成，`typescript-export` 仅用于类型生成与检查，不进入默认生产构建。新增生成文件新鲜度检查，并将生成 DTO 纳入命令契约门禁；当前覆盖62个已注册命令及59处前端 invoke。新引用但未登记的响应 DTO 会使契约检查失败。仅将本来属于 IPC 的结构类型作为生成源；前端局部实验表单模型仍由 UI 自己维护。设备算法、实验流程、持久化语义和硬件控制未改动。
 
-新增生成文件过期和未登记返回 DTO 的回归。本机全面验证：前端101项、Node脚本27项，Rust普通/candidate工作区各460项（各有1项既有跨进程探测忽略）；另执行类型生成新鲜度检查并通过。`cargo fmt`、普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay、300模拟秒/300行soak及actionlint通过。RustSec仍有docs/27所列glib临时例外及9项未维护告警。远端CI以PR实际检查结果为准；未把本机结果当作远端通过。此阶段仍未启动服务。
+新增生成文件过期和未登记返回 DTO 的回归。本机全面验证：前端101项、Node脚本27项，Rust普通/candidate工作区各460项（各有1项既有跨进程探测忽略）；另执行类型生成新鲜度检查并通过。`cargo fmt`、普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay、300模拟秒/300行soak及actionlint通过。RustSec仍有docs/27所列glib临时例外及9项未维护告警。PR #113 的 Ubuntu/Windows、两项RustSec和候选SBOM检查在runner启动前被GitHub Actions预算阻止，bundle跳过；这不属于代码执行失败，也不能算远端CI通过。此阶段仍未启动服务。
 
 PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #112分支，保持未合并。该批完成后软件 Issue 推进进入收尾，下一步启动本地浏览器 mock 服务，验证主要交互和权限边界；真实设备、现场资料、传感器校准及硬件联锁仍须现场验收。
