@@ -16,6 +16,7 @@
 | 8 | [#105](https://github.com/kevinalliswell/TMH-LPF-900/pull/105) → #104分支 | 实验控制完整审计、恢复互斥和过期回执保护 |
 | 9 | [#106](https://github.com/kevinalliswell/TMH-LPF-900/pull/106) → #105分支 | 实验数据/分析/补录授权及终局审计、损坏执行快照拒绝 |
 | 10 | [#107](https://github.com/kevinalliswell/TMH-LPF-900/pull/107) → #106分支 | 自定义程序/检验组保存审计及生命周期保护 |
+| 11 | [#108](https://github.com/kevinalliswell/TMH-LPF-900/pull/108) → #107分支 | 单次报告、采样导出与检验组报告终局审计 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -139,3 +140,11 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 本机全面验证：前端89项、Node脚本26项，Rust普通/candidate工作区各438项（应用147、core单元110及其余协议/集成测试）通过；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay及300模拟秒/300行mock soak通过。RustSec仍有docs/27所列单一glib 0.18.5到期例外和9项未维护告警，不能表述为零风险。未启动本地服务。
 
 后续只余导出命令终局审计及浏览器mock/native权限和状态一致性的软件批次，再启动本地mock服务走用户流程。真实硬件、协议与新旧系统同批样品验收继续等待现场资料。
+
+## 第十一批报告与数据导出审计（2026-10-26）
+
+单次HTML报告、CSV/TXT/XLSX采样导出和指定检验组版本HTML/JSON导出统一在生命周期锁内检查授权身份、对象归属及更新/关闭状态；只在文件写入后记SUCCESS。越权、未登录、非法格式和生命周期拒绝记REJECTED；SQLite、损坏报告证据及导出目录写入故障记FAILURE并返回稳定错误码，不反射SQL/操作系统诊断。文件打开属于写入成功后的尽力操作，打开失败仍返回已保存路径。导出只读冻结数据，不改实验记录、公式、分组版本或历史内容；文件名中的记录ID作路径组件编码。
+
+新增9项Rust回归，覆盖三命令六主体IPC矩阵、CSV/TXT/XLSX格式、坏分析证据、数据库/认证/文件系统故障、更新/关闭拒绝和路径组件编码。本机前端89项、脚本26项、Rust普通/candidate工作区各447项（应用156、core单元110及其余测试）；fmt/普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay和300模拟秒/300行soak通过。RustSec告警和临时例外仍见docs/27。
+
+截至本批，#107远端Actions因仓库预算未能启动；本机验证不替代远端Windows/Linux构建。此批仍未启动本地服务。下批核对浏览器mock与原生权限/状态边界。

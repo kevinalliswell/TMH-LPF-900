@@ -199,31 +199,7 @@ pub(super) fn list(state: &AppState, offset: u32) -> Result<Vec<TestGroupRevisio
 }
 
 /// Export exactly one immutable revision; authorization precedes all filesystem I/O.
+#[cfg(test)]
 pub(super) fn export_report(state: &AppState, id: &str, revision: u64) -> Result<String, String> {
-    let user = current_user(state)?;
-    let record = lock(&state.storage)
-        .test_group_revision(id, Some(revision))
-        .map_err(|e| e.to_string())?
-        .ok_or("检验组版本不存在")?;
-    authorize(&record, &user)?;
-    let html = tmh_core::group_report::render(&record)?;
-    let evidence = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
-    let dir = state.exports_dir.join(&user.user_id);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!(
-        "report-{}-v{}.html",
-        record.group_id, record.revision
-    ));
-    std::fs::write(path.with_extension("json"), evidence).map_err(|e| e.to_string())?;
-    std::fs::write(&path, html).map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Export,
-            "generate_test_group_report",
-            AuditResult::Success,
-        )
-        .operator(user.display_name)
-        .detail(serde_json::json!({"group_id":record.group_id,"revision":record.revision})),
-    );
-    Ok(path.to_string_lossy().into_owned())
+    report_exports::generate_test_group_report(state, id, revision).map_err(|e| e.to_string())
 }
