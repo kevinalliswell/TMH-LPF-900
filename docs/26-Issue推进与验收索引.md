@@ -13,6 +13,7 @@
 | 5 | [#102](https://github.com/kevinalliswell/TMH-LPF-900/pull/102) → #101分支 | RustSec依赖修复/门禁与锁定构建，docs/27 |
 | 6 | [#103](https://github.com/kevinalliswell/TMH-LPF-900/pull/103) → #102分支 | 同源码source SBOM、候选全文件校验和正式草稿资产闭环，docs/28 |
 | 7 | [#104](https://github.com/kevinalliswell/TMH-LPF-900/pull/104) → #103分支 | 设备控制审计、去皮称量基准、忙碌与关闭保护 |
+| 8 | [#105](https://github.com/kevinalliswell/TMH-LPF-900/pull/105) → #104分支 | 实验控制完整审计、恢复互斥和过期回执保护 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -118,3 +119,11 @@ PR#98–#101的Linux/Windows CI、Windows NSIS安装冒烟和macOS universal候�
 新增13项回归：控制六主体矩阵、无效/重复阶段请求、设备服务关闭、复位过期/失败、恢复互斥和迟到停止。迟到停止通过实际设备写屏障及后续零流量ACK建立顺序；删除状态版本保护时，较新的Idle被旧失败覆盖，补充回归能检出。独立审查发现的问题均已修复。
 
 全面本机验证：前端89、脚本26、Rust普通/candidate工作区各426项（应用135、core单元110及其余套件）；fmt/两种clippy、typecheck/lint/build、IPC/安全/版本、生产依赖审计、RustSec策略、serial、dirty replay、300模拟秒/300行soak通过。下一批为数据变更/分析、模板/检验组、导出及浏览器mock的一致性。未启动本地服务，仍待软件批次完成后集中验证。
+
+## 第九批实验数据与分析审计（2026-10-26）
+
+六项命令：归属变更、删除、RI/RDI/FSI分析和报告补录，统一记录受理/拒绝/失败及授权时操作者。数据操作移入experiment_data模块，Tauri入口保持原参数和DTO。生命周期锁覆盖权限、对象检查、写入和审计，阻止更新/关闭以及归属变更/删除跨越分析授权；已结束记录仍可在另一实验运行时处理。保留归属变更和报告资料原有准备时机，未额外要求全部记录结束。
+
+SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发器故障回归验证原记录、采样及历史分析版本回滚。存在但损坏的执行程序快照明确返回ANALYSIS_DATA_INVALID，不再回退为行上的实验类型；无快照旧记录保留现有兼容规则。计算公式、有效采样统计、computed_by和只追加历史结构不变，单次计算仍不冒称完整国标验收。
+
+新增6组真实IPC回归涵盖六主体、合法写入、状态/类型/输入拒绝、SQLite故障、更新/退出及损坏快照；独立审查无剩余阻断。本机前端89、脚本26、Rust普通/candidate工作区各432项（应用141/core单元110及其余套件）；fmt/两种clippy、typecheck/lint/build、IPC/安全/版本、生产依赖/RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。模板/检验组、导出和浏览器mock保持下一批；尚未启动本地服务。

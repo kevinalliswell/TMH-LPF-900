@@ -1,6 +1,23 @@
 //! One terminal record for a protected command, separate from later engine events.
 use super::*;
 
+pub(super) fn authorize(state: &AppState, role: UserRole) -> (String, CommandResult<UserRow>) {
+    let (operator, authorization) = state
+        .auth
+        .require_user_with_operator(&lock(&state.storage), epoch_now());
+    let authorization = authorization
+        .map_err(auth_error)
+        .map_err(CommandError::from)
+        .and_then(|user| {
+            if role.is_admin() && !user.role.is_admin() {
+                Err(CommandError::from("FORBIDDEN"))
+            } else {
+                Ok(user)
+            }
+        });
+    (operator, authorization)
+}
+
 pub(super) fn finish<T>(
     state: &AppState,
     category: Category,

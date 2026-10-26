@@ -126,7 +126,7 @@ fn analysis_sample_counts_are_frozen_per_analysis_and_manual_points_are_not_samp
     assert_eq!(first["sample_evidence"]["total_sample_count"], 0);
     assert_eq!(first["manual_used"], true);
     assert!((first["reduction_rate_index"].as_f64().unwrap() - 3.36).abs() < 1e-12);
-    persist_analysis(&state, &row.experiment_id, "GB/T 13241", "Alice", &first).unwrap();
+    persist_analysis(&state, &row.experiment_id, "Alice", &first).unwrap();
     let second = calculate_reduction(
         &row,
         &mixed_samples(),
@@ -134,7 +134,7 @@ fn analysis_sample_counts_are_frozen_per_analysis_and_manual_points_are_not_samp
         &input,
     )
     .unwrap();
-    persist_analysis(&state, &row.experiment_id, "GB/T 13241", "Alice", &second).unwrap();
+    persist_analysis(&state, &row.experiment_id, "Alice", &second).unwrap();
     let revisions = lock(&state.storage)
         .analysis_revisions(&row.experiment_id)
         .unwrap();
