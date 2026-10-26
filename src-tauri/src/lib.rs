@@ -15,6 +15,7 @@ mod build_profile;
 mod command_audit;
 mod command_error;
 mod config_commands;
+mod experiment_data;
 use command_error::{CommandError, CommandResult};
 mod custom_programs;
 mod groups;
@@ -314,7 +315,7 @@ fn authorize_experiment(
 ) -> Result<ExperimentRow, String> {
     let row = lock(&state.storage)
         .get_experiment(id)
-        .map_err(|e| e.to_string())?
+        .map_err(|_| "STORAGE_ERROR".to_string())?
         .ok_or_else(|| "实验不存在".to_string())?;
     if may_access_experiment(user.role, &user.user_id, row.owner_user_id.as_deref()) {
         Ok(row)
@@ -1509,41 +1510,7 @@ fn set_experiment_owner(
     experiment_id: String,
     owner_user_id: Option<String>,
 ) -> CommandResult<()> {
-    let actor = current_admin(&state)?;
-    if state.exp.snapshot().experiment_id.as_deref() == Some(experiment_id.as_str()) {
-        return Err("无法变更正在运行实验的归属".into());
-    }
-    let storage = lock(&state.storage);
-    let experiment = storage
-        .get_experiment(&experiment_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "实验不存在".to_string())?;
-    if let Some(owner_id) = owner_user_id.as_deref() {
-        let owner = storage
-            .get_user(owner_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "USER_NOT_FOUND".to_string())?;
-        if !owner.is_active {
-            return Err(AuthCode::AccountDisabled.to_string().into());
-        }
-    }
-    storage
-        .set_experiment_owner(&experiment_id, owner_user_id.as_deref())
-        .map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "set_experiment_owner",
-            AuditResult::Success,
-        )
-        .operator(actor.display_name)
-        .detail(serde_json::json!({
-            "id": experiment_id,
-            "old_owner_user_id": experiment.owner_user_id,
-            "new_owner_user_id": owner_user_id
-        })),
-    );
-    Ok(())
+    experiment_data::set_experiment_owner(&state, experiment_id, owner_user_id)
 }
 
 #[tauri::command]
@@ -2800,35 +2767,7 @@ fn get_experiment_samples(
 
 #[tauri::command]
 fn delete_experiment(state: State<AppState>, id: String) -> CommandResult<()> {
-    let actor = current_admin(&state)?;
-    if state.exp.persistence_pending() {
-        return Err(CommandError::new(
-            "INVALID_STATE",
-            "存在尚未保存的数据，请先重试保存",
-        ));
-    }
-    // Never delete the run currently in progress.
-    if state.exp.snapshot().experiment_id.as_deref() == Some(id.as_str()) {
-        return Err(CommandError::new("INVALID_STATE", "无法删除正在运行的实验"));
-    }
-    let mut storage = lock(&state.storage);
-    if storage
-        .get_experiment(&id)
-        .map_err(|e| e.to_string())?
-        .is_some_and(|r| r.end_time.is_none())
-    {
-        return Err(CommandError::new(
-            "INVALID_STATE",
-            "实验尚未完成保存，不能删除",
-        ));
-    }
-    storage.delete_experiment(&id).map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(Category::Experiment, "delete", AuditResult::Success)
-            .operator(actor.display_name)
-            .detail(serde_json::json!({ "id": id })),
-    );
-    Ok(())
+    experiment_data::delete_experiment(&state, id)
 }
 
 // ---- GB analysis ------------------------------------------------------------
@@ -2904,72 +2843,13 @@ fn value_at(points: &[(f64, f64)], time: f64) -> Option<f64> {
     })
 }
 
-/// Persist an analysis-result JSON onto the experiment row and audit it.
-fn persist_analysis(
-    state: &AppState,
-    id: &str,
-    standard: &str,
-    operator: &str,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    let mut versioned = value.clone();
-    versioned["computed_by"] = serde_json::json!(operator);
-    let json = serde_json::to_string(&versioned).map_err(|e| e.to_string())?;
-    lock(&state.storage)
-        .set_analysis_results(id, &json)
-        .map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(Category::Experiment, "analyze", AuditResult::Success)
-            .operator(operator.to_string())
-            .detail(serde_json::json!({ "id": id, "standard": standard })),
-    );
-    Ok(())
-}
-
 /// Authorise access to one experiment and return the session user (needed for audit
 /// attribution at the call site).
+#[cfg(test)]
 fn require_experiment(state: &AppState, id: &str) -> Result<UserRow, String> {
     let user = current_user(state)?;
     authorize_experiment(state, id, &user)?;
     Ok(user)
-}
-
-fn analysis_context(
-    state: &AppState,
-    id: &str,
-    expected: &str,
-) -> CommandResult<(UserRow, ExperimentRow, Vec<SampleRow>, serde_json::Value)> {
-    let user = require_experiment(state, id)?;
-    let db = lock(&state.storage);
-    let row = db
-        .get_experiment(id)
-        .map_err(|e| e.to_string())?
-        .ok_or("实验不存在")?;
-    if row.end_time.is_none() {
-        return Err(CommandError::new("INVALID_STATE", "实验未结束，暂不可分析"));
-    }
-    let program: Option<Program> = row
-        .program_snapshot_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
-    let method = program
-        .as_ref()
-        .and_then(|p| p.base_standard_id.as_deref())
-        .or(row.experiment_type.as_deref());
-    if method != Some(expected) {
-        return Err(CommandError::new(
-            "ANALYSIS_TYPE_MISMATCH",
-            "分析方法与本次执行程序不匹配",
-        ));
-    }
-    let meta = serde_json::from_str(&db.runtime_metadata(id).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok((
-        user,
-        row,
-        db.get_samples(id, 0).map_err(|e| e.to_string())?,
-        meta,
-    ))
 }
 
 #[tauri::command]
@@ -2978,10 +2858,7 @@ fn analyze_gb13241(
     id: String,
     input: ReductionInput,
 ) -> CommandResult<serde_json::Value> {
-    let (user, row, samples, meta) = analysis_context(&state, &id, "REDUCIBILITY")?;
-    let value = calculate_reduction(&row, &samples, &meta, &input)?;
-    persist_analysis(&state, &id, "GB/T 13241", &user.display_name, &value)?;
-    Ok(value)
+    experiment_data::analyze_gb13241(&state, id, input)
 }
 fn reduction_endpoint(row: &ExperimentRow) -> Result<(f64, bool), String> {
     let Some(raw) = &row.program_snapshot_json else {
@@ -3113,32 +2990,7 @@ fn analyze_gb13242(
     id: String,
     input: RdiInput,
 ) -> CommandResult<serde_json::Value> {
-    let (user, _, _, meta) = analysis_context(&state, &id, "LOW_TEMP_DEGRADATION")?;
-    let result = rdi(input.m0, input.m1, input.m2, input.m3).ok_or_else(|| {
-        CommandError::new(
-            "INVALID_PARAMS",
-            "入鼓质量或筛上质量无效：须为有限非负值且筛上合计不大于入鼓质量",
-        )
-    })?;
-    if !input.drum_rpm.is_finite()
-        || input.drum_rpm <= 0.0
-        || input.drum_revolutions == 0
-        || !input.sieve_seconds.is_finite()
-        || input.sieve_seconds <= 0.0
-    {
-        return Err(CommandError::new(
-            "INVALID_PARAMS",
-            "请填写实际转鼓与筛分记录",
-        ));
-    }
-    let external_conditions_met = (input.drum_rpm - 30.0).abs() <= 1.0
-        && input.drum_revolutions == 300
-        && input.sieve_seconds == 60.0;
-    let value = serde_json::json!({"standard":"GB/T 13242","standard_version":"2017","calculation_version":CALCULATION_VERSION,
-      "input":input,"rdi_plus_6_3":result.rdi_plus_6_3,"rdi_plus_3_15":result.rdi_plus_3_15,"rdi_minus_0_5":result.rdi_minus_0_5,
-      "external_conditions_met":external_conditions_met,"runtime_evidence":meta,"result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
-    persist_analysis(&state, &id, "GB/T 13242", &user.display_name, &value)?;
-    Ok(value)
+    experiment_data::analyze_gb13242(&state, id, input)
 }
 #[tauri::command]
 fn analyze_gb13240(
@@ -3146,20 +2998,7 @@ fn analyze_gb13240(
     id: String,
     input: SwellingInput,
 ) -> CommandResult<serde_json::Value> {
-    let (user, _, _, meta) = analysis_context(&state, &id, "FREE_SWELLING")?;
-    if input.pellet_count != 18 || input.volume_method.trim().is_empty() || !input.same_method {
-        return Err(CommandError::new(
-            "INVALID_PARAMS",
-            "须为同一份 18 颗球团的总体积，并确认还原前后采用相同体积测定方法",
-        ));
-    }
-    let result = free_swelling(&[(input.v0, input.v1)])
-        .ok_or_else(|| CommandError::new("INVALID_PARAMS", "整份体积必须为有限正值"))?;
-    let value = serde_json::json!({"standard":"GB/T 13240","standard_version":"2018","calculation_version":CALCULATION_VERSION,
-      "input":input,"swelling_index":result.swelling_index,"runtime_evidence":meta,
-      "result_scope":"single_trial","standard_conformity":"pending_group_and_process_verification","computed_at":iso_now()});
-    persist_analysis(&state, &id, "GB/T 13240", &user.display_name, &value)?;
-    Ok(value)
+    experiment_data::analyze_gb13240(&state, id, input)
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -3182,26 +3021,7 @@ fn save_report_details(
     id: String,
     details: ReportDetails,
 ) -> CommandResult<()> {
-    let user = require_experiment(&state, &id)?;
-    let value = serde_json::to_value(&details).map_err(|e| e.to_string())?;
-    if value
-        .as_object()
-        .unwrap()
-        .values()
-        .any(|v| v.as_str().is_none_or(|s| s.len() > 4096))
-    {
-        return Err("报告字段过长".into());
-    }
-    let patch = serde_json::json!({"report_details":details,"report_details_operator":user.display_name,"report_details_updated_at":iso_now()});
-    lock(&state.storage)
-        .save_report_revision(&id, &patch.to_string())
-        .map_err(|e| e.to_string())?;
-    state.audit.write(
-        &AuditEntry::new(Category::Experiment, "report_details", AuditResult::Success)
-            .operator(user.display_name)
-            .detail(serde_json::json!({"id":id})),
-    );
-    Ok(())
+    experiment_data::save_report_details(&state, id, details)
 }
 
 // ---- Repeat-test groups ---------------------------------------------------
@@ -3791,6 +3611,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::experiment_data::persist_analysis;
     use super::*;
     use tmh_core::auth::UserRole;
     mod analysis_sample_tests;
@@ -3798,6 +3619,7 @@ mod tests {
     mod device_control_authorization_tests;
     mod device_lifecycle_tests;
     mod experiment_control_audit_tests;
+    mod experiment_data_audit_tests;
     mod gas_authorization_tests;
     mod group_tests;
     mod recovery_lifecycle_tests;
