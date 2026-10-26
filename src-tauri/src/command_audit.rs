@@ -37,6 +37,7 @@ pub(super) fn finish<T>(
                     | "DEVICE_COMMAND_FAILED"
                     | "RECOVERY_FAILED"
                     | "EXPORT_FAILED"
+                    | "REPORT_DATA_INVALID"
             ) {
                 AuditResult::Failure
             } else {

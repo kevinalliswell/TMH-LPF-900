@@ -21,6 +21,7 @@ mod custom_programs;
 mod groups;
 mod persistence;
 mod procedure;
+mod report_exports;
 mod runtime_mode;
 use runtime_mode::{DeviceMode, RuntimeModeStatus};
 mod user_management;
@@ -36,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(not(test))]
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tmh_core::audit::{AuditEntry, AuditLog, AuditResult, Category};
@@ -3055,12 +3057,21 @@ fn get_test_group(
     groups::get(&state, &id, revision).map_err(CommandError::from)
 }
 #[tauri::command(rename_all = "snake_case")]
-fn generate_test_group_report(app: AppHandle, id: String, revision: u64) -> CommandResult<String> {
-    let path = groups::export_report(&app.state::<AppState>(), &id, revision)?;
-    app.opener()
-        .open_path(path.clone(), None::<&str>)
-        .map_err(|e| format!("报告已保存到 {path}，但打开失败：{e}"))?;
+fn generate_test_group_report<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    revision: u64,
+) -> CommandResult<String> {
+    let path = report_exports::generate_test_group_report(&app.state::<AppState>(), &id, revision)?;
+    open_export(&app, path.clone());
     Ok(path)
+}
+
+fn open_export<R: tauri::Runtime>(app: &AppHandle<R>, path: String) {
+    #[cfg(not(test))]
+    let _ = app.opener().open_path(path, None::<&str>);
+    #[cfg(test)]
+    let _ = (app, path);
 }
 
 // ---- Report & export --------------------------------------------------------
@@ -3077,91 +3088,22 @@ fn reducing_target(mode: Option<&str>) -> Option<f64> {
 
 /// Generate a self-contained HTML report to the exports dir and open it. Returns the path.
 #[tauri::command]
-fn generate_report(app: AppHandle, id: String) -> CommandResult<String> {
-    let st = app.state::<AppState>();
-    let user = current_user(&st)?;
-    authorize_experiment(&st, &id, &user)?;
-    let (exp, samples) = {
-        let s = lock(&st.storage);
-        let exp = s
-            .get_experiment(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or("实验不存在")?;
-        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
-        (exp, samples)
-    };
-    let mut analysis = exp
-        .analysis_results_json
-        .as_deref()
-        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
-    let runtime: serde_json::Value = serde_json::from_str(
-        &lock(&st.storage)
-            .runtime_metadata(&id)
-            .map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let a = analysis.get_or_insert_with(|| serde_json::json!({}));
-    a["report_details"] = runtime["report_details"].clone();
-    a["runtime_evidence"] = runtime;
-    let html = tmh_core::report::render_report_html(
-        &exp,
-        &samples,
-        analysis.as_ref(),
-        reducing_target(exp.experiment_type.as_deref()),
-    );
-    let user_dir = st.exports_dir.join(&user.user_id);
-    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
-    let path = user_dir.join(format!("report-{id}.html"));
-    std::fs::write(&path, html).map_err(|e| e.to_string())?;
-    let p = path.to_string_lossy().to_string();
-    let _ = app.opener().open_path(p.clone(), None::<&str>);
-    st.audit.write(
-        &AuditEntry::new(Category::Export, "generate_report", AuditResult::Success)
-            .operator(user.display_name)
-            .detail(serde_json::json!({ "id": id, "path": p })),
-    );
-    Ok(p)
+fn generate_report<R: tauri::Runtime>(app: AppHandle<R>, id: String) -> CommandResult<String> {
+    let path = report_exports::generate_report(&app.state::<AppState>(), &id)?;
+    open_export(&app, path.clone());
+    Ok(path)
 }
 
 /// Export the sample series as csv / txt / xlsx to the exports dir and open it.
 #[tauri::command]
-fn export_experiment(app: AppHandle, id: String, format: String) -> CommandResult<String> {
-    let st = app.state::<AppState>();
-    let user = current_user(&st)?;
-    authorize_experiment(&st, &id, &user)?;
-    let (exp, samples) = {
-        let s = lock(&st.storage);
-        let exp = s
-            .get_experiment(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or("实验不存在")?;
-        let samples = s.get_samples(&id, 0).map_err(|e| e.to_string())?;
-        (exp, samples)
-    };
-    let (bytes, ext) = match format.as_str() {
-        "csv" => (
-            tmh_core::report::samples_to_csv(&samples).into_bytes(),
-            "csv",
-        ),
-        "txt" => (
-            tmh_core::report::samples_to_tsv(&samples).into_bytes(),
-            "txt",
-        ),
-        "xlsx" => (tmh_core::report::samples_to_xlsx(&exp, &samples)?, "xlsx"),
-        _ => return Err("未知导出格式".into()),
-    };
-    let user_dir = st.exports_dir.join(&user.user_id);
-    std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
-    let path = user_dir.join(format!("{id}.{ext}"));
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    let p = path.to_string_lossy().to_string();
-    let _ = app.opener().open_path(p.clone(), None::<&str>);
-    st.audit.write(
-        &AuditEntry::new(Category::Export, "export_data", AuditResult::Success)
-            .operator(user.display_name)
-            .detail(serde_json::json!({ "id": id, "format": format, "path": p })),
-    );
-    Ok(p)
+fn export_experiment<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    format: String,
+) -> CommandResult<String> {
+    let path = report_exports::export_experiment(&app.state::<AppState>(), &id, &format)?;
+    open_export(&app, path.clone());
+    Ok(path)
 }
 
 // ---- Software update (docs/09 §9.3) -----------------------------------------
@@ -3620,6 +3562,7 @@ mod tests {
     mod device_lifecycle_tests;
     mod experiment_control_audit_tests;
     mod experiment_data_audit_tests;
+    mod export_audit_tests;
     mod gas_authorization_tests;
     mod group_tests;
     mod recovery_lifecycle_tests;
