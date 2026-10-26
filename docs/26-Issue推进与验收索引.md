@@ -20,6 +20,7 @@
 | 12 | [#109](https://github.com/kevinalliswell/TMH-LPF-900/pull/109) → #108分支 | 浏览器 mock 权限、实验控制和数据归属与原生行为对齐 |
 | 13 | [#110](https://github.com/kevinalliswell/TMH-LPF-900/pull/110) → #109分支 | 更新检查/安装权限、稳定错误码及终局审计 |
 | 14 | [#111](https://github.com/kevinalliswell/TMH-LPF-900/pull/111) → #110分支 | 配置保存接受关闭边界、单次授权快照及故障审计分类 |
+| 15 | [#112](https://github.com/kevinalliswell/TMH-LPF-900/pull/112) → #111分支 | 用户关闭来源及操作者归属 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -33,7 +34,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归 | 命令逐项拒绝审计和全面授权矩阵需继续复核；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
 | #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
-| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
+| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
 | #43 | main的Instant经过时间、deadline采样、停顿不补造；lib.rs中deadline与采样边界测试 | sim_speed=1的现场长周期计时及墙钟偏差证据 |
 | #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；config_store_contract与config_commands_tests、docs/21；#111补接受关闭后拒绝保存和文件故障稳定码 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
@@ -42,10 +43,10 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #49 | 本表把审查项映射到现有实现与阶段 | 保持评估结论随新证据更新，不能批量当作已验收关闭 |
 | #79 | #99完成可拒绝的软件边界，模式和配置测试 | 与#19同项硬件/会话缺口；不得标记real-ready |
 | #80 | Probe工具与serial编译、模拟协议金帧回归 | 设备型号/手册/接线/原始抓包、冷启断线重连、完整四阶段真机soak |
-| #81 | main保护锁存/抢占/ACK、恢复SV；hub_emergency_priority、device_lifecycle_tests | 断电、拔线、真实ACK与安全气氛现场验证及ON/OFF协议结论 |
+| #81 | main保护锁存/抢占/ACK、恢复SV；hub_emergency_priority、device_lifecycle_tests；#112区分窗口关闭与系统退出审计来源 | 断电、拔线、真实ACK与安全气氛现场验证及ON/OFF协议结论 |
 | #82 | IPC参数/注册/错误返回门禁、版本同步、docs/24；第三批为门禁本身补回归 | DTO仍手工映射，新增DTO需序列化/IPC断言；main实际保护与外部发布证据 |
 | #83 | main配置/权限/预检；#98稳定错误；#99初始化失败不进入控制台；#109对齐浏览器mock设备、实验及历史权限；#111补配置保存关闭/授权/故障边界 | 逐命令拒绝审计与授权矩阵剩余项、真机配置重启验证 |
-| #84 | main计时、冻结分析与账户审计；#98补分析拒绝契约 | 同#41/#42/#43现场结果和剩余审计复核 |
+| #84 | main计时、冻结分析与账户审计；#98补分析拒绝契约；#112修复窗口退出误记system | 同#41/#42/#43现场结果和剩余审计复核 |
 | #85 | 原生SQLite故障、锁中毒、幂等恢复、紧急优先级；第三批CI归档日志/上下文 | 桌面replay/real故障接口与逐命令矩阵；现场恢复/掉电证明 |
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
 | #87 | 已有Windows NSIS离线候选构建/安装冒烟及macOS universal候选验证 | 目标工控机/驱动/离线部署、备份恢复、证书、升级/回滚演练、现场支持负责人 |
@@ -173,3 +174,11 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 配置保存现在与应用接受退出、实验控制和更新使用同一生命周期边界；授权身份及权限来自一次会话检查。接受关闭后返回`APP_CLOSING`且不写配置；运行、待保存、更新中使用稳定错误码。过期版本/外部修改归为配置冲突，文件或同步故障用`CONFIG_SAVE_FAILED`并记`FAILURE`，授权SQLite故障使用`STORAGE_ERROR`并记`FAILURE`。原子替换与目录持久性确认语义保持不变。
 
 新增3项Rust回归覆盖关闭后拒绝且不改配置、授权SQLite故障失败审计、配置文件丢失的稳定错误及失败审计；原有管理员/普通用户/锁定权限、运行/待保存/更新阻断、版本冲突、保护ACK失败和配置持久性用例均通过。全面本机验证：前端101项、Node脚本26项，Rust普通/candidate工作区各457项（应用166、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay与300模拟秒/300行soak通过。RustSec仍有docs/27所列glib临时例外及9项未维护警告。PR#110如前所述；PR#111代码head `ebd0940` 的Ubuntu、Windows、两项RustSec及源码SBOM检查均因Actions预算阻止任务启动，候选bundle跳过。不是远端代码测试失败，也不能算CI通过。未启动本地服务。
+
+## 第十五批窗口退出操作者归属（2026-10-26）
+
+窗口`CloseRequested`按用户关闭审计，使用事件发生时的会话快照；无有效会话记`anonymous`。独立`ExitRequested`按系统来源记`system`。退出已被接受时，后续重复通知不再追加记录，因此不会用后到的系统来源覆盖用户来源。安全气氛、停止与保存的退出行为保持不变。
+
+新增3项Rust回归覆盖管理员窗口关闭、匿名窗口关闭、已登录用户下的系统退出，以及用户接受关闭后重复系统通知不改写归属。本机全面验证：前端101项、Node脚本26项，Rust普通/candidate工作区各460项（应用169、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。RustSec仍有docs/27所列临时glib例外和9项未维护告警；现场退出/断电行为仍需目标设备验收。未启动本地服务。
+
+远端状态：PR#112代码head `a0a585a` 的Ubuntu、Windows、两项RustSec及源码SBOM检查均因GitHub Actions预算阻止任务启动而失败，候选bundle跳过；这些不是远端代码测试失败，也不能算CI通过。

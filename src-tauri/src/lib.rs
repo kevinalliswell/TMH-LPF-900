@@ -3343,8 +3343,27 @@ fn finish_update<R: tauri::Runtime>(
 
 // ---- App entrypoint ---------------------------------------------------------
 
+#[derive(Clone, Copy)]
+enum ExitOrigin {
+    UserWindowClose,
+    SystemExit,
+}
+
+impl ExitOrigin {
+    fn audit_source(self) -> &'static str {
+        match self {
+            Self::UserWindowClose => "window_close",
+            Self::SystemExit => "system_exit",
+        }
+    }
+}
+
 /// Return true while stopping, protecting, or saving still requires a live window.
 fn prepare_exit<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    prepare_exit_from(app, ExitOrigin::UserWindowClose)
+}
+
+fn prepare_exit_from<R: tauri::Runtime>(app: &AppHandle<R>, origin: ExitOrigin) -> bool {
     let Some(st) = app.try_state::<AppState>() else {
         return false;
     };
@@ -3354,6 +3373,16 @@ fn prepare_exit<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     if st.exp.closing.load(Ordering::SeqCst) {
         return false;
     }
+    let operator = match origin {
+        ExitOrigin::UserWindowClose => st
+            .auth
+            .snapshot(&lock(&st.storage), epoch_now())
+            .ok()
+            .and_then(|snapshot| snapshot.user)
+            .map(|user| user.display_name)
+            .unwrap_or_else(|| "anonymous".into()),
+        ExitOrigin::SystemExit => "system".into(),
+    };
     st.exp.stop.store(true, Ordering::SeqCst);
     let protection = apply_safety_atmosphere_blocking(&st.hub);
     let blocked = protection.is_err()
@@ -3377,15 +3406,19 @@ fn prepare_exit<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     } else {
         st.exp.closing.store(true, Ordering::SeqCst);
     }
-    st.audit.write(&AuditEntry::new(
-        Category::App,
-        "exit",
-        if blocked {
-            AuditResult::Failure
-        } else {
-            AuditResult::Success
-        },
-    ));
+    st.audit.write(
+        &AuditEntry::new(
+            Category::App,
+            "exit",
+            if blocked {
+                AuditResult::Failure
+            } else {
+                AuditResult::Success
+            },
+        )
+        .operator(operator)
+        .detail(serde_json::json!({"source":origin.audit_source()})),
+    );
     blocked
 }
 
@@ -3622,7 +3655,7 @@ pub fn run() {
                 if code == Some(tauri::RESTART_EXIT_CODE) {
                     return;
                 }
-                if prepare_exit(app) {
+                if prepare_exit_from(app, ExitOrigin::SystemExit) {
                     api.prevent_exit();
                 }
             }
@@ -3638,6 +3671,7 @@ mod tests {
     mod command_error_tests;
     mod device_control_authorization_tests;
     mod device_lifecycle_tests;
+    mod exit_audit_tests;
     mod experiment_control_audit_tests;
     mod experiment_data_audit_tests;
     mod export_audit_tests;
