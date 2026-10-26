@@ -3146,15 +3146,43 @@ fn get_updater_status(app: AppHandle) -> CommandResult<UpdateCheck> {
 /// Check the manifest endpoint for a newer version. Gated; never errors into the UI —
 /// an unreachable endpoint yields a friendly `error` string (offline is normal here).
 #[tauri::command]
-async fn check_for_update(app: AppHandle) -> CommandResult<UpdateCheck> {
-    let operator = current_user(&app.state::<AppState>())?.display_name;
+async fn check_for_update<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<UpdateCheck> {
+    let st = app.state::<AppState>();
     let current = app.package_info().version.to_string();
-    let (enabled, audit) = {
-        let st = app.state::<AppState>();
-        (st.updater_enabled, st.audit.clone())
+    let (operator, authorization, enabled) = {
+        let _lifecycle = lock(&st.exp.lifecycle);
+        let (operator, authorization) = command_audit::authorize(&st, UserRole::User);
+        let authorization = authorization.and_then(|_| {
+            if st.exp.closing.load(Ordering::SeqCst) {
+                Err(CommandError::from("APP_CLOSING"))
+            } else if st.exp.updating.load(Ordering::SeqCst) {
+                Err(CommandError::from("UPDATE_IN_PROGRESS"))
+            } else {
+                Ok(())
+            }
+        });
+        (operator, authorization, st.updater_enabled)
     };
+    if let Err(error) = authorization {
+        return command_audit::finish(
+            &st,
+            Category::App,
+            "check_update",
+            operator,
+            serde_json::json!({"enabled":enabled,"available":false}),
+            Err(error),
+        );
+    }
     let mut check = UpdateCheck::base(enabled, current);
     if !enabled {
+        let _ = command_audit::finish(
+            &st,
+            Category::App,
+            "check_update",
+            operator,
+            serde_json::json!({"enabled":false,"available":false}),
+            Ok(check.clone()),
+        );
         return Ok(check);
     }
     match app.updater() {
@@ -3165,65 +3193,96 @@ async fn check_for_update(app: AppHandle) -> CommandResult<UpdateCheck> {
                 check.notes = update.body.clone();
             }
             Ok(None) => {}
-            Err(e) => {
-                check.error = Some(format!("无法连接更新服务器（离线环境属正常）：{e}"));
-            }
+            Err(_) => check.error = Some("无法连接更新服务器（离线环境属正常）".into()),
         },
-        Err(e) => check.error = Some(format!("更新器不可用：{e}")),
+        Err(_) => check.error = Some("更新器不可用".into()),
     }
-    audit.write(
-        &AuditEntry::new(
-            Category::App,
-            "check_update",
-            if check.error.is_some() {
-                AuditResult::Failure
-            } else {
-                AuditResult::Success
-            },
-        )
-        .operator(operator)
-        .detail(
-            serde_json::json!({ "available": check.available, "new_version": check.new_version }),
-        ),
-    );
+    finish_update_check(&st, operator, &check);
     let _ = app.emit("update-status", &check);
     Ok(check)
 }
 
+fn finish_update_check(state: &AppState, operator: String, check: &UpdateCheck) {
+    let outcome = if check.error.is_some() {
+        Err(CommandError::from("UPDATE_CHECK_FAILED"))
+    } else {
+        Ok(())
+    };
+    let _ = command_audit::finish(
+        state,
+        Category::App,
+        "check_update",
+        operator,
+        serde_json::json!({"enabled":check.enabled,"available":check.available,"new_version":check.new_version}),
+        outcome,
+    );
+}
+
 /// Download + verify (minisign) + install the update, then restart. Gated.
 #[tauri::command]
-async fn install_update(app: AppHandle) -> CommandResult<()> {
+async fn install_update<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     let st = app.state::<AppState>();
-    let operator = current_admin(&st)?.display_name;
-    if !st.updater_enabled {
-        return Err("更新功能未启用".into());
-    }
-    let lease = UpdateLease::begin(st.exp.clone())?;
+    let (operator, lease_result) = {
+        let _lifecycle = lock(&st.exp.lifecycle);
+        let (operator, authorization) = command_audit::authorize(&st, UserRole::Admin);
+        let lease = authorization.and_then(|_| {
+            if !st.updater_enabled {
+                return Err(CommandError::from("UPDATE_DISABLED"));
+            }
+            UpdateLease::begin_locked(&st.exp).map_err(CommandError::from)
+        });
+        (operator, lease)
+    };
+    let lease = match lease_result {
+        Ok(lease) => lease,
+        Err(error) => {
+            return command_audit::finish(
+                &st,
+                Category::App,
+                "install_update",
+                operator,
+                serde_json::json!({"enabled":st.updater_enabled}),
+                Err(error),
+            );
+        }
+    };
     emit_experiment_status(&app, &st.exp.snapshot());
-    let result = perform_update(&app, operator).await;
+    let operation = perform_update(&app).await;
+    let outcome = operation.map_err(|error| match error.as_str() {
+        "UPDATE_NOT_AVAILABLE" => CommandError::from("UPDATE_NOT_AVAILABLE"),
+        _ => CommandError::from("UPDATE_FAILED"),
+    });
+    let result = finish_update(&app, operator, outcome, || app.restart());
     drop(lease);
     emit_experiment_status(&app, &st.exp.snapshot());
-    result.map_err(CommandError::from)
+    result
 }
 
 struct UpdateLease(Arc<ExpControl>);
 impl UpdateLease {
     fn begin(exp: Arc<ExpControl>) -> Result<Self, String> {
-        {
-            let _lifecycle = lock(&exp.lifecycle);
-            if exp.closing.load(Ordering::SeqCst) {
-                return Err("APP_CLOSING".into());
-            }
-            if exp.tare_pending.load(Ordering::SeqCst) {
-                return Err("BALANCE_BUSY".into());
-            }
-            if exp.is_running() || exp.persistence_pending() || exp.updating.load(Ordering::SeqCst)
-            {
-                return Err("请先停止实验并完成数据保存，且不能重复安装更新".into());
-            }
-            exp.updating.store(true, Ordering::SeqCst);
+        let _lifecycle = lock(&exp.lifecycle);
+        Self::begin_locked(&exp)
+    }
+
+    fn begin_locked(exp: &Arc<ExpControl>) -> Result<Self, String> {
+        if exp.closing.load(Ordering::SeqCst) {
+            return Err("APP_CLOSING".into());
         }
-        Ok(Self(exp))
+        if exp.updating.load(Ordering::SeqCst) {
+            return Err("UPDATE_IN_PROGRESS".into());
+        }
+        if exp.tare_pending.load(Ordering::SeqCst) {
+            return Err("BALANCE_BUSY".into());
+        }
+        if exp.is_running() {
+            return Err("EXPERIMENT_RUNNING".into());
+        }
+        if exp.persistence_pending() {
+            return Err("PERSISTENCE_PENDING".into());
+        }
+        exp.updating.store(true, Ordering::SeqCst);
+        Ok(Self(exp.clone()))
     }
 }
 impl Drop for UpdateLease {
@@ -3232,7 +3291,7 @@ impl Drop for UpdateLease {
     }
 }
 
-async fn perform_update(app: &AppHandle, operator: String) -> Result<(), String> {
+async fn perform_update<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let st = app.state::<AppState>();
     // Latch before the first await: no queued/manual gas command may reopen gas
     // while the installer runs; update restart bypasses Tauri's prevent_exit.
@@ -3246,7 +3305,7 @@ async fn perform_update(app: &AppHandle, operator: String) -> Result<(), String>
         .check()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or("已是最新版本")?;
+        .ok_or_else(|| "UPDATE_NOT_AVAILABLE".to_string())?;
     if st.exp.is_running() || st.exp.persistence_pending() {
         return Err("实验或保存尚未结束".into());
     }
@@ -3257,10 +3316,28 @@ async fn perform_update(app: &AppHandle, operator: String) -> Result<(), String>
     if st.exp.is_running() || st.exp.persistence_pending() {
         return Err("数据未保存，不能重启".into());
     }
-    st.audit.write(
-        &AuditEntry::new(Category::App, "install_update", AuditResult::Success).operator(operator),
+    Ok(())
+}
+
+fn finish_update<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    operator: String,
+    outcome: CommandResult<()>,
+    restart: impl FnOnce(),
+) -> CommandResult<()> {
+    let st = app.state::<AppState>();
+    let outcome = command_audit::finish(
+        &st,
+        Category::App,
+        "install_update",
+        operator,
+        serde_json::json!({"enabled":true}),
+        outcome,
     );
-    app.restart();
+    if outcome.is_ok() {
+        restart();
+    }
+    outcome
 }
 
 // ---- App entrypoint ---------------------------------------------------------
@@ -3570,6 +3647,7 @@ mod tests {
     mod storage_fault_tests;
     mod tare_pending_tests;
     mod template_group_audit_tests;
+    mod updater_audit_tests;
 
     /// A real database and mock hub for domain permission tests. Separate headless
     /// IPC matrices exercise the registered command wrappers, audit and device effects.
