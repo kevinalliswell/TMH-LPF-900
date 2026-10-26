@@ -15,11 +15,14 @@ fn authorize(record: &TestGroupRevision, user: &UserRow) -> Result<(), String> {
     }
 }
 fn editable(state: &AppState) -> Result<(), String> {
+    if state.exp.closing.load(Ordering::SeqCst) {
+        return Err("APP_CLOSING".into());
+    }
     if state.exp.updating.load(Ordering::SeqCst) {
-        return Err("正在安装更新，不能保存检验组".into());
+        return Err("UPDATE_IN_PROGRESS".into());
     }
     if state.exp.persistence_pending() {
-        return Err("实验数据尚未完整保存，请先处理保存问题".into());
+        return Err("PERSISTENCE_PENDING".into());
     }
     Ok(())
 }
@@ -35,7 +38,7 @@ fn prepare(
         .unwrap_or_else(|| format!("group-{}", tmh_core::auth::new_user_id()));
     let previous = db
         .test_group_revision(&id, None)
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "STORAGE_ERROR".to_string())?;
     if let Some(previous) = &previous {
         authorize(previous, user)?;
     }
@@ -48,7 +51,7 @@ fn prepare(
     // not silently share another user's source records with that owner.
     let group_owner = if let Some(previous) = &previous {
         db.get_user(&previous.owner_user_id)
-            .map_err(|e| e.to_string())?
+            .map_err(|_| "STORAGE_ERROR".to_string())?
             .ok_or("检验组归属用户不存在")?
     } else {
         user.clone()
@@ -70,7 +73,7 @@ fn prepare(
         }
         let row = db
             .get_experiment(&selection.experiment_id)
-            .map_err(|e| e.to_string())?
+            .map_err(|_| "STORAGE_ERROR".to_string())?
             .ok_or("试验不存在")?;
         if !may_access_experiment(user.role, &user.user_id, row.owner_user_id.as_deref())
             || !may_access_experiment(
@@ -83,16 +86,16 @@ fn prepare(
         }
         let runtime = serde_json::from_str(
             &db.runtime_metadata(&row.experiment_id)
-                .map_err(|e| e.to_string())?,
+                .map_err(|_| "STORAGE_ERROR".to_string())?,
         )
         .map_err(|_| "试验运行记录无法读取")?;
         let analysis_revision_id = db
             .current_analysis_revision_id(&row.experiment_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "STORAGE_ERROR".to_string())?;
         let process_assessment = tmh_core::process_evidence::from_record(
             &row,
             &db.get_samples(&row.experiment_id, 0)
-                .map_err(|e| e.to_string())?,
+                .map_err(|_| "STORAGE_ERROR".to_string())?,
             &runtime,
         );
         trials.push(FrozenTrial {
@@ -119,52 +122,54 @@ pub(super) fn preview(state: &AppState, request: GroupRequest) -> Result<GroupSn
     let (_, _, snapshot) = prepare(&lock(&state.storage), &user, &request)?;
     Ok(snapshot)
 }
-pub(super) fn save(state: &AppState, request: GroupRequest) -> Result<TestGroupRevision, String> {
+pub(super) fn save(state: &AppState, request: GroupRequest) -> CommandResult<TestGroupRevision> {
     let _lifecycle = lock(&state.exp.lifecycle);
-    let user = current_user(state)?;
-    editable(state)?;
-    let mut db = lock(&state.storage);
-    let (id, previous, snapshot) = prepare(&db, &user, &request)?;
-    let record = TestGroupRevision {
-        group_id: id,
-        revision: previous
-            .as_ref()
-            .map_or(Some(1), |r| r.revision.checked_add(1))
-            .ok_or("检验组版本超出范围")?,
-        owner_user_id: previous
-            .as_ref()
-            .map(|r| r.owner_user_id.clone())
-            .unwrap_or_else(|| user.user_id.clone()),
-        recorded_by_user_id: user.user_id.clone(),
-        created_at: iso_now(),
-        snapshot: serde_json::to_value(&snapshot).map_err(|e| e.to_string())?,
-    };
-    db.save_test_group_revision(&record, request.expected_revision)
-        .map_err(|e| e.to_string())?;
-    let selected_ids: Vec<_> = snapshot
-        .evaluation
-        .decision
-        .selected_indices
-        .iter()
-        .map(|i| {
-            &snapshot.trials[snapshot.valid_trial_indices[*i]]
-                .experiment
-                .experiment_id
-        })
-        .collect();
-    state.audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "save_test_group",
-            AuditResult::Success,
-        )
-        .operator(user.display_name)
-        .detail(
-            serde_json::json!({"group_id":record.group_id,"revision":record.revision,
-        "reason":snapshot.reason,"selected_experiment_ids":selected_ids}),
-        ),
-    );
-    Ok(record)
+    let (operator, authorization) = command_audit::authorize(state, UserRole::User);
+    let mut detail = serde_json::json!({"group_id":request.group_id,"reason":request.reason});
+    let outcome = (|| {
+        let user = authorization?;
+        editable(state)?;
+        let mut db = lock(&state.storage);
+        let (id, previous, snapshot) = prepare(&db, &user, &request)?;
+        let record = TestGroupRevision {
+            group_id: id,
+            revision: previous
+                .as_ref()
+                .map_or(Some(1), |r| r.revision.checked_add(1))
+                .ok_or("检验组版本超出范围")?,
+            owner_user_id: previous
+                .as_ref()
+                .map(|r| r.owner_user_id.clone())
+                .unwrap_or_else(|| user.user_id.clone()),
+            recorded_by_user_id: user.user_id.clone(),
+            created_at: iso_now(),
+            snapshot: serde_json::to_value(&snapshot)
+                .map_err(|_| CommandError::from("STORAGE_ERROR"))?,
+        };
+        db.save_test_group_revision(&record, request.expected_revision)
+            .map_err(|_| CommandError::from("STORAGE_ERROR"))?;
+        let selected_ids: Vec<_> = snapshot
+            .evaluation
+            .decision
+            .selected_indices
+            .iter()
+            .map(|i| {
+                &snapshot.trials[snapshot.valid_trial_indices[*i]]
+                    .experiment
+                    .experiment_id
+            })
+            .collect();
+        detail = serde_json::json!({"group_id":record.group_id,"revision":record.revision,"reason":snapshot.reason,"selected_experiment_ids":selected_ids});
+        Ok(record)
+    })();
+    command_audit::finish(
+        state,
+        Category::Experiment,
+        "save_test_group",
+        operator,
+        detail,
+        outcome,
+    )
 }
 pub(super) fn get(
     state: &AppState,

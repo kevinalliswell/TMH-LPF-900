@@ -4,7 +4,7 @@ use crate::groups::{GroupRequest, TrialSelection};
 use tmh_core::repeat_group::MaterialKind;
 use tmh_core::storage::TestGroupRevision;
 
-fn native_group_request(
+pub(super) fn native_group_request(
     group_id: Option<&str>,
     expected_revision: Option<u64>,
     ids: &[&str],
@@ -44,7 +44,7 @@ fn native_group_analysis(ri: f64) -> serde_json::Value {
     })
 }
 
-fn native_group_insert_trial(
+pub(super) fn native_group_insert_trial(
     state: &AppState,
     id: &str,
     owner_seed: &str,

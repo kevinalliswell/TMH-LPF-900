@@ -424,12 +424,28 @@ fn closed_balance_service_returns_failure_and_audits_operator_without_a_prior_su
     let state = app.state::<AppState>();
     let view = webview(&app);
     login(&state, "alice", "temp-password");
+    let mut balance = state.hub.balance_rx();
     state.hub.stop();
     closed
         .recv_timeout(WAIT)
         .expect("balance transport was dropped after its command receiver closed");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match balance.has_changed() {
+            Err(_) => break,
+            Ok(true) => {
+                balance.borrow_and_update();
+            }
+            Ok(false) => {}
+        }
+        assert!(
+            Instant::now() < deadline,
+            "balance worker sender should close after its final snapshot"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(
-        state.hub.balance_rx().has_changed().is_err(),
+        balance.has_changed().is_err(),
         "the balance worker has really exited"
     );
     let before = command_audit(&state, "tare").len();
