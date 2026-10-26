@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- 去皮与手动切断按同一次会话授权并记录拒绝/失败；运行中或待保存时禁止改变称量基准。在途去皮即使调用取消仍阻止启动/更新/关闭，回执前先发布失效快照；接受关闭后拒绝新控制（#21/#41/#45/#81/#83/#85）。
+
 - candidate和正式草稿附同源码SBOM；manifest及SHA256覆盖安装包、清单、文档和manifest自身。草稿发布前核对updater资产/签名文件一致性，拒绝脏源码或错版本来源，保留签名/现场未验收范围（#23/#89）。
 
 - 固定RustSec审计及失败证据，绑定被测源码和锁定构建；定向修复TLS/Tokio/event-listener，升级XLSX依赖并移除旧ZIP更新路径。原报告保留glib 0.18.5的到期临时例外及未维护警告，见docs/27（#23/#89）。

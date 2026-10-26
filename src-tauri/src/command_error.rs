@@ -44,6 +44,8 @@ impl From<&str> for CommandError {
             "INVALID_PARAMS" => "参数校验失败，请核对输入",
             "DEVICE_OFFLINE" => "设备离线，请检查连接",
             "EXPERIMENT_RUNNING" => "实验运行中，禁止此操作",
+            "BALANCE_BUSY" => "天平去皮尚未完成，请等待回执",
+            "APP_CLOSING" => "应用正在关闭，暂不能执行此操作",
             "PORT_IN_USE" => "串口被占用，请关闭其他串口程序",
             // Preserve existing localized diagnostics during the boundary migration.
             // Callers must use COMMAND_FAILED, never parse these messages for logic.

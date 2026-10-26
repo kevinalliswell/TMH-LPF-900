@@ -11,7 +11,7 @@
 | 3 | [#100](https://github.com/kevinalliswell/TMH-LPF-900/pull/100) → #99分支 | IPC/发布脚本测试、CI证据归档、版本同步和本索引 |
 | 4 | [#101](https://github.com/kevinalliswell/TMH-LPF-900/pull/101) → #100分支 | 燃气真实IPC矩阵、拒绝审计、5 L/min上限及探针ACK闭环 |
 | 5 | [#102](https://github.com/kevinalliswell/TMH-LPF-900/pull/102) → #101分支 | RustSec依赖修复/门禁与锁定构建，docs/27 |
-| 6 | 基于#102分支，见关联PR | 同源码source SBOM、候选全文件校验和正式草稿资产闭环，docs/28 |
+| 6 | [#103](https://github.com/kevinalliswell/TMH-LPF-900/pull/103) → #102分支 | 同源码source SBOM、候选全文件校验和正式草稿资产闭环，docs/28 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -93,3 +93,15 @@ PR#98–#101的Linux/Windows CI、Windows NSIS安装冒烟和macOS universal候�
 本机前端86项、Node脚本26项、原生107项、core单元109项及普通/candidate全部工作区、fmt/两种clippy、typecheck/lint/build、IPC/安全/版本、生产依赖审计、当前RustSec策略、serial、dirty replay、5分钟mock soak、actionlint均通过。真实Syft执行通过；clean SBOM后修改源码仍被接受的问题已先复现再修复。实际构建SHA的干净SBOM会在提交后再次核对。第五批#102的Linux/Windows CI、两次RustSec和probe已通过，candidate仍按实时checks跟踪。
 
 重新核验历史状态：`v0.2.0`实际已于2026-08-31发布，指向`cbed665`且有原生EXE/DMG/tar.gz与updater资产。#23描述中的“没有任何tag”是旧基线事实，不能沿用到当前；docs/12已校正。main仍为`d54b75a`且protected=false。未修改历史发布、仓库策略、main、tag，未将任何现场门勾为完成。
+
+## 第七批设备控制与称量基准（2026-10-26）
+
+第六批#103及第五批#102的Linux/Windows CI、RustSec、Windows安装冒烟和macOS universal候选已全部成功，#103同源码SBOM检查也已成功。各批仍保持开放、不合并。
+
+本批补齐去皮及受保护手动切断的六主体真实IPC授权/审计矩阵、设备服务关闭和认证存储失败。运行中或待保存时拒绝去皮，避免破坏docs/13规定的m₁/mₜ同一称量基准。去皮任务独立持有忙碌状态到设备结果和审计完成，界面调用取消也不会提前解除。启动预检/实际启动、重复去皮、更新和关闭都有受控设备竞态回归；接受关闭后拒绝新操作，重复关闭幂等。
+
+任何去皮尝试均使旧重量失效，包括无确认的失败；总线先发布新快照再唤醒回执等待者，之后仍须新的稳定读数。前端同步限制按钮及称量基准提示。运行协议和现场资格保持docs/25边界，未启动本地服务，待其余软件命令批次完成后集中验证。
+
+其余实验停止、保护复位、阶段请求及数据命令的拒绝审计继续按独立批次推进；不能据此将完整命令矩阵或现场门勾为完成。
+
+本机全面验证：前端89项、Node脚本26项，Rust普通/candidate工作区各413项（原生应用122、core单元110，另含协议与集成测试）通过；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay及300模拟秒/300行mock soak全部通过。模拟soak使用逻辑时钟，不是5分钟墙钟设备耐久试验。认证/审计、运行/待保存去皮、未完成去皮放行、关闭后再入队及重复退出均先复现再修复；另补ACK唤醒时同步观察快照的发布边界测试。glib临时例外和9项未维护警告仍按docs/27管理。
