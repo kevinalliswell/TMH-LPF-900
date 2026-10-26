@@ -40,6 +40,7 @@ pub(super) fn finish<T>(
                     | "REPORT_DATA_INVALID"
                     | "UPDATE_FAILED"
                     | "UPDATE_CHECK_FAILED"
+                    | "CONFIG_SAVE_FAILED"
             ) {
                 AuditResult::Failure
             } else {

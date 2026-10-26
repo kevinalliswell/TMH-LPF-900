@@ -57,6 +57,8 @@ impl From<&str> for CommandError {
             "UPDATE_NOT_AVAILABLE" => "当前没有可安装的更新",
             "UPDATE_FAILED" => "更新未能完成，请检查网络、签名和磁盘状态",
             "UPDATE_CHECK_FAILED" => "无法连接更新服务器（离线环境属正常）",
+            "CONFIG_CONFLICT" => "配置已变化，请重新读取后再操作",
+            "CONFIG_SAVE_FAILED" => "通讯配置未能可靠保存，请检查文件访问和磁盘状态",
             "PORT_IN_USE" => "串口被占用，请关闭其他串口程序",
             // Preserve existing localized diagnostics during the boundary migration.
             // Callers must use COMMAND_FAILED, never parse these messages for logic.

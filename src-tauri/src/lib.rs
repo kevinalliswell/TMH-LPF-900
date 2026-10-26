@@ -1553,7 +1553,7 @@ fn save_comm_config(
     config: CommConfig,
     reason: String,
 ) -> CommandResult<tmh_core::config_store::ConfigSnapshot> {
-    config_commands::save(&state, &expected_revision, config, &reason).map_err(CommandError::from)
+    config_commands::save(&state, &expected_revision, config, &reason)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -3260,6 +3260,7 @@ async fn install_update<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<(
 
 struct UpdateLease(Arc<ExpControl>);
 impl UpdateLease {
+    #[cfg(test)]
     fn begin(exp: Arc<ExpControl>) -> Result<Self, String> {
         let _lifecycle = lock(&exp.lifecycle);
         Self::begin_locked(&exp)

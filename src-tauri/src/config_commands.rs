@@ -36,26 +36,18 @@ pub(crate) fn snapshot(state: &AppState) -> Result<ConfigSnapshot, String> {
     Ok(lock(&state.config).snapshot())
 }
 
-fn authorize_admin(state: &AppState) -> (String, Result<UserRow, String>) {
-    let storage = lock(&state.storage);
-    let outcome = state
-        .auth
-        .require_admin(&storage, epoch_now())
-        .map_err(auth_error);
-    let operator = outcome
-        .as_ref()
-        .ok()
-        .map(|actor| actor.display_name.clone())
-        .or_else(|| {
-            state
-                .auth
-                .snapshot(&storage, epoch_now())
-                .ok()
-                .and_then(|snapshot| snapshot.user)
-                .map(|user| user.display_name)
-        })
-        .unwrap_or_else(|| "anonymous".into());
-    (operator, outcome)
+fn config_command_error(error: ConfigStoreError) -> CommandError {
+    let code = match &error {
+        ConfigStoreError::StaleRevision
+        | ConfigStoreError::ExternalChange
+        | ConfigStoreError::MissingFile(_) => "CONFIG_CONFLICT",
+        ConfigStoreError::Config(_) | ConfigStoreError::TooLarge => "INVALID_PARAMS",
+        ConfigStoreError::InvalidPath
+        | ConfigStoreError::Locked(_)
+        | ConfigStoreError::DurabilityUnconfirmed(_)
+        | ConfigStoreError::Io(_) => "CONFIG_SAVE_FAILED",
+    };
+    CommandError::new(code, config_error(error))
 }
 
 pub(crate) fn save(
@@ -63,42 +55,50 @@ pub(crate) fn save(
     expected: &str,
     config: CommConfig,
     reason: &str,
-) -> Result<ConfigSnapshot, String> {
-    let (operator, authorization) = authorize_admin(state);
-    let mut result = AuditResult::Rejected;
+) -> CommandResult<ConfigSnapshot> {
     let _lifecycle = lock(&state.exp.lifecycle);
+    let (operator, authorization) = command_audit::authorize(state, UserRole::Admin);
+    let mut detail = serde_json::json!({
+        "reason": reason.chars().take(500).collect::<String>(),
+        "expected_revision": expected,
+    });
     let outcome = (|| {
         authorization?;
-        if state.exp.is_running()
-            || state.exp.persistence_pending()
-            || state.exp.updating.load(Ordering::SeqCst)
-        {
-            return Err("实验、数据保存或重启更新期间不能修改通讯配置".into());
+        if state.exp.closing.load(Ordering::SeqCst) {
+            return Err(CommandError::from("APP_CLOSING"));
+        }
+        if state.exp.updating.load(Ordering::SeqCst) {
+            return Err(CommandError::from("UPDATE_IN_PROGRESS"));
+        }
+        if state.exp.is_running() {
+            return Err(CommandError::from("EXPERIMENT_RUNNING"));
+        }
+        if state.exp.persistence_pending() {
+            return Err(CommandError::from("PERSISTENCE_PENDING"));
         }
         if reason.trim().is_empty() || reason.chars().count() > 500 {
-            return Err("请填写1至500字的配置修改原因".into());
+            return Err(CommandError::new(
+                "INVALID_PARAMS",
+                "请填写1至500字的配置修改原因",
+            ));
         }
-        match lock(&state.config).save(expected, config) {
-            Ok(saved) => {
-                result = AuditResult::Success;
-                Ok(saved)
-            }
-            Err(error) => {
-                result = match &error {
-                    ConfigStoreError::Io(_) | ConfigStoreError::DurabilityUnconfirmed(_) => {
-                        AuditResult::Failure
-                    }
-                    _ => AuditResult::Rejected,
-                };
-                Err(config_error(error))
-            }
-        }
+        lock(&state.config)
+            .save(expected, config)
+            .map_err(config_command_error)
     })();
     let saved = lock(&state.config).snapshot();
-    state.audit.write(&AuditEntry::new(Category::Config, "save_comm_config", result)
-        .operator(operator).detail(serde_json::json!({"reason": reason.chars().take(500).collect::<String>(), "expected_revision": expected, "revision": saved.revision,
-            "path": saved.path, "saved": saved.saved, "restart_required": saved.restart_required, "error": outcome.as_ref().err()})));
-    outcome
+    detail["revision"] = serde_json::json!(saved.revision);
+    detail["path"] = serde_json::json!(saved.path);
+    detail["saved"] = serde_json::json!(saved.saved);
+    detail["restart_required"] = serde_json::json!(saved.restart_required);
+    command_audit::finish(
+        state,
+        Category::Config,
+        "save_comm_config",
+        operator,
+        detail,
+        outcome,
+    )
 }
 
 pub(crate) fn start_blocker(state: &AppState) -> Option<String> {
@@ -112,41 +112,53 @@ pub(crate) fn start_blocker(state: &AppState) -> Option<String> {
 pub(crate) async fn prepare_restart(
     state: &AppState,
     expected: &str,
-) -> Result<UpdateLease, String> {
-    let (operator, authorization) = authorize_admin(state);
-    let mut result = AuditResult::Rejected;
+) -> CommandResult<UpdateLease> {
     let verify = || {
         let store = lock(&state.config);
         if store.snapshot().revision != expected {
-            return Err("配置版本已变化，请重新读取".to_string());
+            return Err(CommandError::new(
+                "CONFIG_CONFLICT",
+                "配置版本已变化，请重新读取",
+            ));
         }
-        store.verify_saved_file().map_err(config_error)
+        store.verify_saved_file().map_err(config_command_error)
     };
-    let outcome: Result<UpdateLease, String> = async {
-        authorization?;
-        let lease = UpdateLease::begin(state.exp.clone())?;
+    let (operator, lease_result) = {
+        let _lifecycle = lock(&state.exp.lifecycle);
+        let (operator, authorization) = command_audit::authorize(state, UserRole::Admin);
+        let lease = authorization
+            .and_then(|_| UpdateLease::begin_locked(&state.exp).map_err(CommandError::from));
+        (operator, lease)
+    };
+    let outcome: CommandResult<UpdateLease> = async {
+        let lease = lease_result?;
         verify()?;
-        result = AuditResult::Failure;
         state
             .hub
             .request_shutoff_flammable()
             .await
-            .map_err(|_| "保护气氛未获确认，不能重启".to_string())?
-            .map_err(|_| "保护气氛未获确认，不能重启".to_string())?;
+            .map_err(|_| CommandError::new("DEVICE_COMMAND_FAILED", "保护气氛未获确认，不能重启"))?
+            .map_err(|_| {
+                CommandError::new("DEVICE_COMMAND_FAILED", "保护气氛未获确认，不能重启")
+            })?;
         verify()?;
-        if state.exp.is_running() || state.exp.persistence_pending() {
-            return Err("实验或数据尚未保存，不能重启".into());
+        if state.exp.is_running() {
+            return Err(CommandError::from("EXPERIMENT_RUNNING"));
         }
-        result = AuditResult::Success;
+        if state.exp.persistence_pending() {
+            return Err(CommandError::from("PERSISTENCE_PENDING"));
+        }
         Ok(lease)
     }
     .await;
-    state.audit.write(
-        &AuditEntry::new(Category::Config, "restart_for_config", result)
-            .operator(operator)
-            .detail(serde_json::json!({"revision": expected, "error": outcome.as_ref().err()})),
-    );
-    outcome
+    command_audit::finish(
+        state,
+        Category::Config,
+        "restart_for_config",
+        operator,
+        serde_json::json!({"revision": expected}),
+        outcome,
+    )
 }
 
 #[cfg(test)]
