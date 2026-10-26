@@ -16,7 +16,7 @@ fn update_lease_rejects_manual_enqueue_and_safety_reset_before_device_checks() {
         Category::Gas,
         "set_flow",
         serde_json::json!({"gas":0,"requested":3.0}),
-        |hub| {
+        |hub, _user| {
             called.store(true, Ordering::SeqCst);
             Ok(hub.request_set_flow(0, 3.0))
         },
@@ -52,7 +52,7 @@ fn update_lease_cannot_cross_an_authorized_manual_enqueue() {
             Category::Gas,
             "set_flow",
             serde_json::json!({"gas":0,"requested":3.0}),
-            |hub| {
+            |hub, _user| {
                 entered_tx.send(()).map_err(|e| e.to_string())?;
                 release_rx.recv_timeout(WAIT).map_err(|e| e.to_string())?;
                 Ok(hub.request_set_flow(0, 3.0))

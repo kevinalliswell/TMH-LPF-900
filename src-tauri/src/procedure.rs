@@ -53,22 +53,34 @@ pub(super) fn queue_action(
     kind: ActionKind,
     notes: String,
 ) -> Result<(), String> {
-    let user = require_experiment_controller(state)?;
-    let action = StageAction {
-        experiment_id,
-        stage_index,
-        kind,
-        notes: notes.trim().into(),
-        user_id: user.user_id,
-        operator: user.display_name,
-        requested_at: iso_now(),
-    };
-    let mut pending = lock(&state.exp.stage_action);
-    action.validate(&state.exp.snapshot())?;
-    if pending.is_some() {
-        return Err("上一项阶段操作尚未执行，请等待".into());
-    }
-    *pending = Some(action);
+    enqueue_device_control(
+        state,
+        Category::Experiment,
+        "stage_action_request",
+        serde_json::json!({"experiment_id":experiment_id,"stage_index":stage_index,"kind":kind}),
+        |_, user| {
+            // Authorization above and evidence queued here cannot straddle start/update.
+            let action = StageAction {
+                experiment_id: experiment_id.clone(),
+                stage_index,
+                kind,
+                notes: notes.trim().into(),
+                user_id: user.user_id.clone(),
+                operator: user.display_name.clone(),
+                requested_at: iso_now(),
+            };
+            let mut pending = lock(&state.exp.stage_action);
+            action.validate(&state.exp.snapshot())?;
+            if pending.is_some() {
+                return Err("上一项阶段操作尚未执行，请等待".into());
+            }
+            *pending = Some(action);
+            // Keep the request record ahead of engine consumption of this queue entry.
+            state.audit.write(&AuditEntry::new(Category::Experiment, "stage_action_request", AuditResult::Success)
+                .operator(&user.display_name).detail(serde_json::json!({"experiment_id":experiment_id,"stage_index":stage_index,"kind":kind,"queued":true})));
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
