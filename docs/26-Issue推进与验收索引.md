@@ -18,6 +18,7 @@
 | 10 | [#107](https://github.com/kevinalliswell/TMH-LPF-900/pull/107) → #106分支 | 自定义程序/检验组保存审计及生命周期保护 |
 | 11 | [#108](https://github.com/kevinalliswell/TMH-LPF-900/pull/108) → #107分支 | 单次报告、采样导出与检验组报告终局审计 |
 | 12 | [#109](https://github.com/kevinalliswell/TMH-LPF-900/pull/109) → #108分支 | 浏览器 mock 权限、实验控制和数据归属与原生行为对齐 |
+| 13 | [#110](https://github.com/kevinalliswell/TMH-LPF-900/pull/110) → #109分支 | 更新检查/安装权限、稳定错误码及终局审计 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -48,7 +49,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
 | #87 | 已有Windows NSIS离线候选构建/安装冒烟及macOS universal候选验证 | 目标工控机/驱动/离线部署、备份恢复、证书、升级/回滚演练、现场支持负责人 |
 | #88 | main认证锁定/枚举防护/临时密码表单、存储上限及异常回归；文档已校正 | 长时间现场soak与后续文档状态维护 |
-| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建；第六批SBOM与全资产清单 | glib到期复查、签名/公证、密钥轮换与灾备、正式资产/发布/回滚实际演练 |
+| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建；第六批SBOM与全资产清单；#110补更新检查/安装命令权限与终局审计 | glib到期复查、签名/公证、密钥轮换与灾备、正式资产/发布/回滚实际演练 |
 | #90 | 明确为后续方向池 | v1.0现场通过后，按场景、网络边界和负责人立项，不自动开发 |
 
 ## 仓库策略实况与发布阻断
@@ -157,3 +158,11 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 新增12项浏览器 mock 回归，覆盖匿名、锁定与临时密码、运行中去皮基准、owner/admin控制、历史数据隔离/维护、普通切断与紧急匿名停机分界和非法气路错误码。新增测试先复现权限差异；设备流量夹限和流程现有用例仍通过。该批不触碰Tauri控制逻辑或真实设备，不替代#45要求的完整原生逐命令矩阵。
 
 本机阶段验证：前端 Vitest 101 项、Node脚本26项，Rust普通/candidate工作区各447项；typecheck、lint、build、IPC/安全/版本门禁、生产依赖审计、fmt、两种clippy、serial编译、dirty replay、300模拟秒/300行mock soak及RustSec策略均通过。RustSec保留一项glib临时例外及9项未维护告警，见docs/27。#108所有远端Actions均未启动，GitHub明确报告仓库Actions预算阻止运行；这不属于源码测试失败，也不能算远端通过。未启动本地服务。
+
+## 第十三批更新命令权限与审计（2026-10-26）
+
+更新检查在一次受保护会话快照下执行并对授权拒绝、关闭/安装期间请求、禁用状态和检查成功/离线失败记一条终局审计；更新关闭时仍返回原有状态DTO。用户可检查，安装限管理员。安装前在同一生命周期边界内获取更新租约，拒绝正在运行、待保存、去皮中、重复更新或应用关闭；安装成功审计先于重启，失败映射为稳定错误码且不暴露更新器内部诊断。更新过程仍先请求安全气氛，不更改真实更新包、签名和发布路径。
+
+新增7项Rust回归：检查和安装六主体权限、禁用检查DTO、禁用安装、运行阻断、离线检查失败审计、稳定安装失败和成功审计先于重启。成功/失败闭环测试通过可替换restart回调验证，没有访问更新服务器、下载/安装包或真正重启应用。全面本机验证：前端101项、Node脚本26项，Rust普通/candidate工作区各454项（应用163、core单元110及其他协议/集成测试）；fmt/两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。RustSec仍有一项glib临时例外及9项未维护警告，见docs/27。现场更新通道、签名和回滚仍待#89交付验收。
+
+远端状态：截至#110 head `c3d6050`，#109 head `a249245` 与#110的Ubuntu、Windows、两项RustSec及源码SBOM检查均因GitHub Actions预算阻止任务启动而失败，候选bundle跳过；不是代码执行失败，也不能算远端CI通过。各PR的本机全量结果与远端状态分别记录。

@@ -38,6 +38,8 @@ pub(super) fn finish<T>(
                     | "RECOVERY_FAILED"
                     | "EXPORT_FAILED"
                     | "REPORT_DATA_INVALID"
+                    | "UPDATE_FAILED"
+                    | "UPDATE_CHECK_FAILED"
             ) {
                 AuditResult::Failure
             } else {

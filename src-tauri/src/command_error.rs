@@ -53,6 +53,10 @@ impl From<&str> for CommandError {
             "SAFETY_LATCHED" => "保护仍锁存，请确认安全条件后重试",
             "DEVICE_BUSY" => "设备命令队列已满，请稍后重试",
             "DEVICE_COMMAND_FAILED" => "设备操作未完成，请检查设备状态",
+            "UPDATE_DISABLED" => "更新功能未启用",
+            "UPDATE_NOT_AVAILABLE" => "当前没有可安装的更新",
+            "UPDATE_FAILED" => "更新未能完成，请检查网络、签名和磁盘状态",
+            "UPDATE_CHECK_FAILED" => "无法连接更新服务器（离线环境属正常）",
             "PORT_IN_USE" => "串口被占用，请关闭其他串口程序",
             // Preserve existing localized diagnostics during the boundary migration.
             // Callers must use COMMAND_FAILED, never parse these messages for logic.
