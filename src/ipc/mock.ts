@@ -32,7 +32,7 @@ import type {
   TareResult,
   TelemetrySnapshot,
 } from "./types";
-import { mockCurrentUser } from "./authMock";
+import { mockListUsers, mockRequireUser } from "./authMock";
 
 // ---- shared device state (targets drive the physics; tick() reports) ----
 const H2_ABS = 5;
@@ -127,6 +127,7 @@ function quantizeFlow(value: number, step: number, limit: number) {
 }
 
 export function mockSetFlow(gas: number, value: number): ClampResult {
+  requireController();
   if (!Number.isInteger(gas) || gas < 0 || gas >= flowSteps.length || !Number.isFinite(value) || value < 0)
     throw new Error("INVALID_PARAMS");
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
@@ -150,17 +151,25 @@ function rememberFlow(gas: number, value: number): ClampResult {
 }
 
 export function mockSetOnOff(gas: number, on: boolean): void {
+  requireController();
+  setOnOffAuthorized(gas, on);
+}
+
+function setOnOffAuthorized(gas: number, on: boolean): void {
+  if (!Number.isInteger(gas) || gas < 0 || gas >= flowSteps.length)
+    throw new Error("INVALID_PARAMS");
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
   const target = on ? restorableFlow[gas] : 0;
   if (target == null) throw new Error("该通道没有可恢复流量，请先设定");
-  mockSetFlow(gas, target);
+  rememberFlow(gas, target);
 }
 
 export function mockSetAllValves(on: boolean): void {
+  requireController();
   const errors: string[] = [];
   for (const [gas, name] of ["H₂", "N₂", "CO₂", "CO"].entries()) {
     try {
-      mockSetOnOff(gas, on);
+      setOnOffAuthorized(gas, on);
     } catch (error) {
       errors.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -171,21 +180,23 @@ export function mockSetAllValves(on: boolean): void {
 let safetyLatched = false;
 export function mockShutoff(): void {
   safetyLatched = true;
-  if (run) mockStopExperiment();
-  sv[0] = 0;
-  rememberFlow(1, 5);
-  sv[2] = 0;
-  sv[3] = 0;
+  stopRunSafely();
+}
+export function mockShutoffFlammableGases(): void {
+  requireController();
+  mockShutoff();
 }
 export function mockResetSafety(): void {
-  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
-  if (run) throw new Error("实验仍在结束");
+  requireController();
+  if (run) throw new Error("EXPERIMENT_RUNNING");
   if ([0, 2, 3].some((i) => pv[i]! > 0.1))
     throw new Error("等待气体流量归零后复位");
   safetyLatched = false;
 }
 
 export function mockTare(): TareResult {
+  requireController();
+  if (run) throw new Error("EXPERIMENT_RUNNING");
   weight = 0;
   weightTarget = 0;
   return { success: true, a00_found: true, weight: 0 };
@@ -343,6 +354,29 @@ function stopRun(): void {
   run = null;
 }
 
+function stopRunSafely(): void {
+  // Keep the same final atmosphere for normal stops and the unauthenticated emergency path.
+  sv[0] = 0;
+  rememberFlow(1, 5);
+  sv[2] = 0;
+  sv[3] = 0;
+  furnaceTarget = 25;
+  if (run) {
+    archive(run, true, "stopped");
+    stopRun();
+  }
+  experiment = { running: false };
+  notify();
+}
+
+function requireController() {
+  const user = mockRequireUser();
+  if (run && user.role !== "ADMIN" && user.user_id !== run.ownerUserId) {
+    throw new Error("FORBIDDEN");
+  }
+  return user;
+}
+
 function expTick(): void {
   if (!run) return;
   const stage = run.program.stages[run.stageIndex];
@@ -400,12 +434,11 @@ function completeRun(): void {
 }
 
 export function mockStartExperiment(p: ExperimentParams): string {
+  const user = mockRequireUser();
   if (safetyLatched) throw new Error("保护已锁存，请先复位");
   if (!p.sample_id.trim()) throw new Error("样品编号必填");
   if (!p.sample_name.trim()) throw new Error("样品名称必填");
   if (!(p.sample_weight > 0)) throw new Error("样品重量必须大于 0");
-  const user = mockCurrentUser();
-  if (!user) throw new Error("AUTH_REQUIRED");
   if (experiment.running) throw new Error("实验已在运行");
   const program = mockListPrograms().find((pr) => pr.id === p.experiment_type);
   if (!program) throw new Error("未知实验模式");
@@ -449,18 +482,8 @@ export function mockStartExperiment(p: ExperimentParams): string {
 }
 
 export function mockStopExperiment(): void {
-  // Safety atmosphere: N2=5, flammables 0.
-  sv[0] = 0;
-  rememberFlow(1, 5);
-  sv[2] = 0;
-  sv[3] = 0;
-  furnaceTarget = 25;
-  if (run) {
-    archive(run, true, "stopped"); // interrupted records must not claim normal completion
-    stopRun();
-  }
-  experiment = { running: false };
-  notify();
+  requireController();
+  stopRunSafely();
 }
 
 function applyOperatorAction(
@@ -469,8 +492,7 @@ function applyOperatorAction(
   notes: string,
   kind: "skip" | "confirm",
 ): void {
-  const user = mockCurrentUser();
-  if (!user) throw new Error("AUTH_REQUIRED");
+  const user = requireController();
   if (!run || experiment_id !== run.id || stage_index !== run.stageIndex)
     throw new Error("实验或阶段已变化");
   if (user.role !== "ADMIN" && user.user_id !== run.ownerUserId)
@@ -528,19 +550,25 @@ interface HistItem {
 }
 const history = new Map<string, HistItem>();
 
-function accessible(item: HistItem): boolean {
-  const user = mockCurrentUser();
-  return Boolean(
-    user &&
-      (user.role === "ADMIN" || item.detail.owner_user_id === user.user_id),
-  );
+function accessible(item: HistItem, user: ReturnType<typeof mockRequireUser>): boolean {
+  return user.role === "ADMIN" || item.detail.owner_user_id === user.user_id;
 }
 
 function historyItem(id: string): HistItem {
+  const user = mockRequireUser();
   const item = history.get(id);
   if (!item) throw new Error("实验不存在");
-  if (!accessible(item)) throw new Error("FORBIDDEN");
+  if (!accessible(item, user)) throw new Error("FORBIDDEN");
   return item;
+}
+
+function archiveActiveRunForUser(id: string): void {
+  if (run?.id !== id) return;
+  const user = mockRequireUser();
+  if (user.role !== "ADMIN" && user.user_id !== run.ownerUserId) {
+    throw new Error("FORBIDDEN");
+  }
+  archive(run, false);
 }
 
 /** Synchronously simulate a full run to fabricate a seed history entry. */
@@ -629,8 +657,9 @@ seed(
 );
 
 export function mockListExperiments(): ExperimentSummary[] {
+  const user = mockRequireUser();
   return [...history.values()]
-    .filter(accessible)
+    .filter((item) => accessible(item, user))
     .map((h) => ({
       experiment_id: h.detail.experiment_id,
       experiment_name: h.detail.experiment_name,
@@ -647,7 +676,7 @@ export function mockListExperiments(): ExperimentSummary[] {
 }
 
 export function mockGetExperimentDetail(id: string): ExperimentDetail {
-  if (run?.id === id) archive(run, false);
+  archiveActiveRunForUser(id);
   const h = historyItem(id);
   return { ...h.detail, sample_count: h.samples.length };
 }
@@ -656,7 +685,7 @@ export function mockGetExperimentSamples(
   id: string,
   maxPoints?: number,
 ): SampleDto[] {
-  if (run?.id === id) archive(run, false);
+  archiveActiveRunForUser(id);
   const h = historyItem(id);
   const all = h.samples;
   const cap = maxPoints ?? 2000;
@@ -666,7 +695,12 @@ export function mockGetExperimentSamples(
 }
 
 export function mockDeleteExperiment(id: string): void {
-  if (mockCurrentUser()?.role !== "ADMIN") throw new Error("FORBIDDEN");
+  const user = mockRequireUser();
+  if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
+  if (run?.id === id) throw new Error("INVALID_STATE");
+  const item = history.get(id);
+  if (!item) throw new Error("实验不存在");
+  if (!item.detail.end_time) throw new Error("INVALID_STATE");
   history.delete(id);
 }
 
@@ -674,9 +708,16 @@ export function mockSetExperimentOwner(
   id: string,
   ownerUserId: string | null,
 ): void {
-  if (mockCurrentUser()?.role !== "ADMIN") throw new Error("FORBIDDEN");
+  const user = mockRequireUser();
+  if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
+  if (run?.id === id) throw new Error("无法变更正在运行实验的归属");
   const item = history.get(id);
   if (!item) throw new Error("实验不存在");
+  if (ownerUserId !== null) {
+    const owner = mockListUsers().find((candidate) => candidate.user_id === ownerUserId);
+    if (!owner) throw new Error("USER_NOT_FOUND");
+    if (!owner.is_active) throw new Error("ACCOUNT_DISABLED");
+  }
   item.detail.owner_user_id = ownerUserId;
 }
 
@@ -695,7 +736,7 @@ const CSV_COLUMNS = [
 ];
 
 export function mockExportText(id: string, sep: string): string {
-  if (run?.id === id) archive(run, false);
+  archiveActiveRunForUser(id);
   const h = historyItem(id);
   const rows = h.samples.map((s) =>
     [
@@ -715,7 +756,7 @@ export function mockExportText(id: string, sep: string): string {
 }
 
 export function mockReportHtml(id: string): string {
-  if (run?.id === id) archive(run, false);
+  archiveActiveRunForUser(id);
   const esc = (value: string) =>
     value
       .replaceAll("&", "&amp;")
@@ -860,7 +901,7 @@ export function mockAnalyze13241(
       h.detail.program_snapshot?.source === "custom"
         ? "custom_conditions"
         : "pending_group_and_process_verification",
-    computed_by: mockCurrentUser()?.display_name,
+    computed_by: mockRequireUser().display_name,
     computed_at: new Date().toISOString(),
   };
   h.detail.analysis = value;
@@ -940,8 +981,7 @@ export function mockAnalyze13240(
 }
 
 function modeAdmin(): void {
-  const user = mockCurrentUser();
-  if (!user) throw new Error("AUTH_REQUIRED");
+  const user = mockRequireUser();
   if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
   if (run) throw new Error("实验运行中不可修改模式");
 }
@@ -975,7 +1015,7 @@ export function mockSaveCustomProgram(
     gasConditionErrors(p, programGasLimits)[0];
   if (error) throw new Error(error);
   if (!parent) throw new Error("基础国标未知");
-  const user = mockCurrentUser()!;
+  const user = mockRequireUser();
   p.provenance = {
     revision: (previous?.provenance?.revision ?? 0) + 1,
     parent_template: structuredClone(parent),
@@ -997,7 +1037,7 @@ export function mockSaveCustomProgram(
   return structuredClone(p);
 }
 export function mockListCustomProgramRevisions(id: string): ProgramDto[] {
-  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
+  mockRequireUser();
   return structuredClone(customRevisions.get(id) ?? []);
 }
 export function mockDeleteCustomProgram(id: string): void {
@@ -1026,8 +1066,7 @@ export function mockGenerateSampleId(
 export function mockGetExperimentStartDefaults(
   programId: string,
 ): ExperimentStartDefaults {
-  const user = mockCurrentUser();
-  if (!user) throw new Error("AUTH_REQUIRED");
+  const user = mockRequireUser();
   const latest = mockListExperiments()[0];
   const now = new Date().toISOString();
   return {
@@ -1044,7 +1083,7 @@ export function mockGetExperimentStartDefaults(
 export function mockPreflightExperiment(
   params: ExperimentParams,
 ): ExperimentPreflightResult {
-  if (!mockCurrentUser()) throw new Error("AUTH_REQUIRED");
+  mockRequireUser();
   const program =
     mockListPrograms().find((p) => p.id === params.experiment_type) ?? null;
   const blocking = [];
@@ -1079,7 +1118,7 @@ export function mockSaveReportDetails(
     throw new Error("报告字段过长");
   const patch = {
     report_details: structuredClone(details),
-    report_details_operator: mockCurrentUser()?.display_name,
+    report_details_operator: mockRequireUser().display_name,
     report_details_updated_at: new Date().toISOString(),
   };
   h.detail.runtime = { ...h.detail.runtime, ...patch };

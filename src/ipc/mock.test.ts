@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
+import { mockBootstrapAdmin } from "./authMock";
 import { mockSetFlow } from "./mock";
+
+beforeAll(() => mockBootstrapAdmin("admin", "测试员", "test-password"));
 
 // The web-preview mock mirrors the backend safety clamp (docs/08 §8.2). These guard against
 // the two diverging (the mock hard-codes the same 5/5 absolute ceiling as the backend).

@@ -35,6 +35,18 @@ export function mockCurrentUser(): PublicUser | null {
   return user ? publicUser(user) : null;
 }
 
+/** Enforce the same authenticated-session contract as native user commands. */
+export function mockRequireUser(): PublicUser {
+  const snapshot = mockAuthState();
+  if (snapshot.status === "PASSWORD_CHANGE_REQUIRED") {
+    throw new Error("PASSWORD_CHANGE_REQUIRED");
+  }
+  if (snapshot.status !== "AUTHENTICATED" || !snapshot.user) {
+    throw new Error("AUTH_REQUIRED");
+  }
+  return snapshot.user;
+}
+
 export function mockBootstrapAdmin(
   username: string,
   displayName: string,
@@ -145,7 +157,8 @@ export function mockResetPassword(userId: string, password: string): void {
 }
 
 function requireAdmin(): MockUser {
-  const actor = users.find((item) => item.user_id === activeUserId);
+  const user = mockRequireUser();
+  const actor = users.find((item) => item.user_id === user.user_id);
   if (!actor) throw new Error("AUTH_REQUIRED");
   if (actor.role !== "ADMIN") throw new Error("FORBIDDEN");
   return actor;

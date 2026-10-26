@@ -17,6 +17,7 @@
 | 9 | [#106](https://github.com/kevinalliswell/TMH-LPF-900/pull/106) → #105分支 | 实验数据/分析/补录授权及终局审计、损坏执行快照拒绝 |
 | 10 | [#107](https://github.com/kevinalliswell/TMH-LPF-900/pull/107) → #106分支 | 自定义程序/检验组保存审计及生命周期保护 |
 | 11 | [#108](https://github.com/kevinalliswell/TMH-LPF-900/pull/108) → #107分支 | 单次报告、采样导出与检验组报告终局审计 |
+| 12 | [#109](https://github.com/kevinalliswell/TMH-LPF-900/pull/109) → #108分支 | 浏览器 mock 权限、实验控制和数据归属与原生行为对齐 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -34,14 +35,14 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
 | #43 | main的Instant经过时间、deadline采样、停顿不补造；lib.rs中deadline与采样边界测试 | sim_speed=1的现场长周期计时及墙钟偏差证据 |
 | #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；config_store_contract与config_commands_tests、docs/21 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
-| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝 | 完整逐命令矩阵及真实设备故障场景持续扩展 |
+| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝；#109补浏览器mock匿名/待改密/owner隔离和紧急停机回归 | 完整逐命令矩阵及真实设备故障场景持续扩展 |
 | #48 | main已更新docs/06/07/10/11；#98同步错误DTO现状 | 后续实现变化持续同步；历史验收文档不改写日期/结论 |
 | #49 | 本表把审查项映射到现有实现与阶段 | 保持评估结论随新证据更新，不能批量当作已验收关闭 |
 | #79 | #99完成可拒绝的软件边界，模式和配置测试 | 与#19同项硬件/会话缺口；不得标记real-ready |
 | #80 | Probe工具与serial编译、模拟协议金帧回归 | 设备型号/手册/接线/原始抓包、冷启断线重连、完整四阶段真机soak |
 | #81 | main保护锁存/抢占/ACK、恢复SV；hub_emergency_priority、device_lifecycle_tests | 断电、拔线、真实ACK与安全气氛现场验证及ON/OFF协议结论 |
 | #82 | IPC参数/注册/错误返回门禁、版本同步、docs/24；第三批为门禁本身补回归 | DTO仍手工映射，新增DTO需序列化/IPC断言；main实际保护与外部发布证据 |
-| #83 | main配置/权限/预检；#98稳定错误；#99初始化失败不进入控制台 | 逐命令拒绝审计与授权矩阵剩余项、真机配置重启验证 |
+| #83 | main配置/权限/预检；#98稳定错误；#99初始化失败不进入控制台；#109对齐浏览器mock设备、实验及历史权限 | 逐命令拒绝审计与授权矩阵剩余项、真机配置重启验证 |
 | #84 | main计时、冻结分析与账户审计；#98补分析拒绝契约 | 同#41/#42/#43现场结果和剩余审计复核 |
 | #85 | 原生SQLite故障、锁中毒、幂等恢复、紧急优先级；第三批CI归档日志/上下文 | 桌面replay/real故障接口与逐命令矩阵；现场恢复/掉电证明 |
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
@@ -147,4 +148,12 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 
 新增9项Rust回归，覆盖三命令六主体IPC矩阵、CSV/TXT/XLSX格式、坏分析证据、数据库/认证/文件系统故障、更新/关闭拒绝和路径组件编码。本机前端89项、脚本26项、Rust普通/candidate工作区各447项（应用156、core单元110及其余测试）；fmt/普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay和300模拟秒/300行soak通过。RustSec告警和临时例外仍见docs/27。
 
-截至本批，#107远端Actions因仓库预算未能启动；本机验证不替代远端Windows/Linux构建。此批仍未启动本地服务。下批核对浏览器mock与原生权限/状态边界。
+截至本批，#107远端Actions因仓库预算未能启动；后续#108的Linux/Windows、RustSec与candidate检查也因Actions预算被阻止启动。本机验证不替代远端构建。此批仍未启动本地服务。下批核对浏览器mock与原生权限/状态边界。
+
+## 第十二批浏览器 mock 权限与状态一致性（2026-10-26）
+
+浏览器 mock 对受保护命令统一要求已认证且完成临时密码修改；燃气控制、停止、去皮、阶段操作和正在运行实验的操作权按归属用户/管理员检查。去皮在实验运行中拒绝，避免重置样品质量基准；普通停止及可燃气切断需要登录，紧急保护停机仍保留匿名入口。历史列表要求登录并按owner过滤，详情/删除/归属变更执行权限及目标状态检查。程序版本与分析/报告命令也使用同一必需会话守卫。设备控制限幅、样品计算公式、阶段进度和浏览器内存数据范围未改变。
+
+新增12项浏览器 mock 回归，覆盖匿名、锁定与临时密码、运行中去皮基准、owner/admin控制、历史数据隔离/维护、普通切断与紧急匿名停机分界和非法气路错误码。新增测试先复现权限差异；设备流量夹限和流程现有用例仍通过。该批不触碰Tauri控制逻辑或真实设备，不替代#45要求的完整原生逐命令矩阵。
+
+本机阶段验证：前端 Vitest 101 项、Node脚本26项，Rust普通/candidate工作区各447项；typecheck、lint、build、IPC/安全/版本门禁、生产依赖审计、fmt、两种clippy、serial编译、dirty replay、300模拟秒/300行mock soak及RustSec策略均通过。RustSec保留一项glib临时例外及9项未维护告警，见docs/27。#108所有远端Actions均未启动，GitHub明确报告仓库Actions预算阻止运行；这不属于源码测试失败，也不能算远端通过。未启动本地服务。
