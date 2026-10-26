@@ -172,4 +172,4 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 
 配置保存现在与应用接受退出、实验控制和更新使用同一生命周期边界；授权身份及权限来自一次会话检查。接受关闭后返回`APP_CLOSING`且不写配置；运行、待保存、更新中使用稳定错误码。过期版本/外部修改归为配置冲突，文件或同步故障用`CONFIG_SAVE_FAILED`并记`FAILURE`，授权SQLite故障使用`STORAGE_ERROR`并记`FAILURE`。原子替换与目录持久性确认语义保持不变。
 
-新增3项Rust回归覆盖关闭后拒绝且不改配置、授权SQLite故障失败审计、配置文件丢失的稳定错误及失败审计；原有管理员/普通用户/锁定权限、运行/待保存/更新阻断、版本冲突、保护ACK失败和配置持久性用例均通过。全面本机验证：前端101项、Node脚本26项，Rust普通/candidate工作区各457项（应用166、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay与300模拟秒/300行soak通过。RustSec仍有docs/27所列glib临时例外及9项未维护警告。PR#110远端Actions受预算阻止启动；#111远端状态以其创建后的checks为准。未启动本地服务。
+新增3项Rust回归覆盖关闭后拒绝且不改配置、授权SQLite故障失败审计、配置文件丢失的稳定错误及失败审计；原有管理员/普通用户/锁定权限、运行/待保存/更新阻断、版本冲突、保护ACK失败和配置持久性用例均通过。全面本机验证：前端101项、Node脚本26项，Rust普通/candidate工作区各457项（应用166、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial编译、dirty replay与300模拟秒/300行soak通过。RustSec仍有docs/27所列glib临时例外及9项未维护警告。PR#110如前所述；PR#111代码head `ebd0940` 的Ubuntu、Windows、两项RustSec及源码SBOM检查均因Actions预算阻止任务启动，候选bundle跳过。不是远端代码测试失败，也不能算CI通过。未启动本地服务。
