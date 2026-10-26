@@ -180,3 +180,5 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 窗口`CloseRequested`按用户关闭审计，使用事件发生时的会话快照；无有效会话记`anonymous`。独立`ExitRequested`按系统来源记`system`。退出已被接受时，后续重复通知不再追加记录，因此不会用后到的系统来源覆盖用户来源。安全气氛、停止与保存的退出行为保持不变。
 
 新增3项Rust回归覆盖管理员窗口关闭、匿名窗口关闭、已登录用户下的系统退出，以及用户接受关闭后重复系统通知不改写归属。本机全面验证：前端101项、Node脚本26项，Rust普通/candidate工作区各460项（应用169、core单元110及其他协议/集成测试）；fmt、两种clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、RustSec策略、serial、dirty replay及300模拟秒/300行soak通过。RustSec仍有docs/27所列临时glib例外和9项未维护告警；现场退出/断电行为仍需目标设备验收。未启动本地服务。
+
+远端状态：PR#112代码head `a0a585a` 的Ubuntu、Windows、两项RustSec及源码SBOM检查均因GitHub Actions预算阻止任务启动而失败，候选bundle跳过；这些不是远端代码测试失败，也不能算CI通过。
