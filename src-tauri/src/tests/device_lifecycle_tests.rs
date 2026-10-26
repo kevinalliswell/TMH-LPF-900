@@ -11,8 +11,9 @@ fn update_lease_rejects_manual_enqueue_and_safety_reset_before_device_checks() {
     let _lease = UpdateLease::begin(state.exp.clone()).unwrap();
     let called = AtomicBool::new(false);
 
-    let manual = enqueue_manual_gas(
+    let manual = enqueue_device_control(
         &state,
+        Category::Gas,
         "set_flow",
         serde_json::json!({"gas":0,"requested":3.0}),
         |hub| {
@@ -46,8 +47,9 @@ fn update_lease_cannot_cross_an_authorized_manual_enqueue() {
     let (manual_done_tx, manual_done_rx) = mpsc::channel();
     let worker_state = state.clone();
     let manual_worker = std::thread::spawn(move || {
-        let acknowledged = enqueue_manual_gas(
+        let acknowledged = enqueue_device_control(
             &worker_state,
+            Category::Gas,
             "set_flow",
             serde_json::json!({"gas":0,"requested":3.0}),
             |hub| {

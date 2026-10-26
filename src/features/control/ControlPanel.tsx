@@ -13,6 +13,7 @@ import {
 } from "../../ipc";
 import type { GasLimits } from "../../ipc/types";
 import { useTelemetry } from "../../stores/telemetry";
+import { useExperiment } from "../../stores/experiment";
 import { toastError } from "../../stores/toast";
 
 const btn = {
@@ -23,9 +24,19 @@ const btn = {
 
 export function ControlPanel() {
   const snap = useTelemetry((s) => s.snapshot);
+  const experiment = useExperiment((s) => s.state);
   const [inputs, setInputs] = useState<number[]>([0, 0, 0, 0]);
   const [toast, setToast] = useState<{ msg: string; warn: boolean } | null>(null);
   const [taring, setTaring] = useState(false);
+  const manualDisabled = !!experiment.updating || (experiment.running && experiment.can_control !== true);
+  const tareDisabled = taring || manualDisabled || experiment.running || !!experiment.persistence_pending;
+  const tareNote = experiment.running
+    ? "实验运行期间不可去皮，避免改变称量基准。"
+    : experiment.persistence_pending
+      ? "请先处理待保存数据，再执行去皮。"
+      : experiment.updating
+        ? "正在安装更新，请等待更新完成。"
+        : "请在实验开始前完成去皮。";
   // Display the configured safety limits (#13) — enforcement stays in the backend clamp.
   const [limits, setLimits] = useState<GasLimits | null>(null);
   useEffect(() => {
@@ -102,6 +113,8 @@ export function ControlPanel() {
                 </span>
                 <input
                   type="number"
+                  aria-label={`${name} 设定流量（L/min）`}
+                  disabled={manualDisabled}
                   step={limits?.flow_steps?.[g] ?? "any"}
                   min="0"
                   value={inputs[g] ?? 0}
@@ -111,10 +124,11 @@ export function ControlPanel() {
                   className="mono w-16 px-2 py-1 rounded text-right text-[13px]"
                   style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
                 />
-                <button onClick={() => doSet(g)} className="px-2.5 py-1 rounded text-[12px]" style={btn}>
+                <button disabled={manualDisabled} onClick={() => doSet(g)} className="px-2.5 py-1 rounded text-[12px]" style={btn}>
                   设定
                 </button>
                 <button
+                  disabled={manualDisabled}
                   onClick={() => doOnOff(g, !on)}
                   className="px-2.5 py-1 rounded text-[12px] w-9"
                   style={btn}
@@ -131,14 +145,15 @@ export function ControlPanel() {
           })}
         </div>
         <div className="flex gap-2 mt-3">
-          <button onClick={() => doValves(true)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
+          <button disabled={manualDisabled} onClick={() => doValves(true)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
             全开
           </button>
-          <button onClick={() => doValves(false)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
+          <button disabled={manualDisabled} onClick={() => doValves(false)} className="flex-1 py-1.5 rounded text-[12px]" style={btn}>
             全关
           </button>
         </div>
         <button
+          disabled={manualDisabled}
           onClick={doShutoff}
           className="w-full py-2 mt-2 rounded text-[13px] font-semibold"
           style={{ background: "var(--danger)", color: "#fff", boxShadow: "0 0 14px rgba(255,69,58,0.35)" }}
@@ -154,12 +169,14 @@ export function ControlPanel() {
         </div>
         <button
           onClick={doTare}
-          disabled={taring}
+          disabled={tareDisabled}
+          aria-describedby="tare-note"
           className="w-full py-2 rounded text-[13px]"
-          style={{ ...btn, opacity: taring ? 0.6 : 1 }}
+          style={{ ...btn, opacity: tareDisabled ? 0.6 : 1 }}
         >
           {taring ? "去皮中…" : "去皮 (Tare)"}
         </button>
+        <p id="tare-note" className="mt-2 text-[12px]" style={{ color: "var(--fg-faint)" }}>{tareNote}</p>
       </section>
 
       {toast && (

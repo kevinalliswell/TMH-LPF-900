@@ -10,6 +10,7 @@ use tmh_core::storage::RunCompletion;
 
 mod auth_service;
 mod auth_session;
+mod balance_control;
 mod build_profile;
 mod command_error;
 mod config_commands;
@@ -144,6 +145,8 @@ fn seconds(value: f64) -> Duration {
 struct ExpControl {
     lifecycle: Mutex<()>,
     updating: AtomicBool,
+    tare_pending: AtomicBool,
+    closing: AtomicBool,
     pending: Mutex<Vec<RunCompletion>>,
     recovery_errors: Mutex<Vec<String>>,
     status: Mutex<ExperimentStatus>,
@@ -156,6 +159,8 @@ impl ExpControl {
         Self {
             lifecycle: Mutex::new(()),
             updating: AtomicBool::new(false),
+            tare_pending: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
             pending: Mutex::new(Vec::new()),
             recovery_errors: Mutex::new(Vec::new()),
             status: Mutex::new(ExperimentStatus::idle()),
@@ -322,6 +327,9 @@ fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
 }
 
 fn controller_for_user(state: &AppState, user: UserRow) -> Result<UserRow, String> {
+    if state.exp.closing.load(Ordering::SeqCst) {
+        return Err("APP_CLOSING".into());
+    }
     if state.exp.updating.load(Ordering::SeqCst) {
         return Err("正在安装更新，暂不能修改设备或实验".into());
     }
@@ -1623,8 +1631,9 @@ fn with_device_lifecycle<T>(
     enqueue()
 }
 
-fn enqueue_manual_gas<T>(
+fn enqueue_device_control<T>(
     state: &AppState,
+    category: Category,
     action: &str,
     detail: serde_json::Value,
     enqueue: impl FnOnce(&DeviceHub) -> Result<T, String>,
@@ -1643,8 +1652,14 @@ fn enqueue_manual_gas<T>(
             } else {
                 AuditResult::Rejected
             };
-            state.audit.write(&AuditEntry::new(Category::Gas, action, result)
-                .operator(operator).detail(serde_json::json!({"request":detail,"code":CommandError::from(error.clone()).code})));
+            state.audit.write(
+                &AuditEntry::new(category, action, result)
+                    .operator(operator)
+                    .detail(serde_json::json!({
+                        "request": detail,
+                        "code": CommandError::from(error.clone()).code,
+                    })),
+            );
         }
         outcome
     })
@@ -1661,6 +1676,9 @@ fn enqueue_safety_reset(
 > {
     with_device_lifecycle(state, || {
         let user = current_user(state)?;
+        if state.exp.closing.load(Ordering::SeqCst) {
+            return Err("APP_CLOSING".into());
+        }
         if state.exp.updating.load(Ordering::SeqCst) {
             return Err("更新期间不能复位保护".into());
         }
@@ -1692,6 +1710,7 @@ fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) 
     // An ACK belongs to the earlier reset request, not to a run/restart/protection
     // event that occurred while the command was waiting for its response.
     if state.exp.is_running()
+        || state.exp.closing.load(Ordering::SeqCst)
         || state.exp.updating.load(Ordering::SeqCst)
         || state.exp.persistence_pending()
         || state.hub.safety_latched()
@@ -1760,8 +1779,9 @@ async fn set_gas_flow<R: tauri::Runtime>(
     value: f64,
 ) -> CommandResult<ClampResult> {
     let st = app.state::<AppState>();
-    let (operator, reply) = enqueue_manual_gas(
+    let (operator, reply) = enqueue_device_control(
         &st,
+        Category::Gas,
         "set_flow",
         serde_json::json!({"gas":gas,"requested":value}),
         |hub| {
@@ -1834,8 +1854,9 @@ fn gas_command_error(error: MfcCommandError) -> String {
 }
 
 async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
-    let (operator, reply) = enqueue_manual_gas(
+    let (operator, reply) = enqueue_device_control(
         st,
+        Category::Gas,
         "on_off",
         serde_json::json!({"gas":gas,"on":on}),
         |hub| {
@@ -1870,12 +1891,17 @@ async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
 }
 
 async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), String> {
-    let (operator, replies) =
-        enqueue_manual_gas(st, action, serde_json::json!({"on":on}), |hub| {
+    let (operator, replies) = enqueue_device_control(
+        st,
+        Category::Gas,
+        action,
+        serde_json::json!({"on":on}),
+        |hub| {
             Ok((0..GAS_COUNT)
                 .map(|gas| hub.request_set_on_off(gas, on))
                 .collect::<Vec<_>>())
-        })?;
+        },
+    )?;
     let mut channels = Vec::with_capacity(GAS_COUNT);
     let mut errors = Vec::new();
     for (gas, reply) in replies.into_iter().enumerate() {
@@ -1932,18 +1958,23 @@ async fn close_all_valves(app: AppHandle) -> CommandResult<()> {
 }
 
 #[tauri::command]
-async fn shutoff_flammable_gases(app: AppHandle) -> CommandResult<()> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    app.state::<AppState>()
-        .exp
-        .stop
-        .store(true, Ordering::SeqCst);
-    let hub = app.state::<AppState>().hub.clone();
-    let result = match hub.request_shutoff_flammable().await {
+async fn shutoff_flammable_gases<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
+    let st = app.state::<AppState>();
+    let (operator, reply) = enqueue_device_control(
+        &st,
+        Category::Gas,
+        "shutoff",
+        serde_json::json!({}),
+        |hub| {
+            st.exp.stop.store(true, Ordering::SeqCst);
+            Ok(hub.request_shutoff_flammable())
+        },
+    )?;
+    let result = match reply.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
     };
-    app.state::<AppState>().audit.write(
+    st.audit.write(
         &AuditEntry::new(
             Category::Gas,
             "shutoff",
@@ -1953,36 +1984,46 @@ async fn shutoff_flammable_gases(app: AppHandle) -> CommandResult<()> {
                 AuditResult::Failure
             },
         )
-        .operator(operator),
+        .operator(operator)
+        .detail(serde_json::json!({
+            "safety_atmosphere_confirmed": result.is_ok(),
+            "code": result.as_ref().err(),
+        })),
     );
     result.map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn tare_balance(app: AppHandle) -> CommandResult<TareResultDto> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    let hub = app.state::<AppState>().hub.clone();
-    let r = hub
-        .request_tare()
-        .await
-        .map_err(|_| "天平不可用".to_string())?;
-    app.state::<AppState>().audit.write(
-        &AuditEntry::new(
-            Category::Balance,
-            "tare",
-            if r.success {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
-        )
-        .operator(operator),
-    );
-    Ok(TareResultDto {
-        success: r.success,
-        a00_found: r.a00_found,
-        weight: r.weight,
-    })
+async fn tare_balance<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<TareResultDto> {
+    let st = app.state::<AppState>();
+    let (operator, (lease, reply)) = enqueue_device_control(
+        &st,
+        Category::Balance,
+        "tare",
+        serde_json::json!({}),
+        |hub| {
+            let lease = balance_control::TareLease::begin(st.exp.clone())?;
+            Ok((lease, hub.request_tare()))
+        },
+    )?;
+    let outcome = async move {
+        let result = reply
+            .await
+            .map_err(|_| CommandError::from("DEVICE_OFFLINE"))?;
+        Ok(TareResultDto {
+            success: result.success,
+            a00_found: result.a00_found,
+            weight: result.weight,
+        })
+    };
+    tauri::async_runtime::spawn(balance_control::complete(
+        app.clone(),
+        operator,
+        lease,
+        outcome,
+    ))
+    .await
+    .map_err(|_| CommandError::new("DEVICE_COMMAND_FAILED", "去皮任务异常结束，请检查天平状态"))?
 }
 
 #[tauri::command]
@@ -2123,6 +2164,18 @@ fn validate_experiment_params(params: &ExperimentParams) -> Result<(), String> {
 
 fn build_preflight(state: &AppState, params: &ExperimentParams) -> ExperimentPreflightResult {
     let mut blocking = Vec::new();
+    if state.exp.closing.load(Ordering::SeqCst) {
+        blocking.push(PreflightIssue::blocking(
+            "APP_CLOSING",
+            "应用正在关闭，不能开始实验",
+        ));
+    }
+    if state.exp.tare_pending.load(Ordering::SeqCst) {
+        blocking.push(PreflightIssue::blocking(
+            "BALANCE_BUSY",
+            "天平去皮尚未完成，请等待回执",
+        ));
+    }
     if let Some(message) = config_commands::start_blocker(state) {
         blocking.push(PreflightIssue::blocking("CONFIG_RESTART_REQUIRED", message));
     }
@@ -2288,7 +2341,10 @@ fn visible_rows(storage: &Storage, user: &UserRow) -> Result<Vec<ExperimentRow>,
 }
 
 #[tauri::command]
-fn start_experiment(app: AppHandle, params: ExperimentParams) -> CommandResult<String> {
+fn start_experiment<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    params: ExperimentParams,
+) -> CommandResult<String> {
     validate_experiment_params(&params)
         .map_err(|message| CommandError::new("INVALID_PARAMS", message))?;
 
@@ -3330,6 +3386,12 @@ impl UpdateLease {
     fn begin(exp: Arc<ExpControl>) -> Result<Self, String> {
         {
             let _lifecycle = lock(&exp.lifecycle);
+            if exp.closing.load(Ordering::SeqCst) {
+                return Err("APP_CLOSING".into());
+            }
+            if exp.tare_pending.load(Ordering::SeqCst) {
+                return Err("BALANCE_BUSY".into());
+            }
             if exp.is_running() || exp.persistence_pending() || exp.updating.load(Ordering::SeqCst)
             {
                 return Err("请先停止实验并完成数据保存，且不能重复安装更新".into());
@@ -3379,18 +3441,27 @@ async fn perform_update(app: &AppHandle, operator: String) -> Result<(), String>
 // ---- App entrypoint ---------------------------------------------------------
 
 /// Return true while stopping, protecting, or saving still requires a live window.
-fn prepare_exit(app: &AppHandle) -> bool {
+fn prepare_exit<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     let Some(st) = app.try_state::<AppState>() else {
         return false;
     };
+    // Keep accepted close intent under the same boundary as start/control enqueue.
+    let _lifecycle = lock(&st.exp.lifecycle);
+    // Window close and application exit can notify us for the same accepted exit.
+    if st.exp.closing.load(Ordering::SeqCst) {
+        return false;
+    }
     st.exp.stop.store(true, Ordering::SeqCst);
     let protection = apply_safety_atmosphere_blocking(&st.hub);
     let blocked = protection.is_err()
         || st.exp.is_running()
         || st.exp.persistence_pending()
+        || st.exp.tare_pending.load(Ordering::SeqCst)
         || st.exp.updating.load(Ordering::SeqCst);
     if blocked {
-        let message = if st.exp.updating.load(Ordering::SeqCst) {
+        let message = if st.exp.tare_pending.load(Ordering::SeqCst) {
+            "天平去皮尚未完成，已阻止退出。请等待设备回执后再关闭。"
+        } else if st.exp.updating.load(Ordering::SeqCst) {
             "正在安装更新，请等待安装结束。"
         } else if st.exp.persistence_pending() {
             "数据尚未保存，已阻止退出。请在实验栏重试保存后再关闭。"
@@ -3400,6 +3471,8 @@ fn prepare_exit(app: &AppHandle) -> bool {
             "正在停止实验并保存数据，请待实验停止后再次关闭。"
         };
         let _ = app.emit("app-notice", message);
+    } else {
+        st.exp.closing.store(true, Ordering::SeqCst);
     }
     st.audit.write(&AuditEntry::new(
         Category::App,
@@ -3659,11 +3732,13 @@ mod tests {
     use tmh_core::auth::UserRole;
     mod analysis_sample_tests;
     mod command_error_tests;
+    mod device_control_authorization_tests;
     mod device_lifecycle_tests;
     mod gas_authorization_tests;
     mod group_tests;
     mod startup_tests;
     mod storage_fault_tests;
+    mod tare_pending_tests;
 
     /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
     /// below (`current_user`, `current_admin`, `authorize_experiment`,

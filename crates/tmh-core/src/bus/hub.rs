@@ -230,12 +230,17 @@ impl DeviceHub {
                     while let Ok(g) = bt_rx.try_recv() {
                         balance.set_target_g(g);
                     }
-                    if let Ok(BalReq::Tare { reply }) = cmd_rx.try_recv() {
-                        let _ = reply.send(balance.tare());
+                    let tare_reply = if let Ok(BalReq::Tare { reply }) = cmd_rx.try_recv() {
+                        Some((reply, balance.tare()))
                     } else {
                         balance.poll_once(Instant::now(), Duration::from_millis(100));
-                    }
+                        None
+                    };
+                    // Publish invalidated freshness before the ACK can release start.
                     let _ = bal_snap_tx.send(balance.snapshot());
+                    if let Some((reply, result)) = tare_reply {
+                        let _ = reply.send(result);
+                    }
                     if !balance.snapshot().connected {
                         balance.reconnect();
                     }

@@ -57,6 +57,8 @@ impl BalanceActor {
     /// Run the tare sequence: pause implied (single-threaded), reset buffers, send
     /// `TARE_CMD`, then accumulate line reads and judge the outcome (docs/04 §4.3).
     pub fn tare(&mut self) -> TareResult {
+        // Even a missing ACK may follow a physical change of the mass baseline.
+        self.freshness.fail();
         let _ = self.transport.reset_buffers();
         let _ = self
             .transport
@@ -74,7 +76,6 @@ impl BalanceActor {
         }
         let res = balance::parse_tare_response(&acc);
         if res.success {
-            self.freshness.fail(); // wait for a new measurement after tare
             self.weight = res.weight;
         }
         res
@@ -158,5 +159,20 @@ mod tests {
         let res = a.tare();
         assert!(res.success && res.a00_found);
         assert_eq!(a.snapshot().weight, Some(0.0));
+    }
+
+    #[test]
+    fn every_tare_invalidates_the_previous_mass_until_a_new_stable_read() {
+        for outcome in [TareOutcome::A00, TareOutcome::NearZero, TareOutcome::Fail] {
+            let mut transport = MockTransport::balance(5.0);
+            transport.set_tare_outcome(outcome);
+            let mut actor = BalanceActor::new(Box::new(transport));
+            actor.poll_once(Instant::now(), Duration::from_millis(10));
+            assert!(actor.snapshot().is_fresh(Instant::now()));
+            actor.tare();
+            assert!(!actor.snapshot().is_fresh(Instant::now()), "{outcome:?}");
+            actor.poll_once(Instant::now(), Duration::from_millis(10));
+            assert!(actor.snapshot().is_fresh(Instant::now()), "{outcome:?}");
+        }
     }
 }
