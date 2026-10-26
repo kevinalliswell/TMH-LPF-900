@@ -26,6 +26,7 @@ import type {
   AuthSnapshot,
   PublicUser,
   UserRole,
+  RuntimeModeStatus,
 } from "./types";
 import {
   mockAuthState,
@@ -253,10 +254,6 @@ export async function setExperimentOwner(
 }
 
 export type RuntimeMode = "real" | "mock" | "replay" | "web" | "unknown";
-export interface RuntimeModeStatus {
-  requested_mode: "real" | "mock" | "replay";
-  effective_mode: "real" | "mock" | "replay";
-}
 
 /** A failed query never establishes a mode. Only a confirmed effective mode is displayed. */
 export async function getRuntimeMode(): Promise<RuntimeMode> {

@@ -1,6 +1,7 @@
 //! Supported requests are parsed before any durable state or device threads are opened.
 use crate::command_error::{CommandError, CommandResult};
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DeviceMode {
@@ -37,6 +38,7 @@ impl DeviceMode {
     }
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct RuntimeModeStatus {
     pub requested_mode: DeviceMode,

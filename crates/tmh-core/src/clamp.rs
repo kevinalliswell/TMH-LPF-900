@@ -20,6 +20,7 @@ pub enum Gas {
 }
 
 /// Result of clamping a setpoint (in L/min).
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct ClampResult {
     /// Value that will actually be sent.

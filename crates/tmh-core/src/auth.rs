@@ -5,6 +5,7 @@ use argon2::{
 use rand_core::OsRng;
 use std::{fmt, str::FromStr, sync::OnceLock};
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum UserRole {

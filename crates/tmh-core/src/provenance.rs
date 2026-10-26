@@ -3,6 +3,7 @@ use crate::program::{standard_program, validate_program, Program, ProgramSource}
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgramChange {
     pub stage_index: usize,
@@ -11,6 +12,7 @@ pub struct ProgramChange {
     pub after: Value,
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgramProvenance {
     pub revision: u64,

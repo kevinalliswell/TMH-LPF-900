@@ -18,6 +18,10 @@ const TS = "src/ipc/index.ts";
 
 /** Parameter types injected by Tauri rather than sent from JS. */
 const INJECTED = [/^AppHandle\b/, /^State\s*</, /^Window\b/, /^WebviewWindow\b/];
+const BUILTIN_RETURN_TYPES = new Set([
+  "CommandResult", "Result", "Option", "Vec", "String", "Value", "PathBuf",
+  "Channel", "HashMap", "BTreeMap", "HashSet", "Duration",
+]);
 
 /** heck's `to_lower_camel_case`, as applied by the tauri command macro. */
 function lowerCamel(name) {
@@ -92,7 +96,7 @@ function parseRustCommands(source) {
         key: snakeCase ? name : lowerCamel(name),
         optional: type.startsWith("Option<"),
       }));
-    commands.set(found[1], { params, snakeCase });
+    commands.set(found[1], { params, snakeCase, returnType });
   }
   return commands;
 }
@@ -129,16 +133,33 @@ function parseInvocations(source) {
   return calls;
 }
 
-export function checkIpcContract(rust, ts) {
+export function checkIpcContract(rust, ts, generatedTypes = undefined) {
 const commands = parseRustCommands(rust);
 const registered = parseRegisteredHandlers(rust);
 const calls = parseInvocations(ts);
+const generated = generatedTypes === undefined
+  ? undefined
+  : new Set([...generatedTypes.matchAll(/^export\s+type\s+(\w+)/gm)].map((match) => match[1]));
 
 const errors = [];
 const notes = [];
 
 for (const name of registered) {
-  if (!commands.has(name)) errors.push(`${name}: registered in generate_handler! but has no #[tauri::command] fn`);
+  if (!commands.has(name)) {
+    errors.push(`${name}: registered in generate_handler! but has no #[tauri::command] fn`);
+    continue;
+  }
+  if (generated) {
+    const { returnType } = commands.get(name);
+    const dtoNames = [...returnType.matchAll(/\b([A-Z][A-Za-z0-9_]*)\b/g)]
+      .map((match) => match[1])
+      .filter((type) => !BUILTIN_RETURN_TYPES.has(type));
+    for (const type of dtoNames) {
+      if (!generated.has(type)) {
+        errors.push(`${name}: Rust return DTO "${type}" has no generated TypeScript declaration`);
+      }
+    }
+  }
 }
 
 const invoked = new Set();
@@ -177,8 +198,12 @@ return { errors, notes, invocations: calls.length, commands: commands.size };
 }
 
 async function main() {
-  const [rust, ts] = await Promise.all([readFile(RUST, "utf8"), readFile(TS, "utf8")]);
-  const result = checkIpcContract(rust, ts);
+  const [rust, ts, generated] = await Promise.all([
+    readFile(RUST, "utf8"),
+    readFile(TS, "utf8"),
+    readFile("src/ipc/types.generated.ts", "utf8"),
+  ]);
+  const result = checkIpcContract(rust, ts, generated);
   for (const note of result.notes) console.warn(`note: ${note}`);
   if (result.errors.length) throw new Error(result.errors.join("\n"));
   console.log(`IPC contract OK: ${result.invocations} invocations across ${result.commands} commands`);

@@ -72,7 +72,7 @@ describe("program utilities", () => {
         category: "custom",
         stages: [{ ...program.stages[1]!, gas: [6, 10, 0, 7] }],
       },
-      { h2: 5, co: 5 },
+      { h2: 5, co: 5, flow_steps: [0.01, 0.1, 0.01, 0.01] },
     );
     expect(warning.warnings).toHaveLength(0);
     expect(warning.errors.join(" ")).toContain("H₂");

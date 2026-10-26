@@ -1,9 +1,6 @@
 /** The native application error contract; malformed invoke payloads remain Tauri errors. */
-export interface CommandError {
-  code: string;
-  message_zh: string;
-  detail: string | null;
-}
+import type { CommandError } from "./types.generated";
+export type { CommandError } from "./types.generated";
 
 export class CommandFailure extends Error {
   readonly code: string;

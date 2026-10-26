@@ -6,6 +6,7 @@ use crate::bus::{BalanceSnapshot, GasReading, MfcSnapshot, TempSnapshot};
 use serde::Serialize;
 
 /// Per-device connectivity for the combined snapshot.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceHealth {
     pub safety_latched: bool,
@@ -18,6 +19,7 @@ pub struct DeviceHealth {
 }
 
 /// One merged telemetry frame. Gas order: H2, N2, CO2, CO.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetrySnapshot {
     pub seq: u64,

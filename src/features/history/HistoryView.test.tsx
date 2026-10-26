@@ -22,7 +22,8 @@ const first: ExperimentSummary = {
   experiment_type: "GB13241", has_analysis: false,
 };
 const detailOf = (summary: ExperimentSummary): ExperimentDetail => ({
-  ...summary, created_at: summary.start_time, sample_count: summary.end_time ? 61 : 1,
+  ...summary, revisions: [], runtime: {}, created_at: summary.start_time,
+  sample_count: summary.end_time ? 61 : 1,
 });
 
 beforeEach(() => {

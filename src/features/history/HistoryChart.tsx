@@ -12,6 +12,20 @@ function canRenderCanvas(): boolean {
   }
 }
 
+function sampleHasValidDeviceReading(
+  sample: SampleDto,
+  key: "temp_valid" | "balance_valid",
+): boolean {
+  const object = (value: unknown): Record<string, unknown> | null =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const record = object(sample.record);
+  const telemetry = object(record?.["telemetry"]);
+  const health = object(telemetry?.["health"]);
+  return health?.[key] !== false;
+}
+
 /** Static temperature + mass replay of a stored experiment (dual Y axis). */
 export function HistoryChart({ samples }: { samples: SampleDto[] }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -59,7 +73,7 @@ export function HistoryChart({ samples }: { samples: SampleDto[] }) {
           showSymbol: false,
           yAxisIndex: 0,
           lineStyle: { width: 2, color: "#ff8c42" },
-          data: samples.map((s) => s.record?.telemetry?.health?.temp_valid === false ? null : s.temperature),
+          data: samples.map((s) => sampleHasValidDeviceReading(s, "temp_valid") ? s.temperature : null),
         },
         {
           name: "质量 g",
@@ -67,7 +81,7 @@ export function HistoryChart({ samples }: { samples: SampleDto[] }) {
           showSymbol: false,
           yAxisIndex: 1,
           lineStyle: { width: 2, color: "#38d6c4" },
-          data: samples.map((s) => s.record?.telemetry?.health?.balance_valid === false ? null : s.weight),
+          data: samples.map((s) => sampleHasValidDeviceReading(s, "balance_valid") ? s.weight : null),
         },
       ],
     });

@@ -9,6 +9,7 @@ pub const REDUCTION_SAMPLE_EVIDENCE_VERSION: &str = "REDUCTION-SAMPLES-2026-09-1
 
 /// Frozen facts about stored rows presented to the automatic reduction curve.
 /// These counts do not certify a method or count the points determining a result.
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReductionSampleEvidence {
     pub version: String,
@@ -161,22 +162,29 @@ pub fn free_swelling(volumes: &[(f64, f64)]) -> Option<FreeSwelling> {
     })
 }
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReductionInput {
     pub w1: f64,
     pub w2: f64,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub manual_m1: Option<f64>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub manual_m180: Option<f64>,
     /// Total mass at the endpoint stored in the executed program snapshot.
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub manual_mt: Option<f64>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub manual_rate_points: Option<Vec<(f64, f64)>>,
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub source_record: Option<String>,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RdiInput {
     pub m0: f64,
@@ -187,6 +195,7 @@ pub struct RdiInput {
     pub drum_revolutions: u32,
     pub sieve_seconds: f64,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SwellingInput {
     pub v0: f64,

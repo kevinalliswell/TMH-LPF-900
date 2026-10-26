@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrialSelection {
     pub experiment_id: String,
     pub exclusion_reason: Option<String>,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GroupReportDetails {
@@ -25,6 +27,7 @@ pub struct GroupReportDetails {
     pub reviewer: String,
     pub deviations: String,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupRequest {
     pub group_id: Option<String>,
@@ -39,15 +42,19 @@ pub struct GroupRequest {
     pub trials: Vec<TrialSelection>,
     pub reason: String,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrozenTrial {
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub process_assessment: Option<crate::process_evidence::ProcessAssessment>,
     pub experiment: ExperimentRow,
+    #[cfg_attr(feature = "typescript-export", ts(type = "Record<string, unknown>"))]
     pub runtime: Value,
     pub analysis_revision_id: Option<i64>,
     pub exclusion_reason: Option<String>,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupSnapshot {
     pub schema_version: u32,

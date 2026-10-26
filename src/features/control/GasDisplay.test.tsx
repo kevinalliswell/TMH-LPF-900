@@ -19,7 +19,8 @@ it("displays the acknowledged setpoint without hiding hundredths", async () => {
 });
 it("preserves setpoint resolution in telemetry, including values below 0.01", () => {
   useTelemetry.setState({lastAt: Date.now(), snapshot: {seq: 1, temps: [], weight: 100,
-    health: {temp_connected: true, mfc_connected: true, balance_connected: true},
+    health: {safety_latched: false, temp_valid: true, mfc_valid: true, balance_valid: true,
+      temp_connected: true, mfc_connected: true, balance_connected: true},
     gas: [{pv: 1.24, sv: 1.24, on: true}, {pv: 0.001, sv: 0.001, on: true}]}});
   render(<MonitorPanel />);
   expect(screen.getByText("SV 1.24")).toBeTruthy();

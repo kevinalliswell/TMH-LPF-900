@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const VERSION: &str = "PROCESS-EVIDENCE-2026-09-09.1";
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageEvidence {
     pub index: usize,
@@ -28,14 +29,17 @@ pub struct StageEvidence {
     pub required_seconds: Option<f64>,
     pub notes: Vec<String>,
 }
+#[cfg_attr(feature = "typescript-export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessAssessment {
     pub version: String,
     /// Recorded persistence status, not a conclusion inferred from surviving rows.
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub data_complete: Option<bool>,
     /// Known buffer discards; recovery/legacy records may not know the count.
     #[serde(default)]
+    #[cfg_attr(feature = "typescript-export", ts(optional = nullable))]
     pub dropped_samples: Option<u64>,
     pub unassigned_points: usize,
     pub stages: Vec<StageEvidence>,
