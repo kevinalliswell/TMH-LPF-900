@@ -189,4 +189,10 @@ SQL故障返回STORAGE_ERROR并记FAILURE，不再显示原始SQL诊断；触发
 
 新增生成文件过期和未登记返回 DTO 的回归。本机全面验证：前端101项、Node脚本27项，Rust普通/candidate工作区各460项（各有1项既有跨进程探测忽略）；另执行类型生成新鲜度检查并通过。`cargo fmt`、普通与candidate clippy、typecheck/lint/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay、300模拟秒/300行soak及actionlint通过。RustSec仍有docs/27所列glib临时例外及9项未维护告警。PR #113 的 Ubuntu/Windows、两项RustSec和候选SBOM检查在runner启动前被GitHub Actions预算阻止，bundle跳过；这不属于代码执行失败，也不能算远端CI通过。此阶段仍未启动服务。
 
-PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #112分支，保持未合并。该批完成后软件 Issue 推进进入收尾，下一步启动本地浏览器 mock 服务，验证主要交互和权限边界；真实设备、现场资料、传感器校准及硬件联锁仍须现场验收。
+PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #112分支，保持未合并。软件 Issue 推进进入收尾；本地模拟验收结果见下节。真实设备、现场资料、传感器校准及硬件联锁仍须现场验收。
+
+## 本地服务与浏览器 mock 验收（2026-10-26）
+
+`pnpm dev --host 127.0.0.1` 启动成功，`http://127.0.0.1:1420/` 返回HTTP 200。隔离的应用内浏览器完成首次管理员引导、登录、退出、锁定/解锁；检查综合控制、历史演示记录、三项标准流程阶段信息、用户管理，以及通讯配置和检验组的桌面原生边界提示。打开实验启动表核对GB/T 13241默认流程和阶段参数后取消，没有启动实验、操作气阀或去皮。屏幕显示持续更新的浏览器合成遥测，所有气路保持OFF。
+
+另以`TMH_DEVICE_MODE=mock`和独立`TMH_DATA_DIR`启动Tauri进程，确认进程初始化了隔离配置与SQLite文件；本机UI控制工具未将该进程暴露为可操作窗口，因此不将这一步计作桌面GUI验收。当前会话未配置Chrome DevTools MCP，浏览器验证使用DOM可访问性树和截图，未采集浏览器控制台或网络面板。应用桌面最小窗口宽度为1024px，而嵌入式浏览器视口约823px；低于桌面最小宽度的预览里控制区显得拥挤，不能代替目标桌面尺寸的布局验收。模拟界面不代表真实设备、真实工艺或传感器结果。
