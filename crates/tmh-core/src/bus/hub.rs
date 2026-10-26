@@ -288,8 +288,9 @@ impl DeviceHub {
             epoch: self.safety.epoch(),
             req,
         };
-        if let Err(e) = self.mfc_tx.try_send(request) {
-            e.into_inner().req.reject(MfcCommandError::QueueFull);
+        // A closed service drops the reply, distinguishable from live backpressure.
+        if let Err(mpsc::error::TrySendError::Full(request)) = self.mfc_tx.try_send(request) {
+            request.req.reject(MfcCommandError::QueueFull);
         }
     }
 
@@ -325,8 +326,10 @@ impl DeviceHub {
     pub fn request_shutoff_flammable(&self) -> oneshot::Receiver<Result<(), MfcCommandError>> {
         let (reply, rx) = oneshot::channel();
         self.safety.trip();
-        if let Err(e) = self.safety_tx.try_send(MfcReq::Shutoff { reply }) {
-            e.into_inner().reject(MfcCommandError::QueueFull);
+        if let Err(mpsc::error::TrySendError::Full(request)) =
+            self.safety_tx.try_send(MfcReq::Shutoff { reply })
+        {
+            request.reject(MfcCommandError::QueueFull);
         }
         rx
     }

@@ -8,7 +8,7 @@ use tmh_core::transport::{BusError, Transport};
 const WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
-struct BalanceTrace {
+pub(super) struct BalanceTrace {
     tares: AtomicU64,
     reads: AtomicU64,
 }
@@ -46,7 +46,7 @@ impl Drop for ObservedBalance {
     }
 }
 
-fn app_fixture() -> (
+pub(super) fn app_fixture() -> (
     tauri::App<MockRuntime>,
     Arc<BalanceTrace>,
     mpsc::Receiver<()>,
@@ -79,20 +79,31 @@ fn app_fixture() -> (
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             tare_balance,
-            shutoff_flammable_gases
+            shutoff_flammable_gases,
+            stop_experiment,
+            reset_safety_interlock,
+            start_experiment
         ])
         .build(mock_context(noop_assets()))
         .unwrap();
     (app, trace, closed_rx)
 }
 
-fn webview(app: &tauri::App<MockRuntime>) -> tauri::WebviewWindow<MockRuntime> {
+pub(super) fn webview(app: &tauri::App<MockRuntime>) -> tauri::WebviewWindow<MockRuntime> {
     tauri::WebviewWindowBuilder::new(app, "main", Default::default())
         .build()
         .unwrap()
 }
 
 fn invoke(view: &tauri::WebviewWindow<MockRuntime>, command: &str) -> Result<Value, Value> {
+    invoke_with_body(view, command, json!({}))
+}
+
+pub(super) fn invoke_with_body(
+    view: &tauri::WebviewWindow<MockRuntime>,
+    command: &str,
+    body: Value,
+) -> Result<Value, Value> {
     tauri::test::get_ipc_response(
         view,
         tauri::webview::InvokeRequest {
@@ -106,7 +117,7 @@ fn invoke(view: &tauri::WebviewWindow<MockRuntime>, command: &str) -> Result<Val
             }
             .parse()
             .unwrap(),
-            body: tauri::ipc::InvokeBody::Json(json!({})),
+            body: tauri::ipc::InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),
         },
@@ -114,7 +125,7 @@ fn invoke(view: &tauri::WebviewWindow<MockRuntime>, command: &str) -> Result<Val
     .map(|body| body.deserialize::<Value>().unwrap())
 }
 
-fn command_audit(state: &AppState, action: &str) -> Vec<Value> {
+pub(super) fn command_audit(state: &AppState, action: &str) -> Vec<Value> {
     let mut paths: Vec<_> = std::fs::read_dir(state.recovery_dir.parent().unwrap().join("logs"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -133,7 +144,7 @@ fn command_audit(state: &AppState, action: &str) -> Vec<Value> {
         .collect()
 }
 
-fn assert_audit(
+pub(super) fn assert_audit(
     state: &AppState,
     before: usize,
     category: &str,
@@ -161,7 +172,7 @@ fn assert_audit(
     }
 }
 
-fn wait_until(mut condition: impl FnMut() -> bool) {
+pub(super) fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !condition() {
         assert!(
@@ -172,7 +183,7 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
-fn run_owned_by_alice(state: &AppState) {
+pub(super) fn run_owned_by_alice(state: &AppState) {
     let alice = lock(&state.storage)
         .get_user_by_username("alice")
         .unwrap()
@@ -187,7 +198,7 @@ fn run_owned_by_alice(state: &AppState) {
     });
 }
 
-fn select_actor(state: &AppState, actor: &str) {
+pub(super) fn select_actor(state: &AppState, actor: &str) {
     state.auth.logout();
     match actor {
         "anonymous" => {}
@@ -216,7 +227,7 @@ fn select_actor(state: &AppState, actor: &str) {
     }
 }
 
-const ACTORS: [(&str, &str, Option<&str>); 6] = [
+pub(super) const ACTORS: [(&str, &str, Option<&str>); 6] = [
     ("anonymous", "anonymous", Some("AUTH_REQUIRED")),
     ("owner", "爱丽丝", None),
     ("other", "鲍勃", Some("FORBIDDEN")),
@@ -446,20 +457,25 @@ fn balance_authorization_and_tare_enqueue_exclude_the_update_lifecycle() {
     let (completed_tx, completed_rx) = mpsc::channel();
     let worker_state = state.clone();
     let control_worker = std::thread::spawn(move || {
-        let result =
-            enqueue_device_control(&worker_state, Category::Balance, "tare", json!({}), |hub| {
+        let result = enqueue_device_control(
+            &worker_state,
+            Category::Balance,
+            "tare",
+            json!({}),
+            |hub, _user| {
                 entered_tx.send(()).map_err(|error| error.to_string())?;
                 release_rx
                     .recv_timeout(WAIT)
                     .map_err(|error| error.to_string())?;
                 Ok(hub.request_tare())
-            })
-            .and_then(|(operator, reply)| {
-                reply
-                    .blocking_recv()
-                    .map(|result| (operator, result))
-                    .map_err(|error| error.to_string())
-            });
+            },
+        )
+        .and_then(|(operator, reply)| {
+            reply
+                .blocking_recv()
+                .map(|result| (operator, result))
+                .map_err(|error| error.to_string())
+        });
         let _ = completed_tx.send(result);
     });
     entered_rx

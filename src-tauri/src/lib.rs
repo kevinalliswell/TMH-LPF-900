@@ -12,6 +12,7 @@ mod auth_service;
 mod auth_session;
 mod balance_control;
 mod build_profile;
+mod command_audit;
 mod command_error;
 mod config_commands;
 use command_error::{CommandError, CommandResult};
@@ -150,6 +151,7 @@ struct ExpControl {
     pending: Mutex<Vec<RunCompletion>>,
     recovery_errors: Mutex<Vec<String>>,
     status: Mutex<ExperimentStatus>,
+    status_revision: AtomicU64,
     stop: AtomicBool,
     stage_action: Mutex<Option<procedure::StageAction>>,
 }
@@ -164,6 +166,7 @@ impl ExpControl {
             pending: Mutex::new(Vec::new()),
             recovery_errors: Mutex::new(Vec::new()),
             status: Mutex::new(ExperimentStatus::idle()),
+            status_revision: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             stage_action: Mutex::new(None),
         }
@@ -181,7 +184,9 @@ impl ExpControl {
         lock(&self.status).running
     }
     fn set_status(&self, s: ExperimentStatus) {
-        *lock(&self.status) = s;
+        let mut status = lock(&self.status);
+        *status = s;
+        self.status_revision.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -322,6 +327,7 @@ fn may_access_experiment(role: UserRole, user_id: &str, owner_user_id: Option<&s
     role.is_admin() || owner_user_id == Some(user_id)
 }
 
+#[cfg(test)]
 fn require_experiment_controller(state: &AppState) -> Result<UserRow, String> {
     controller_for_user(state, current_user(state)?)
 }
@@ -1285,33 +1291,45 @@ fn spawn_experiment_task<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-fn retry_pending_save(app: AppHandle) -> CommandResult<()> {
+fn retry_pending_save<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     let st = app.state::<AppState>();
-    let user = current_user(&st)?;
-    if st.exp.is_running() {
-        return Err("请等待实验停止".into());
-    }
-    let result = recover_unfinished(
-        &st.hub,
-        &mut lock(&st.storage),
-        &st.audit,
-        &st.exp,
-        &st.recovery_dir,
-    );
-    st.audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "retry_pending_save",
-            if result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
+    let _lifecycle = lock(&st.exp.lifecycle);
+    let (operator, authorization) = st
+        .auth
+        .require_user_with_operator(&lock(&st.storage), epoch_now());
+    let outcome = (|| {
+        authorization.map_err(auth_error)?;
+        if st.exp.closing.load(Ordering::SeqCst) {
+            return Err(CommandError::from("APP_CLOSING"));
+        }
+        if st.exp.is_running() {
+            return Err(CommandError::from("EXPERIMENT_RUNNING"));
+        }
+        if st.exp.updating.load(Ordering::SeqCst) {
+            return Err(CommandError::from("UPDATE_IN_PROGRESS"));
+        }
+        if st.exp.tare_pending.load(Ordering::SeqCst) {
+            return Err(CommandError::from("BALANCE_BUSY"));
+        }
+        let outcome = recover_unfinished(
+            &st.hub,
+            &mut lock(&st.storage),
+            &st.audit,
+            &st.exp,
+            &st.recovery_dir,
         )
-        .operator(user.display_name),
-    );
-    emit_experiment_status(&app, &st.exp.snapshot());
-    result.map_err(CommandError::from)
+        .map_err(|message| CommandError::new("RECOVERY_FAILED", message));
+        emit_experiment_status(&app, &st.exp.snapshot());
+        outcome
+    })();
+    command_audit::finish(
+        &st,
+        Category::Experiment,
+        "retry_pending_save",
+        operator,
+        serde_json::json!({}),
+        outcome,
+    )
 }
 
 // ---- DTOs -------------------------------------------------------------------
@@ -1636,7 +1654,7 @@ fn enqueue_device_control<T>(
     category: Category,
     action: &str,
     detail: serde_json::Value,
-    enqueue: impl FnOnce(&DeviceHub) -> Result<T, String>,
+    enqueue: impl FnOnce(&DeviceHub, &UserRow) -> Result<T, String>,
 ) -> Result<(String, T), String> {
     with_device_lifecycle(state, || {
         let (operator, authorization) = state
@@ -1644,7 +1662,8 @@ fn enqueue_device_control<T>(
             .require_user_with_operator(&lock(&state.storage), epoch_now());
         let outcome: Result<(String, T), String> = (|| {
             let user = controller_for_user(state, authorization.map_err(auth_error)?)?;
-            Ok((user.display_name, enqueue(&state.hub)?))
+            let enqueued = enqueue(&state.hub, &user)?;
+            Ok((user.display_name, enqueued))
         })();
         if let Err(error) = &outcome {
             let result = if error == AuthCode::Storage.as_str() {
@@ -1669,40 +1688,42 @@ fn enqueue_safety_reset(
     state: &AppState,
 ) -> Result<
     (
-        UserRow,
+        String,
         impl std::future::Future<Output = Result<(), String>>,
     ),
     String,
 > {
-    with_device_lifecycle(state, || {
-        let user = current_user(state)?;
-        if state.exp.closing.load(Ordering::SeqCst) {
-            return Err("APP_CLOSING".into());
-        }
-        if state.exp.updating.load(Ordering::SeqCst) {
-            return Err("更新期间不能复位保护".into());
-        }
-        if state.exp.is_running() || state.exp.persistence_pending() {
-            return Err("实验仍在结束或数据待保存，暂不能复位".into());
-        }
-        if !lock(&state.storage)
-            .unfinished_experiments()
-            .map_err(|e| e.to_string())?
-            .is_empty()
-        {
-            return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
-        }
-        if !state.hub.temp_rx().borrow().is_fresh(Instant::now()) {
-            return Err("温度测量无效，不能复位".into());
-        }
-        let reply = state.hub.request_reset_safety();
-        Ok((user, async move {
-            reply
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())
-        }))
-    })
+    enqueue_device_control(
+        state,
+        Category::Gas,
+        "reset_safety_interlock",
+        serde_json::json!({}),
+        |hub, _user| {
+            if state.exp.is_running() || state.exp.persistence_pending() {
+                return Err("EXPERIMENT_RUNNING".into());
+            }
+            if !lock(&state.storage)
+                .unfinished_experiments()
+                .map_err(|_| "STORAGE_ERROR".to_string())?
+                .is_empty()
+            {
+                return Err("尚有未保存完成的实验，请先处理数据保存故障".into());
+            }
+            if !state.hub.temp_rx().borrow().is_fresh(Instant::now()) {
+                return Err("温度测量无效，不能复位".into());
+            }
+            let reply = hub.request_reset_safety();
+            Ok(async move {
+                match reply.await {
+                    Err(_) | Ok(Err(MfcCommandError::Transport(_))) => Err("DEVICE_OFFLINE".into()),
+                    Ok(Err(MfcCommandError::SafetyLatched)) => Err("SAFETY_LATCHED".into()),
+                    Ok(Err(MfcCommandError::QueueFull)) => Err("DEVICE_BUSY".into()),
+                    Ok(Err(_)) => Err("DEVICE_COMMAND_FAILED".into()),
+                    Ok(Ok(())) => Ok(()),
+                }
+            })
+        },
+    )
 }
 
 fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) -> bool {
@@ -1725,20 +1746,42 @@ fn publish_safety_reset(state: &AppState, emit: impl FnOnce(&ExperimentStatus)) 
 }
 
 #[tauri::command]
-async fn reset_safety_interlock(app: AppHandle) -> CommandResult<()> {
+async fn reset_safety_interlock<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     let st = app.state::<AppState>();
-    let (user, reply) = enqueue_safety_reset(&st)?;
-    reply.await?;
-    publish_safety_reset(&st, |status| emit_experiment_status(&app, status));
-    st.audit.write(
-        &AuditEntry::new(
-            Category::Gas,
-            "reset_safety_interlock",
-            AuditResult::Success,
-        )
-        .operator(user.display_name),
-    );
-    Ok(())
+    let (operator, reply) = enqueue_safety_reset(&st)?;
+    finish_safety_reset(
+        &st,
+        operator,
+        reply.await.map_err(CommandError::from),
+        |status| emit_experiment_status(&app, status),
+    )
+}
+
+fn finish_safety_reset(
+    state: &AppState,
+    operator: String,
+    acknowledged: CommandResult<()>,
+    emit: impl FnOnce(&ExperimentStatus),
+) -> CommandResult<()> {
+    let outcome = acknowledged.and_then(|()| {
+        if publish_safety_reset(state, emit) {
+            Ok(())
+        } else {
+            Err(CommandError::new(
+                "RESET_SUPERSEDED",
+                "保护复位回执已过期，请检查当前实验和保护状态",
+            ))
+        }
+    });
+    let confirmed = outcome.is_ok();
+    command_audit::finish(
+        state,
+        Category::Gas,
+        "reset_safety_interlock",
+        operator,
+        serde_json::json!({"reset_confirmed":confirmed}),
+        outcome,
+    )
 }
 
 #[tauri::command]
@@ -1784,7 +1827,7 @@ async fn set_gas_flow<R: tauri::Runtime>(
         Category::Gas,
         "set_flow",
         serde_json::json!({"gas":gas,"requested":value}),
-        |hub| {
+        |hub, _user| {
             if gas >= GAS_COUNT || !value.is_finite() || value < 0.0 {
                 return Err("INVALID_PARAMS".into());
             }
@@ -1859,7 +1902,7 @@ async fn switch_gas(st: &AppState, gas: usize, on: bool) -> Result<(), String> {
         Category::Gas,
         "on_off",
         serde_json::json!({"gas":gas,"on":on}),
-        |hub| {
+        |hub, _user| {
             if gas >= GAS_COUNT {
                 return Err("INVALID_PARAMS".into());
             }
@@ -1896,7 +1939,7 @@ async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), Str
         Category::Gas,
         action,
         serde_json::json!({"on":on}),
-        |hub| {
+        |hub, _user| {
             Ok((0..GAS_COUNT)
                 .map(|gas| hub.request_set_on_off(gas, on))
                 .collect::<Vec<_>>())
@@ -1965,7 +2008,7 @@ async fn shutoff_flammable_gases<R: tauri::Runtime>(app: AppHandle<R>) -> Comman
         Category::Gas,
         "shutoff",
         serde_json::json!({}),
-        |hub| {
+        |hub, _user| {
             st.exp.stop.store(true, Ordering::SeqCst);
             Ok(hub.request_shutoff_flammable())
         },
@@ -2001,7 +2044,7 @@ async fn tare_balance<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<Tar
         Category::Balance,
         "tare",
         serde_json::json!({}),
-        |hub| {
+        |hub, _user| {
             let lease = balance_control::TareLease::begin(st.exp.clone())?;
             Ok((lease, hub.request_tare()))
         },
@@ -2345,48 +2388,56 @@ fn start_experiment<R: tauri::Runtime>(
     app: AppHandle<R>,
     params: ExperimentParams,
 ) -> CommandResult<String> {
-    validate_experiment_params(&params)
-        .map_err(|message| CommandError::new("INVALID_PARAMS", message))?;
-
     let st = app.state::<AppState>();
     let _lifecycle = lock(&st.exp.lifecycle);
-    let user = current_user(&st)?;
-    if st.exp.is_running() {
-        return Err("实验已在运行".into());
-    }
-    let preflight = build_preflight(&st, &params);
-    if let Some(issue) = preflight.blocking.first() {
-        return Err(CommandError::new(&issue.code, &issue.message_zh));
-    }
-    let program = preflight.program.ok_or("未知实验模式")?;
-    validate_executable_program(&program)?;
+    let (operator, authorization) = st
+        .auth
+        .require_user_with_operator(&lock(&st.storage), epoch_now());
+    let mut detail =
+        serde_json::json!({"mode":params.experiment_type,"project":params.project_name});
+    let outcome = (|| {
+        let user = authorization.map_err(auth_error)?;
+        validate_experiment_params(&params)
+            .map_err(|message| CommandError::new("INVALID_PARAMS", message))?;
+        if st.exp.is_running() {
+            return Err(CommandError::from("EXPERIMENT_RUNNING"));
+        }
+        let preflight = build_preflight(&st, &params);
+        if let Some(issue) = preflight.blocking.first() {
+            return Err(CommandError::new(&issue.code, &issue.message_zh));
+        }
+        let program = preflight.program.ok_or("未知实验模式")?;
+        validate_executable_program(&program)?;
 
-    let now = iso_now();
-    let started_at_utc = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let id = format!("exp-{}", tmh_core::auth::new_user_id());
-    let row = ExperimentRow {
-        experiment_id: id.clone(),
-        experiment_name: params.sample_name.clone(),
-        sample_id: Some(params.sample_id.trim().to_string()),
-        project_name: clean_opt(params.project_name.clone()),
-        experiment_time: Some(now.clone()),
-        program_snapshot_json: Some(serde_json::to_string(&program).map_err(|e| e.to_string())?),
-        sample_name: params.sample_name.clone(),
-        sample_weight: params.sample_weight,
-        start_time: now.clone(),
-        end_time: None,
-        description: clean_opt(params.notes.clone()),
-        operator: Some(user.display_name.clone()),
-        experiment_type: Some(params.experiment_type.clone()),
-        analysis_results_json: None,
-        created_at: now.clone(),
-        owner_user_id: Some(user.user_id.clone()),
-    };
-    lock(&st.storage)
-        .insert_experiment(&row)
-        .map_err(|e| e.to_string())?;
+        let now = iso_now();
+        let started_at_utc =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let id = format!("exp-{}", tmh_core::auth::new_user_id());
+        let row = ExperimentRow {
+            experiment_id: id.clone(),
+            experiment_name: params.sample_name.clone(),
+            sample_id: Some(params.sample_id.trim().to_string()),
+            project_name: clean_opt(params.project_name.clone()),
+            experiment_time: Some(now.clone()),
+            program_snapshot_json: Some(
+                serde_json::to_string(&program).map_err(|_| CommandError::from("STORAGE_ERROR"))?,
+            ),
+            sample_name: params.sample_name.clone(),
+            sample_weight: params.sample_weight,
+            start_time: now.clone(),
+            end_time: None,
+            description: clean_opt(params.notes.clone()),
+            operator: Some(user.display_name.clone()),
+            experiment_type: Some(params.experiment_type.clone()),
+            analysis_results_json: None,
+            created_at: now.clone(),
+            owner_user_id: Some(user.user_id.clone()),
+        };
+        lock(&st.storage)
+            .insert_experiment(&row)
+            .map_err(|_| CommandError::from("STORAGE_ERROR"))?;
 
-    lock(&st.storage)
+        lock(&st.storage)
         .patch_runtime_metadata(
             &id,
             &serde_json::json!({
@@ -2397,43 +2448,47 @@ fn start_experiment<R: tauri::Runtime>(
             })
             .to_string(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| CommandError::from("STORAGE_ERROR"))?;
 
-    // Reset signals and publish the initial running status before the task spins up.
-    st.exp.stop.store(false, Ordering::Relaxed);
-    *lock(&st.exp.stage_action) = None;
-    let first = program.stages.first();
-    let initial = ExperimentStatus {
-        updating: false,
-        persistence_pending: false,
-        running: true,
-        experiment_id: Some(id.clone()),
-        mode: Some(params.experiment_type.clone()),
-        sample_name: Some(params.sample_name.clone()),
-        started_at: Some(now.clone()),
-        phase: Phase::StageTransition,
-        stage_index: 0,
-        total_stages: program.stages.len(),
-        stage_name: first.map(|s| s.name.clone()),
-        stage_kind: first.map(|s| s.kind),
-        target_temp: first.map(|s| s.target_temp).unwrap_or(0.0),
-        tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
-        stage_elapsed_s: 0.0,
-        stable_elapsed_s: 0.0,
-        total_elapsed_s: 0.0,
-        owner_user_id: Some(user.user_id.clone()),
-        owner_display_name: Some(user.display_name.clone()),
-        can_control: true,
-        occupied_by_other: false,
-    };
-    st.exp.set_status(initial.clone());
-    st.audit.write(
-        &AuditEntry::new(Category::Experiment, "start", AuditResult::Success)
-            .operator(user.display_name.clone())
-            .detail(serde_json::json!({
-                "id": id, "mode": params.experiment_type, "project": params.project_name
-            })),
-    );
+        // Reset signals and publish the initial running status before the task spins up.
+        st.exp.stop.store(false, Ordering::Relaxed);
+        *lock(&st.exp.stage_action) = None;
+        let first = program.stages.first();
+        let initial = ExperimentStatus {
+            updating: false,
+            persistence_pending: false,
+            running: true,
+            experiment_id: Some(id.clone()),
+            mode: Some(params.experiment_type.clone()),
+            sample_name: Some(params.sample_name.clone()),
+            started_at: Some(now.clone()),
+            phase: Phase::StageTransition,
+            stage_index: 0,
+            total_stages: program.stages.len(),
+            stage_name: first.map(|s| s.name.clone()),
+            stage_kind: first.map(|s| s.kind),
+            target_temp: first.map(|s| s.target_temp).unwrap_or(0.0),
+            tolerance: first.map(|s| s.tolerance).unwrap_or(0.0),
+            stage_elapsed_s: 0.0,
+            stable_elapsed_s: 0.0,
+            total_elapsed_s: 0.0,
+            owner_user_id: Some(user.user_id.clone()),
+            owner_display_name: Some(user.display_name.clone()),
+            can_control: true,
+            occupied_by_other: false,
+        };
+        st.exp.set_status(initial.clone());
+        detail["id"] = serde_json::json!(id);
+        Ok((id, program, user, initial, now))
+    })();
+    let (id, program, user, initial, now) = command_audit::finish(
+        &st,
+        Category::Experiment,
+        "start",
+        operator,
+        detail,
+        outcome,
+    )?;
     emit_experiment_status(&app, &initial);
 
     spawn_experiment_task(
@@ -2457,48 +2512,56 @@ fn start_experiment<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn stop_experiment(app: AppHandle, reason: String) -> CommandResult<()> {
-    let operator = require_experiment_controller(&app.state::<AppState>())?.display_name;
-    let (hub, audit, exp) = {
-        let st = app.state::<AppState>();
-        (st.hub.clone(), st.audit.clone(), st.exp.clone())
-    };
-    // Signal the tick task to finalize (it publishes idle within ≤1s).
-    exp.stop.store(true, Ordering::Relaxed);
-    // HARD INVARIANT (docs/05 §5.5): apply the safety atmosphere immediately here too —
-    // belt-and-suspenders even if the tick task has already died.
-    let safety_result = match hub.request_shutoff_flammable().await {
+async fn stop_experiment<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    reason: String,
+) -> CommandResult<()> {
+    let st = app.state::<AppState>();
+    let (operator, (reply, revision)) = enqueue_device_control(
+        &st,
+        Category::Experiment,
+        "stop",
+        serde_json::json!({"reason":reason}),
+        |hub, _user| {
+            let revision = st.exp.status_revision.load(Ordering::SeqCst);
+            st.exp.stop.store(true, Ordering::SeqCst);
+            hub.set_temp_target_c(25.0);
+            Ok((hub.request_shutoff_flammable(), revision))
+        },
+    )?;
+    // Apply protection independently of whether the experiment tick task is alive.
+    let safety_result = match reply.await {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err("DEVICE_OFFLINE".to_string()),
+        Ok(Err(_)) | Err(_) => Err(CommandError::from("DEVICE_OFFLINE")),
     };
-    hub.set_temp_target_c(25.0);
-    audit.write(
-        &AuditEntry::new(
-            Category::Experiment,
-            "stop",
-            if safety_result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Failure
-            },
-        )
-        .operator(operator)
-        .detail(serde_json::json!({
-            "reason": reason,
-            "safety_atmosphere_confirmed": safety_result.is_ok()
-        })),
-    );
-    // If nothing was running, there is no task to publish idle — do it here.
-    if !exp.is_running() {
-        let status = if safety_result.is_ok() {
+    // An older ACK cannot erase a later finalization/reset/run, even if now idle.
+    let _lifecycle = lock(&st.exp.lifecycle);
+    let mut status = lock(&st.exp.status);
+    if st.exp.status_revision.load(Ordering::SeqCst) == revision
+        && !status.running
+        && status.phase == Phase::Idle
+        && !st.exp.closing.load(Ordering::SeqCst)
+        && !st.exp.updating.load(Ordering::SeqCst)
+        && !st.exp.persistence_pending()
+    {
+        *status = if safety_result.is_ok() {
             ExperimentStatus::idle()
         } else {
             ExperimentStatus::safety_error("manual-stop", 0.0)
         };
-        exp.set_status(status.clone());
+        st.exp.status_revision.fetch_add(1, Ordering::SeqCst);
         emit_experiment_status(&app, &status);
     }
-    safety_result.map_err(CommandError::from)
+    drop(status);
+    let confirmed = safety_result.is_ok();
+    command_audit::finish(
+        &st,
+        Category::Experiment,
+        "stop",
+        operator,
+        serde_json::json!({"reason":reason,"safety_atmosphere_confirmed":confirmed}),
+        safety_result,
+    )
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -3734,17 +3797,16 @@ mod tests {
     mod command_error_tests;
     mod device_control_authorization_tests;
     mod device_lifecycle_tests;
+    mod experiment_control_audit_tests;
     mod gas_authorization_tests;
     mod group_tests;
+    mod recovery_lifecycle_tests;
     mod startup_tests;
     mod storage_fault_tests;
     mod tare_pending_tests;
 
-    /// A real `AppState` on an in-memory database and a mock hub. The authorization helpers
-    /// below (`current_user`, `current_admin`, `authorize_experiment`,
-    /// `require_experiment_controller`) are the single enforcement point every protected
-    /// command funnels through, so exercising them here covers the matrix the spec promises
-    /// even though the `#[tauri::command]` wrappers themselves need a running app (#45).
+    /// A real database and mock hub for domain permission tests. Separate headless
+    /// IPC matrices exercise the registered command wrappers, audit and device effects.
     pub(super) fn test_state() -> AppState {
         let cfg = CommConfig::from_json(DEFAULT_COMM_CONFIG).expect("built-in config");
         let dir = std::env::temp_dir().join(format!("tmh_state_{}", tmh_core::auth::new_user_id()));
