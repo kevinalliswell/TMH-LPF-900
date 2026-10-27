@@ -68,6 +68,17 @@ fn auth_fixture() -> tauri::App<MockRuntime> {
         .unwrap()
 }
 
+fn public_safety_fixture() -> tauri::App<MockRuntime> {
+    mock_builder()
+        .manage(test_state())
+        .invoke_handler(tauri::generate_handler![
+            get_public_safety_status,
+            emergency_safe_shutdown
+        ])
+        .build(mock_context(noop_assets()))
+        .unwrap()
+}
+
 fn assert_error(error: &Value, code: &str) {
     assert_eq!(error["code"], code);
     let message = error["message_zh"].as_str().expect("stable error DTO");
@@ -386,4 +397,46 @@ fn bootstrap_login_and_password_change_keep_auth_dtos_and_snake_case_arguments()
     ] {
         assert!(!serialized.contains(secret));
     }
+}
+
+#[test]
+fn anonymous_public_safety_status_and_emergency_shutdown_are_audited_through_real_ipc() {
+    let app = public_safety_fixture();
+    let state = app.state::<AppState>();
+    let view = webview(&app);
+
+    let before = command_audit(&state, "public_safety_status").len();
+    let status = invoke_with_body(&view, "get_public_safety_status", json!({})).unwrap();
+    assert!(status["experiment_running"].is_boolean());
+    assert!(status["mfc_connected"].is_boolean());
+    assert!(status["temp_connected"].is_boolean());
+    assert_audit(
+        &state,
+        before,
+        "APP",
+        "public_safety_status",
+        "SUCCESS",
+        "anonymous",
+        None,
+    );
+
+    assert!(!state.exp.stop.load(Ordering::Relaxed));
+    let before = command_audit(&state, "emergency_safe_shutdown").len();
+    invoke_with_body(&view, "emergency_safe_shutdown", json!({})).unwrap();
+    assert!(state.exp.stop.load(Ordering::Relaxed));
+    assert_audit(
+        &state,
+        before,
+        "EXPERIMENT",
+        "emergency_safe_shutdown",
+        "SUCCESS",
+        "anonymous",
+        None,
+    );
+    assert_eq!(
+        command_audit(&state, "emergency_safe_shutdown")
+            .last()
+            .unwrap()["detail"]["authenticated"],
+        false
+    );
 }

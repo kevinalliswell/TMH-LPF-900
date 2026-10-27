@@ -42,7 +42,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
 | #43 | main的Instant经过时间、deadline采样、停顿不补造；lib.rs中deadline与采样边界测试 | sim_speed=1的现场长周期计时及墙钟偏差证据 |
 | #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；config_store_contract与config_commands_tests、docs/21；#111补接受关闭后拒绝保存和文件故障稳定码 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
-| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝；#104–#112分别补设备、实验、数据、模板/检验组、导出、更新和配置的六主体命令矩阵；#109补浏览器mock隔离；#114补普通用户界面可见性；本批补账户管理及首启/登录/改密真实IPC回归 | 真实设备故障注入矩阵及现场安全停机验收仍待硬件条件；软件矩阵持续按新增受保护命令复核 |
+| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝；#104–#112分别补设备、实验、数据、模板/检验组、导出、更新和配置的六主体命令矩阵；#109补浏览器mock隔离；#114补普通用户界面可见性；本批补账户管理、公开安全查询和紧急停机真实IPC回归 | 真实设备故障注入矩阵及现场安全停机验收仍待硬件条件；软件矩阵持续按新增受保护命令复核 |
 | #48 | main已有docs/06/07认证和UI规则；#98同步错误DTO现状；#115校正docs/01/09/10/11/12、CHANGELOG和任务清单中的首启认证、设备能力、候选版本及现场限制，补充验收证据模板与认证规格验证记录 | 后续实现变化持续同步；历史验收文档不改写日期/结论 |
 | #49 | 本表把审查项映射到现有实现与阶段 | 保持评估结论随新证据更新，不能批量当作已验收关闭 |
 | #79 | #99完成可拒绝的软件边界，模式和配置测试 | 与#19同项硬件/会话缺口；不得标记real-ready |
@@ -223,10 +223,10 @@ PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #1
 
 PR [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) 已开放并以 PR #114 分支为 base；本机验证通过，远端 CI/candidate 按该 PR 的实时 checks 跟踪。
 
-## 第十九批账户管理真实 IPC 授权矩阵（2026-10-27）
+## 第十九批认证与公开安全命令真实 IPC 授权/审计矩阵（2026-10-27）
 
-为 #45/#83 补齐实际 Tauri invoke 边界回归：管理员用户列表及创建、更新、重置临时密码命令覆盖匿名、普通 owner、其他普通用户、管理员、锁定和待改密六种状态；账户变更拒绝返回稳定错误 DTO、审计一次且数据不变。另通过真实 IPC 覆盖首次管理员创建、重复初始化拒绝、登录成功/失败、登出、密码修改及认证状态 DTO；确认公开用户 DTO 和审计不泄露密码或哈希。`get_auth_state` 仅将 AppHandle 泛型化以支持 MockRuntime 测试，不改变生产运行时逻辑。
+为 #45/#83 补齐实际 Tauri invoke 边界回归：管理员用户列表及创建、更新、重置临时密码命令覆盖匿名、普通 owner、其他普通用户、管理员、锁定和待改密六种状态；账户变更拒绝返回稳定错误 DTO、审计一次且数据不变。另通过真实 IPC 覆盖首次管理员创建、重复初始化拒绝、登录成功/失败、登出、密码修改及认证状态 DTO；确认公开用户 DTO 和审计不泄露密码或哈希。补测未登录即可读取且带匿名审计的安全状态查询，以及匿名紧急停机成功、停止标记与实验审计归属。`get_auth_state` 和 `emergency_safe_shutdown` 仅将 AppHandle 泛型化以支持 MockRuntime 测试，不改变生产运行时逻辑；每次安全状态查询新增一条命令审计。
 
-本机最终验证运行于 macOS arm64、Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`，PR #115 head `040ce88793ff1a498534b5580748217d8799e198` 为基线：前端102项、脚本27项；Rust普通/candidate各462项通过、各1项既有忽略。类型/lint/build、IPC契约与生成类型、Tauri安全、版本同步、生产依赖审计、RustSec、fmt、两种clippy、serial编译、dirty replay及300模拟秒/300行mock soak全部通过。该批仅增加测试与测试可注入性，不改变设备动作、权限策略或实验/分析结果。
+本机最终验证运行于 macOS arm64、Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`，PR #115 head `040ce88793ff1a498534b5580748217d8799e198` 为基线：前端102项、脚本27项；Rust普通/candidate各463项通过、各1项既有忽略。类型/lint/build、IPC契约与生成类型、Tauri安全、版本同步、生产依赖审计、RustSec、fmt、两种clippy、serial编译、dirty replay及300模拟秒/300行mock soak全部通过。该批不改变权限策略或实验/分析结果；匿名紧急停机仍由设备回执决定，MockRuntime 测试不代表真机联锁验收。
 
 PR [#116](https://github.com/kevinalliswell/TMH-LPF-900/pull/116) 已开放，以 PR #115 分支为 base；本机全量验证通过，跨平台 CI/candidate 以该 PR 最新 head checks 为准。

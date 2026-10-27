@@ -1611,11 +1611,22 @@ fn get_device_health(state: State<AppState>) -> CommandResult<DeviceHealthDto> {
 
 #[tauri::command]
 fn get_public_safety_status(state: State<AppState>) -> PublicSafetyStatus {
-    PublicSafetyStatus {
+    let operator = audit_operator(&state);
+    let status = PublicSafetyStatus {
         experiment_running: state.exp.is_running(),
         mfc_connected: state.hub.mfc_rx().borrow().is_fresh(Instant::now()),
         temp_connected: state.hub.temp_rx().borrow().is_fresh(Instant::now()),
-    }
+    };
+    state.audit.write(
+        &AuditEntry::new(Category::App, "public_safety_status", AuditResult::Success)
+            .operator(operator)
+            .detail(serde_json::json!({
+                "experiment_running": status.experiment_running,
+                "mfc_connected": status.mfc_connected,
+                "temp_connected": status.temp_connected,
+            })),
+    );
+    status
 }
 
 /// Authorization and queue submission share the start/update lifecycle boundary.
@@ -1764,7 +1775,7 @@ fn finish_safety_reset(
 }
 
 #[tauri::command]
-async fn emergency_safe_shutdown(app: AppHandle) -> CommandResult<()> {
+async fn emergency_safe_shutdown<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     let st = app
         .try_state::<AppState>()
         .ok_or("设备服务未启动，无法确认保护气氛；请按现场应急规程处置")?;
