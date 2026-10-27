@@ -30,6 +30,7 @@
 | 22 | [#121](https://github.com/kevinalliswell/TMH-LPF-900/pull/121) → #120 | #44 通讯配置保存二次确认 |
 | 23 | [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122) → #121 | #41 登录失败与账户锁定审计回归 |
 | 24 | [#123](https://github.com/kevinalliswell/TMH-LPF-900/pull/123) → #122 | #41/#44/#45 通讯配置命令真实 IPC 会话矩阵与审计回归 |
+| 25 | [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124) → #123 | #41/#44/#45 配置保护重启入口真实 IPC 六状态回归 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -43,11 +44,11 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归；#116补剩余受保护读取/遥测命令六状态IPC矩阵，并验证方案参数查询先认证 | 真实设备故障注入和同批样品科学结果比对；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
 | #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag与同SHA CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码；#117按公开仓库实况修正updater地址；#118启用main分支保护；#119启用`v*` tag创建及不可变规则 | 增加可审阅维护者、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
-| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属；PR #122 补连续失败与锁定后登录拒绝四元组及无凭据断言；PR #123 补通讯配置真实 IPC 拒绝/成功审计 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
+| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属；PR #122 补连续失败与锁定后登录拒绝四元组及无凭据断言；PR #123 补通讯配置读/保存真实 IPC 拒绝/成功审计；PR #124 补重启拒绝审计 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
 | #43 | main的Instant经过时间、deadline采样、停顿不补造；lib.rs中deadline与采样边界测试 | sim_speed=1的现场长周期计时及墙钟偏差证据 |
-| #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；设置页覆盖通讯字段与安全上限，PR #121 补保存二次确认；config_store_contract与config_commands_tests、docs/21；#111补接受关闭后拒绝保存和文件故障稳定码；PR #123 补保存命令真实 IPC 的六状态权限、校验、生命周期和审计 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
-| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝；#104–#112分别补设备、实验、数据、模板/检验组、导出、更新和配置的六主体命令矩阵；#109补浏览器mock隔离；#114补普通用户界面可见性；#116补账户/认证生命周期、公开安全查询/紧急停机和受保护只读/遥测入口的真实IPC覆盖；PR #123 补通讯配置读取/保存的真实 IPC 六状态覆盖 | 真实设备故障注入矩阵及现场安全停机验收仍待硬件条件；新增受保护命令需继续配套授权测试 |
+| #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；设置页覆盖通讯字段与安全上限，PR #121 补保存二次确认；config_store_contract与config_commands_tests、docs/21；#111补接受关闭后拒绝保存和文件故障稳定码；PR #123 补保存命令真实 IPC 六状态权限、校验、生命周期和审计；PR #124 补保护重启入口 IPC 拒绝矩阵 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
+| #45 | main的owner/admin/匿名/锁定/待改密守卫、AuthGate、存储/组/配置回归；#98增加真实IPC拒绝；#104–#112分别补设备、实验、数据、模板/检验组、导出、更新和配置的六主体命令矩阵；#109补浏览器mock隔离；#114补普通用户界面可见性；#116补账户/认证生命周期、公开安全查询/紧急停机和受保护只读/遥测入口真实IPC覆盖；PR #123 补配置读/保存，PR #124 补保护重启真实 IPC 六状态拒绝覆盖 | 真实设备故障注入矩阵及现场安全停机验收仍待硬件条件；新增受保护命令需继续配套授权测试 |
 | #48 | main已有docs/06/07认证和UI规则；#98同步错误DTO现状；#115校正docs/01/09/10/11/12、CHANGELOG和任务清单中的首启认证、设备能力、候选版本及现场限制，补充验收证据模板与认证规格验证记录 | 后续实现变化持续同步；历史验收文档不改写日期/结论 |
 | #49 | 本表把审查项映射到现有实现与阶段 | 保持评估结论随新证据更新，不能批量当作已验收关闭 |
 | #79 | #99完成可拒绝的软件边界，模式和配置测试 | 与#19同项硬件/会话缺口；不得标记real-ready |
@@ -273,3 +274,9 @@ PR [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122) 以 PR #121 �
 使用 Tauri MockRuntime 注册命令处理器，覆盖配置读取和保存在匿名、普通所有者、其他普通用户、管理员、锁定和待改密会话下的真实 invoke 边界。测试拒绝越权保存及 H₂ 超限，核对运行期拒绝、saved/applied 区分，以及每种结果对应的 CONFIG 审计操作者与错误码；没有改动生产授权逻辑。
 
 PR [#123](https://github.com/kevinalliswell/TMH-LPF-900/pull/123) 以 PR #122 为 base。macOS arm64 本机验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：前端29个文件/103项、脚本28项，Rust普通/candidate工作区各470项通过、各含1项既有忽略；应用库179项通过。`typecheck`、`lint`、`build`、Tauri安全、IPC契约/生成类型、版本同步、生产依赖审计、fmt、两套clippy、serial编译、dirty replay及5分钟模拟soak均通过。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 检查通过，仍有1项经评审且限期的glib 0.18.5 unsound例外及10项未维护警告，见docs/27。soak回放结果为2条有效解析、2条解析错误、1次超时；5分钟逻辑模拟生成300行，非实机耐久测试。Vite生产包仍提示主JS chunk超过500 kB。远端CI及候选安装包checks以该PR当前head为准。
+
+## 第二十五批配置保护重启 IPC 授权回归（#41/#44/#45，2026-10-27）
+
+`restart_for_config` 现通过 `MockRuntime` 实际 invoke 验证六种会话状态，断言认证/越权错误、管理员过期版本拒绝和单次 CONFIG 操作者审计；拒绝时确认生命周期租约已释放。命令运行时类型泛化只用于接入 MockRuntime，不改变重启或保护流程。
+
+PR [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124) 以 PR #123 为 base。macOS arm64 本机验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：前端29个文件/103项、脚本28项，Rust普通/candidate工作区各471项通过、各有1项既有忽略；应用库180项通过。`typecheck`、`lint`、`build`、Tauri安全、IPC契约/生成类型、版本同步、生产依赖审计、fmt、两套clippy、serial编译、dirty replay及5分钟模拟soak均通过。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 检查通过，保留1项经评审且限期的glib 0.18.5 unsound例外及10项未维护警告。soak回放为2条有效解析、2条解析错误、1次超时；逻辑模拟5分钟生成300行，非实机耐久测试。Vite生产包仍提示主JS chunk超过500 kB。重启入口的有效版本/保护ACK分支另由既有内部测试覆盖；本次真实IPC矩阵只走拒绝路径，不触发重启或设备动作。远端CI及候选安装包checks以该PR当前head为准。
