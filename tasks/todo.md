@@ -6,6 +6,7 @@
 
 - [x] PR #114：普通用户界面授权可见性回归；本机综合测试及 Ubuntu/Windows CI、RustSec、SBOM、Windows/macOS candidate 检查通过，保持 open。
 - [x] PR #115：修正认证/授权文档漂移，核对 Unreleased 目标版本与现场限制；本机全面验证通过，PR 已创建并保持 open，远端 CI/candidate 以 PR checks 跟踪。
+- [x] PR #116：首启/登录/改密、账户管理、公开安全命令和其余受保护只读/遥测入口真实 IPC 授权回归；修复实验起始查询先读方案后认证的顺序；普通/candidate Rust、前端与全量门禁通过，PR 保持 open，远端 checks 跟踪最新 head。
 - [ ] 本地浏览器 mock 的首管理员/普通用户工作流：服务已运行；首次设置凭据和创建测试用户由维护者在本地页面完成，不共享密码。
 
 ## 现场输入与验收
