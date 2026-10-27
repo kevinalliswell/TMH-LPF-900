@@ -11,6 +11,7 @@ fn fixture() -> tauri::App<MockRuntime> {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             touch_session,
+            get_app_info,
             get_runtime_mode,
             get_gas_safety_limits,
             get_runtime_settings,
@@ -26,6 +27,24 @@ fn fixture() -> tauri::App<MockRuntime> {
         ])
         .build(mock_context(noop_assets()))
         .unwrap()
+}
+
+#[test]
+fn app_info_is_available_without_a_session_and_matches_package_metadata() {
+    let app = fixture();
+    let state = app.state::<AppState>();
+    let view = webview(&app);
+
+    select_actor(&state, "anonymous");
+    let result = invoke_with_body(&view, "get_app_info", json!({})).unwrap();
+
+    assert_eq!(
+        result,
+        json!({
+            "name": "TMH-LPF-900",
+            "version": env!("CARGO_PKG_VERSION")
+        })
+    );
 }
 
 fn expected_auth_error(actor: &str) -> Option<&'static str> {
