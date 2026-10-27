@@ -36,7 +36,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 |---|---|---|
 | #19 | 配置不回退已在main；#99严格拒绝模式、启动错误可见、requested/effective | 真实三串口组合根与握手；显式三总线replay会话；厂家协议/现场记录 |
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归；#116补剩余受保护读取/遥测命令六状态IPC矩阵，并验证方案参数查询先认证 | 真实设备故障注入和同批样品科学结果比对；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
-| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag与同SHA CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码；#117按公开仓库实况修正updater地址 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
+| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag与同SHA CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码；#117按公开仓库实况修正updater地址；#118启用main分支保护 | 增加可审阅维护者、`v*` tag ruleset、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
 | #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
@@ -60,7 +60,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 
 ## 仓库策略实况与发布阻断
 
-2026-10-24读取GitHub branches/main API：`protected=false`，main SHA为`d54b75a`。2026-10-27确认源码仓库为public，匿名访问本仓库latest.json返回`v0.2.0`；原updater端点指向的`TMH-LPF-900-releases`仓库不存在。PR #117调整端点并修正文档，应用仍默认关闭更新检查，不创建或发布新Release。正式release要求main已保护且该提交的push CI成功；条件未满足即失败，不能用YAML存在替代实际保护。至少一名审批的保护规则目前未启用；已核验只有一位维护者，因此暂不加会阻止单人合并的审批门槛。当前任务不合并或发布任何版本。
+2026-10-24读取GitHub branches/main API：`protected=false`，main SHA为`d54b75a`。2026-10-27确认源码仓库为public，匿名访问本仓库latest.json返回`v0.2.0`；原updater端点指向的`TMH-LPF-900-releases`仓库不存在。PR #117调整updater端点并修正文档，应用仍默认关闭更新检查，不创建或发布新Release。随后已为`main`启用并回读分支保护：必须经PR、严格要求分支最新、至少一名审批且新提交废弃旧审批；required checks 为`check (ubuntu-latest)`、`check (windows-latest)`、`RustSec CI / audit`；管理员也受规则约束，禁止force-push、删除和未解决会话。当前main SHA的push CI成功记录为run `34762466553`。直接协作者仅仓库所有者，因此当前stacked PR在增加第二名可审阅维护者前不能合并；不降低审批门槛。`v*` tag ruleset尚未建立。当前任务不合并或发布任何版本。
 
 ## 外部输入清单
 
@@ -236,3 +236,7 @@ PR [#116](https://github.com/kevinalliswell/TMH-LPF-900/pull/116) 已开放，�
 仓库 owner 已将源码仓库设为 public。匿名请求读取 `https://github.com/kevinalliswell/TMH-LPF-900/releases/latest/download/latest.json` 成功，返回已发布 `v0.2.0` 清单；旧配置中的 `TMH-LPF-900-releases` 仓库由 GitHub API 返回404。修改 updater 端点指向可达的公开 Releases，并同步 CHANGELOG、docs/01、09、11、28 与本索引。已发布 `v0.2.0` 包仍保存旧地址，必须手动安装包含修复的后续版本才能恢复应用内更新；既有tag/资产不覆盖。更新检查仍默认关闭；本批不创建版本、不发布资产、不声称已通过安装端到端更新/回滚。
 
 PR [#117](https://github.com/kevinalliswell/TMH-LPF-900/pull/117) 以 PR #116 为 base，保持 open；测试和远端构建状态以该 PR 最新 head 为准。
+
+PR [#118](https://github.com/kevinalliswell/TMH-LPF-900/pull/118) 记录本批启用的 main 分支保护和单维护者导致的审阅阻塞，以 PR #117 为 base，保持 open。`v*` tag ruleset、第二位维护者与正式发布责任仍待完成。
+
+#118 本机全面验证：Node脚本28项、前端102项、Rust普通/candidate工作区各467项（含1项既有忽略）通过；typecheck、lint、build、Tauri安全、IPC契约与生成类型、生产依赖审计、版本同步、fmt、普通/candidate clippy、serial编译、dirty replay和300模拟秒/300行soak均通过。仅文档变更；GitHub CI/candidate状态以PR checks为准。
