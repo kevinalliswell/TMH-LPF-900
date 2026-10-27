@@ -11,6 +11,11 @@
 - [x] PR #118：启用并回读验证 main 的 PR/审批/CI 保护及禁强推/删除规则，记录只存在一位直接维护者造成的合并阻塞；远端 checks 随 PR 跟踪。
 - [x] PR #119：为 `v*` tag 启用管理员创建规则和无例外的更新/删除保护，API 回读验证且未修改现有 tag；远端 checks 随 PR 跟踪。
 - [x] PR #120：补充可填写的现场联调、样品对照和部署验收资料模板，避免猜测厂家协议和实验阈值；本机全量门禁通过，远端 checks 随 PR 跟踪。
+- [x] PR [#121](https://github.com/kevinalliswell/TMH-LPF-900/pull/121)：通讯配置保存二次确认；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
+- [x] PR [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122)：登录失败与账户锁定审计回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
+- [x] PR [#123](https://github.com/kevinalliswell/TMH-LPF-900/pull/123)：通讯配置 IPC 六主体矩阵与审计回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
+- [x] PR [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124)：配置保护重启入口 IPC 六状态回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
+- [x] PR [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125)：剩余受保护 IPC 六主体矩阵；远端首轮发现 mock MFC 快照发布竞态，已由提交 `5dc56c2`/`5d7ed41` 修正；普通/candidate 全工作区本机复测通过，最新 CI/candidate 检查运行中，保持 open。
 - [ ] 本地浏览器 mock 的首管理员/普通用户工作流：服务已运行；首次设置凭据和创建测试用户由维护者在本地页面完成，不共享密码。
 
 ## 现场输入与验收
