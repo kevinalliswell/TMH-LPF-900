@@ -171,6 +171,37 @@ fn login_and_own_password_normal_outcomes_remain_rejected_or_success_without_sec
 }
 
 #[test]
+fn failed_and_locked_login_attempts_are_audited_without_credentials() {
+    let state = fixture();
+    admin(&state);
+    state.auth.logout();
+
+    for (attempt, expected_code) in [
+        (1, "AUTH_FAILED"),
+        (2, "AUTH_FAILED"),
+        (3, "AUTH_FAILED"),
+        (4, "AUTH_FAILED"),
+        (5, "ACCOUNT_LOCKED"),
+        (6, "ACCOUNT_LOCKED"),
+    ] {
+        let before = entries(&state).len();
+        assert_eq!(
+            login(&state, "admin".into(), "wrong-password".into()).unwrap_err(),
+            expected_code,
+            "attempt {attempt}"
+        );
+        assert_entry(
+            &state,
+            before,
+            "login",
+            "REJECTED",
+            "admin",
+            Some(expected_code),
+        );
+    }
+}
+
+#[test]
 fn login_final_snapshot_failure_is_one_failure_not_a_prior_success() {
     let state = fixture();
     admin(&state);

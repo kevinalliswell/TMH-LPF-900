@@ -28,6 +28,7 @@
 | 20 | [#117](https://github.com/kevinalliswell/TMH-LPF-900/pull/117) → #116；[#118](https://github.com/kevinalliswell/TMH-LPF-900/pull/118) → #117；[#119](https://github.com/kevinalliswell/TMH-LPF-900/pull/119) → #118 | #23/#89 公开 updater 地址与 main/tag 规则 |
 | 21 | [#120](https://github.com/kevinalliswell/TMH-LPF-900/pull/120) → #119 | #19/#86 现场验收输入模板 |
 | 22 | [#121](https://github.com/kevinalliswell/TMH-LPF-900/pull/121) → #120 | #44 通讯配置保存二次确认 |
+| 23 | [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122) → #121 | #41 登录失败与账户锁定审计回归 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -41,7 +42,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归；#116补剩余受保护读取/遥测命令六状态IPC矩阵，并验证方案参数查询先认证 | 真实设备故障注入和同批样品科学结果比对；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
 | #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag与同SHA CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码；#117按公开仓库实况修正updater地址；#118启用main分支保护；#119启用`v*` tag创建及不可变规则 | 增加可审阅维护者、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
-| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
+| #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属；PR #122 补连续失败与锁定后登录拒绝四元组及无凭据断言 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
 | #43 | main的Instant经过时间、deadline采样、停顿不补造；lib.rs中deadline与采样边界测试 | sim_speed=1的现场长周期计时及墙钟偏差证据 |
 | #44 | main的管理员保存/冲突/保护重启、saved/applied、节奏项接入；设置页覆盖通讯字段与安全上限，PR #121 补保存二次确认；config_store_contract与config_commands_tests、docs/21；#111补接受关闭后拒绝保存和文件故障稳定码 | 真实端口重启后的实际参数核验；当前采用整应用重启，未承诺进程内热换总线 |
@@ -259,3 +260,9 @@ PR [#120](https://github.com/kevinalliswell/TMH-LPF-900/pull/120) 以 PR #119 �
 管理员填写修改原因并提交后，页面先展示待保存范围与原因；只有再次确认才调用保存命令。确认阶段冻结表单，取消不会写入；后端现有管理员授权、运行/保存期拒绝、配置校验、审计、版本冲突与原子写入规则保持不变。配置在重启前不生效，重启仍另有独立保护气氛确认。真机设备总线仍由完整串口集成和现场输入验收。
 
 PR [#121](https://github.com/kevinalliswell/TMH-LPF-900/pull/121) 以 PR #120 为 base。macOS arm64 本机验证：前端 29 个文件/103 项、Node 脚本 28 项、Rust 普通和 candidate 工作区各 467 项（各含 1 项既有忽略）通过；typecheck/lint/build、Tauri安全、IPC契约/类型、版本同步、生产依赖审计、RustSec、fmt、两套clippy、serial编译、dirty replay和300模拟秒/300行mock soak均通过。当前RustSec报告仍有1项已评审且限期的glib 0.18.5 unsound例外和10项未维护警告，不据此宣称风险清零。远端CI及候选安装包checks以该PR当前head为准。
+
+## 第二十三批账户锁定登录审计回归（#41，2026-10-27）
+
+新增认证命令层测试，逐次断言第五次错误口令触发锁定、锁定后重试仍按 `AUTH/login/REJECTED` 留痕，并保留尝试用户名作为操作者；日志必须不含口令、哈希或原始数据库诊断。认证策略和对外错误码不变。
+
+PR [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122) 以 PR #121 为 base。macOS arm64 本机验证：前端 29 个文件/103 项、Node脚本28项、Rust普通和candidate工作区各468项（各含1项既有忽略）通过；typecheck/lint/build、Tauri安全、IPC契约/类型、版本同步、生产依赖审计、RustSec、fmt、两套clippy、serial编译、dirty replay及300模拟秒/300行mock soak均通过。当前RustSec报告仍有1项经评审且限期的glib 0.18.5 unsound例外和10项未维护警告。远端CI及候选安装包checks以该PR当前head为准。
