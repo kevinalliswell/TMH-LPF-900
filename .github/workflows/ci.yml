@@ -101,12 +101,12 @@ jobs:
       - name: Compile serial feature (skeleton, not hardware-tested)
         run: cargo build -p tmh-core --features serial --locked
 
-      - name: Headless soak (replay dirty session + short mock)
+      - name: Headless soak (dirty replay + 24-hour logical mock)
         shell: bash
         run: |
           set -euo pipefail
           cargo run -p tmh-core --example soak --locked -- --replay fixtures/dirty-session.jsonl 2>&1 | tee verification/replay.log
-          cargo run -p tmh-core --example soak --locked -- --minutes 5 2>&1 | tee verification/mock-soak.log
+          cargo run -p tmh-core --example soak --locked -- --minutes 1440 2>&1 | tee verification/mock-soak.log
 
       - name: Version consistency
         run: node scripts/sync-version.mjs --check

@@ -34,8 +34,9 @@
 | 26 | [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125) → #124 | #41/#45 剩余受保护命令真实 IPC 六主体矩阵与读取审计 |
 | 27 | [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) → #125 | #48 里程碑勾选证据检查与软件 PR 清单同步 |
 | 28 | [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) → #126 | #45/#82 公开 `get_app_info` 匿名真实 IPC 与包名/版本 DTO 回归 |
+| 29 | #128 → #127 | #88 将 CI mock soak 扩展为 24 小时逻辑时间，并核对 86,400 条样本 |
 
-每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
+每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及mock soak；第29批按#88将CI模拟soak扩至24小时逻辑时间。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
 CI默认测试PR合成提交，candidate测试head提交；`verification/context.json`保留实际源码SHA、父提交、版本、工具链和平台，不能把两者混为同一提交。candidate验证产物manifest仍独立记录安装包SHA。程序不会在普通CI触碰真实串口。
 
@@ -304,3 +305,9 @@ PR [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) 以 PR #125 �
 为 `get_app_info` 注册真实 Tauri MockRuntime invoke 用例，在匿名会话下确认公开元数据命令可用，并精确核对包名和由 `CARGO_PKG_VERSION` 提供的版本。命令本身没有权限或业务行为变化；本批补齐命令清点中最后一项尚未进入 IPC 测试的入口。
 
 PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) 以 PR #126 分支为 base，保持 open。macOS arm64 全面验证：Rust普通/candidate工作区应用库各184项、core各110项及协议/集成测试通过；新增匿名 IPC 用例通过；前端29个文件/103项、脚本31项、typecheck、lint、production build、Tauri安全、IPC参数契约/生成DTO、版本一致性、生产依赖审计、普通/candidate clippy、fmt、serial编译、dirty replay及300模拟秒/300行mock soak均通过。dirty replay为2条有效解析、2条解析错误、1次超时。RustSec官方数据库策略通过，保留1项到期日为2026-11-20的glib 0.18.5临时例外及10项未维护警告，见docs/27。Vite主JS chunk仍为1488.15 kB并显示既有体积提示。远端跨平台 CI/candidate 以各PR最新head checks为准。
+
+## 第二十九批 #88 模拟长时样本持久化门禁（2026-10-28）
+
+将普通 CI 的逻辑 mock soak 从5分钟扩展为24小时（86,400个模拟秒），每秒应生成一条样本并经过批量 SQLite 写入；完整行数必须与模拟时长精确相等。此门禁使用逻辑时间快速回放，不等于24小时实机耐久试验，也不替代现场故障恢复验收。
+
+PR #128 以 PR #127 分支为 base，保持 open。macOS arm64 全面验证通过：前端29个文件/103项、Node脚本31项；普通/candidate Rust工作区应用库各184项、core各110项及协议/集成测试；typecheck、lint、build、IPC/安全/版本、生产依赖审计、RustSec、普通/candidate clippy、fmt、serial、dirty replay、actionlint及24小时逻辑 soak均通过。24小时模拟写入86,400/86,400行，约3.9秒墙钟时间；不是实机耐久试验。RustSec保留到期日为2026-11-20的glib 0.18.5临时例外和10项未维护警告，Vite主JS chunk仍有1488.15 kB既存体积提示。远端 CI/candidate 以 PR 最新head检查为准。
