@@ -15,13 +15,14 @@ vi.mock("./ipc", async (original) => ({ ...await original<typeof ipc>(),
 }));
 afterEach(cleanup);
 
-it("does not restore an admin-only screen when the next authenticated user has a regular role", async () => {
+it("hides admin-only navigation and screens after switching to a regular user", async () => {
   const user = {user_id: "admin", username: "admin", display_name: "管理员", role: "ADMIN" as const, is_active: true, must_change_password: false, created_at: "2026-09-13"};
   useNav.setState({view: "users", leaveBlockReason: null});
   useAuth.setState({snapshot: {status: "AUTHENTICATED", idle_timeout_s: 900, user}});
   await act(async () => { render(<App />); });
   expect(screen.getByText("管理员用户表单")).toBeTruthy();
   act(() => useAuth.setState({snapshot: {status: "AUTHENTICATED", idle_timeout_s: 900, user: {...user, user_id: "operator", role: "USER"}}}));
+  expect(screen.queryByRole("button", {name: "用户管理"})).toBeNull();
   expect(screen.queryByText("管理员用户表单")).toBeNull();
   expect(screen.getByText("普通控制页面")).toBeTruthy();
 });

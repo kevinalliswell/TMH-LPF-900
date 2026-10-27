@@ -31,6 +31,7 @@ beforeEach(() => {
   useAuth.setState({ snapshot: null, loading: false });
   useExperiment.setState({ state: { running: true, experiment_id: first.experiment_id } });
   vi.mocked(ipc.listExperiments).mockResolvedValue([first]);
+  vi.mocked(ipc.listUsers).mockResolvedValue([]);
   vi.mocked(ipc.getExperimentDetail).mockResolvedValue(detailOf(first));
   vi.mocked(ipc.getExperimentSamples).mockResolvedValue([]);
 });
@@ -54,6 +55,19 @@ it("refreshes the visible history and selected record after terminal persistence
   act(() => useExperiment.setState({ state: { running: false, persistence_pending: false } }));
   expect(await screen.findByRole("button", { name: /试样 A.*完成/ })).toBeTruthy();
   expect(await screen.findByText("61")).toBeTruthy();
+});
+
+it("hides admin-only history controls from an authenticated regular user", async () => {
+  const user = { user_id: "owner", username: "alice", display_name: "爱丽丝", role: "USER" as const,
+    is_active: true, must_change_password: false, created_at: first.start_time };
+  useAuth.setState({ snapshot: { status: "AUTHENTICATED", idle_timeout_s: 900, user } });
+
+  render(<HistoryView />);
+
+  await screen.findByText("ri-first");
+  expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+  expect(screen.queryByLabelText("数据归属")).toBeNull();
+  expect(ipc.listUsers).not.toHaveBeenCalled();
 });
 
 it("keeps the newly selected record when an older detail request finishes late", async () => {
