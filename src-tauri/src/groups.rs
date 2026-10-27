@@ -115,12 +115,28 @@ fn prepare(
     Ok((id, previous, snapshot))
 }
 
-pub(super) fn preview(state: &AppState, request: GroupRequest) -> Result<GroupSnapshot, String> {
+pub(super) fn preview(state: &AppState, request: GroupRequest) -> CommandResult<GroupSnapshot> {
     let _lifecycle = lock(&state.exp.lifecycle);
-    let user = current_user(state)?;
-    editable(state)?;
-    let (_, _, snapshot) = prepare(&lock(&state.storage), &user, &request)?;
-    Ok(snapshot)
+    let (operator, authorization) = command_audit::authorize(state, UserRole::User);
+    let detail = serde_json::json!({
+        "group_id": request.group_id,
+        "trial_ids": request.trials.iter().map(|trial| &trial.experiment_id).collect::<Vec<_>>(),
+    });
+    let outcome = (|| {
+        let user = authorization?;
+        editable(state).map_err(CommandError::from)?;
+        let (_, _, snapshot) =
+            prepare(&lock(&state.storage), &user, &request).map_err(CommandError::from)?;
+        Ok(snapshot)
+    })();
+    command_audit::finish(
+        state,
+        Category::Experiment,
+        "preview_test_group",
+        operator,
+        detail,
+        outcome,
+    )
 }
 pub(super) fn save(state: &AppState, request: GroupRequest) -> CommandResult<TestGroupRevision> {
     let _lifecycle = lock(&state.exp.lifecycle);
@@ -175,27 +191,49 @@ pub(super) fn get(
     state: &AppState,
     id: &str,
     revision: Option<u64>,
-) -> Result<TestGroupRevision, String> {
-    let user = current_user(state)?;
-    let record = lock(&state.storage)
-        .test_group_revision(id, revision)
-        .map_err(|e| e.to_string())?
-        .ok_or("检验组不存在")?;
-    authorize(&record, &user)?;
-    Ok(record)
+) -> CommandResult<TestGroupRevision> {
+    let (operator, authorization) = command_audit::authorize(state, UserRole::User);
+    let outcome = (|| {
+        let user = authorization?;
+        let record = lock(&state.storage)
+            .test_group_revision(id, revision)
+            .map_err(|_| CommandError::from("STORAGE_ERROR"))?
+            .ok_or_else(|| CommandError::from("检验组不存在"))?;
+        authorize(&record, &user).map_err(CommandError::from)?;
+        Ok(record)
+    })();
+    command_audit::finish(
+        state,
+        Category::Experiment,
+        "get_test_group",
+        operator,
+        serde_json::json!({"id":id,"revision":revision}),
+        outcome,
+    )
 }
-pub(super) fn list(state: &AppState, offset: u32) -> Result<Vec<TestGroupRevision>, String> {
-    let user = current_user(state)?;
-    lock(&state.storage)
-        .list_test_groups(
-            if user.role.is_admin() {
-                None
-            } else {
-                Some(&user.user_id)
-            },
-            offset,
-        )
-        .map_err(|e| e.to_string())
+pub(super) fn list(state: &AppState, offset: u32) -> CommandResult<Vec<TestGroupRevision>> {
+    let (operator, authorization) = command_audit::authorize(state, UserRole::User);
+    let outcome = (|| {
+        let user = authorization?;
+        lock(&state.storage)
+            .list_test_groups(
+                if user.role.is_admin() {
+                    None
+                } else {
+                    Some(&user.user_id)
+                },
+                offset,
+            )
+            .map_err(|_| CommandError::from("STORAGE_ERROR"))
+    })();
+    command_audit::finish(
+        state,
+        Category::Experiment,
+        "list_test_groups",
+        operator,
+        serde_json::json!({"offset":offset}),
+        outcome,
+    )
 }
 
 /// Export exactly one immutable revision; authorization precedes all filesystem I/O.

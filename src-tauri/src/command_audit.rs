@@ -36,6 +36,7 @@ pub(super) fn finish<T>(
                     | "DEVICE_OFFLINE"
                     | "DEVICE_COMMAND_FAILED"
                     | "RECOVERY_FAILED"
+                    | "PROGRAM_DATA_INVALID"
                     | "EXPORT_FAILED"
                     | "REPORT_DATA_INVALID"
                     | "UPDATE_FAILED"

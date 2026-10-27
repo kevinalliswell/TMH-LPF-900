@@ -1870,7 +1870,11 @@ async fn set_gas_flow<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn set_gas_on_off(app: AppHandle, gas: usize, on: bool) -> CommandResult<()> {
+async fn set_gas_on_off<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    gas: usize,
+    on: bool,
+) -> CommandResult<()> {
     switch_gas(&app.state::<AppState>(), gas, on)
         .await
         .map_err(CommandError::from)
@@ -1980,14 +1984,14 @@ async fn set_all_valves(st: &AppState, on: bool, action: &str) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn open_all_valves(app: AppHandle) -> CommandResult<()> {
+async fn open_all_valves<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     set_all_valves(&app.state::<AppState>(), true, "open_all")
         .await
         .map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn close_all_valves(app: AppHandle) -> CommandResult<()> {
+async fn close_all_valves<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<()> {
     set_all_valves(&app.state::<AppState>(), false, "close_all")
         .await
         .map_err(CommandError::from)
@@ -2618,7 +2622,7 @@ fn list_custom_program_revisions(
     state: State<AppState>,
     id: String,
 ) -> CommandResult<Vec<Program>> {
-    custom_programs::history(&state, &id).map_err(CommandError::from)
+    custom_programs::history(&state, &id)
 }
 
 #[tauri::command]
@@ -3089,7 +3093,7 @@ fn preview_test_group(
     state: State<'_, AppState>,
     request: groups::GroupRequest,
 ) -> CommandResult<groups::GroupSnapshot> {
-    groups::preview(&state, request).map_err(CommandError::from)
+    groups::preview(&state, request)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn save_test_group(
@@ -3103,7 +3107,7 @@ fn list_test_groups(
     state: State<'_, AppState>,
     offset: u32,
 ) -> CommandResult<Vec<tmh_core::storage::TestGroupRevision>> {
-    groups::list(&state, offset).map_err(CommandError::from)
+    groups::list(&state, offset)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn get_test_group(
@@ -3111,7 +3115,7 @@ fn get_test_group(
     id: String,
     revision: Option<u64>,
 ) -> CommandResult<tmh_core::storage::TestGroupRevision> {
-    groups::get(&state, &id, revision).map_err(CommandError::from)
+    groups::get(&state, &id, revision)
 }
 #[tauri::command(rename_all = "snake_case")]
 fn generate_test_group_report<R: tauri::Runtime>(
@@ -3739,6 +3743,7 @@ mod tests {
     mod export_audit_tests;
     mod gas_authorization_tests;
     mod group_tests;
+    mod protected_ipc_gap_tests;
     mod read_only_authorization_tests;
     mod recovery_lifecycle_tests;
     mod startup_tests;
@@ -4102,7 +4107,9 @@ mod tests {
         state.auth.logout();
         assert_mutations_denied();
         assert_eq!(
-            custom_programs::history(&state, &first.id).unwrap_err(),
+            custom_programs::history(&state, &first.id)
+                .unwrap_err()
+                .code,
             "AUTH_REQUIRED"
         );
 
@@ -4115,7 +4122,9 @@ mod tests {
         state.auth.lock();
         assert_mutations_denied();
         assert_eq!(
-            custom_programs::history(&state, &first.id).unwrap_err(),
+            custom_programs::history(&state, &first.id)
+                .unwrap_err()
+                .code,
             "AUTH_REQUIRED"
         );
 
