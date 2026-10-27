@@ -64,6 +64,8 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 
 ## 外部输入清单
 
+可直接填写的设备联调、原始报文、样品对照和工控机验收表见[现场资料填写模板](29-现场资料填写模板.md)。
+
 1. 9路温控、4路MFC、天平的型号/固件与厂家通讯手册路径；特别是从站0、字宽、缩放、ACK/异常帧、ON/OFF寄存器。
 2. 三总线独立TX/RX原始会话、串口参数、时间与保护回执；探针先按既有只读流程执行。
 3. 目标Windows工控机、驱动与离线安装/恢复环境。
@@ -242,3 +244,9 @@ PR [#118](https://github.com/kevinalliswell/TMH-LPF-900/pull/118) 记录启用�
 #118 本机全面验证：Node脚本28项、前端102项、Rust普通/candidate工作区各467项（含1项既有忽略）通过；typecheck、lint、build、Tauri安全、IPC契约与生成类型、生产依赖审计、版本同步、fmt、普通/candidate clippy、serial编译、dirty replay和300模拟秒/300行soak均通过。仅文档变更；GitHub CI/candidate状态以PR checks为准。
 
 PR [#119](https://github.com/kevinalliswell/TMH-LPF-900/pull/119) 记录并审计 v* tag 创建/不可变规则，基于 PR #118，保持 open；未创建或移动任何 tag。
+
+## 第二十一批现场输入模板（2026-10-27）
+
+新增[现场资料填写模板](29-现场资料填写模板.md)，覆盖设备/串口参数、原始 TX/RX 帧、设备联调证据、同批新旧系统样品结果和Windows工控机安装/回滚。模板不猜测协议寄存器、样本数或实验阈值，要求引用厂家手册/批准SOP并保留原始附件；不收集密码或签名私钥。
+
+PR [#120](https://github.com/kevinalliswell/TMH-LPF-900/pull/120) 以 PR #119 为 base，保持 open。本机全量门禁通过：Node脚本28项、前端102项、Rust普通/candidate工作区各467项（各1项既有忽略）、typecheck/lint/build、Tauri安全、IPC契约/类型、生产审计、版本同步、fmt、两套clippy、serial编译、dirty replay及模拟soak。
