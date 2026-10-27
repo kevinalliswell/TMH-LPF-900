@@ -5,7 +5,7 @@
 ## 当前软件批次
 
 - [x] PR #114：普通用户界面授权可见性回归；本机综合测试及 Ubuntu/Windows CI、RustSec、SBOM、Windows/macOS candidate 检查通过，保持 open。
-- [ ] PR #115：修正认证/授权文档漂移，核对 Unreleased 目标版本与现场限制；完成本机文档和软件回归后创建，保持 open。
+- [x] PR #115：修正认证/授权文档漂移，核对 Unreleased 目标版本与现场限制；本机全面验证通过，PR 已创建并保持 open，远端 CI/candidate 以 PR checks 跟踪。
 - [ ] 本地浏览器 mock 的首管理员/普通用户工作流：服务已运行；首次设置凭据和创建测试用户由维护者在本地页面完成，不共享密码。
 
 ## 现场输入与验收

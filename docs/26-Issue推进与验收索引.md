@@ -23,6 +23,7 @@
 | 15 | [#112](https://github.com/kevinalliswell/TMH-LPF-900/pull/112) → #111分支 | 用户关闭来源及操作者归属 |
 | 16 | [#113](https://github.com/kevinalliswell/TMH-LPF-900/pull/113) → #112分支 | Rust/TypeScript IPC DTO 单一映射 |
 | 17 | [#114](https://github.com/kevinalliswell/TMH-LPF-900/pull/114) → #113分支 | 普通用户界面授权可见性回归 |
+| 18 | [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) → #114分支 | #48 认证/权限、版本与现场验收文档校正 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -218,3 +219,5 @@ PR #113：`https://github.com/kevinalliswell/TMH-LPF-900/pull/113`，基于PR #1
 本机验证运行于 macOS arm64、Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`（代码基线为 PR #114 head `1c378ddfa18f2a06405e51831563eb623cf2f0b1`）：前端 Vitest 29 个文件、102项通过；脚本测试27项通过；Rust普通和candidate工作区各460项通过、各1项既有忽略。`pnpm typecheck/lint/build`、IPC契约与生成类型、Tauri安全、版本同步、生产依赖审计、`cargo fmt`、普通/candidate clippy、serial feature 编译、dirty replay及300模拟秒/300行mock soak均通过。RustSec以官方数据库当前提交 `3279c99911354c400e1d41e47c7d60e39258b147` 扫描通过：1项精确版本的临时glib unsound例外、9项未维护警告；未据此宣称零风险。Replay按夹具预期记录2条解析错误和1次超时，soak成功生成300行。
 
 上述均为软件和文档门禁；它们不能替代真实设备协议、同批样品、长周期实验、Windows现场升级回滚及签名验收。目标包仍显示源码版本0.2.0，本批未打tag、未发布、未合并。
+
+PR [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) 已开放并以 PR #114 分支为 base；本机验证通过，远端 CI/candidate 按该 PR 的实时 checks 跟踪。
