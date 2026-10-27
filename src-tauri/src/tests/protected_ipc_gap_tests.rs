@@ -58,6 +58,15 @@ fn prepare_mock_flows(state: &AppState) {
             .unwrap();
         assert_eq!(clamp.applied, 1.0);
     }
+    wait_until(|| {
+        state
+            .hub
+            .mfc_rx()
+            .borrow()
+            .gas
+            .iter()
+            .all(|gas| gas.sv == 1.0 && gas.on)
+    });
 }
 
 fn gas_command_state(state: &AppState) -> [(f64, bool); GAS_COUNT] {
@@ -112,7 +121,10 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
                 // denied request is handled. Only command-controlled state must stay
                 // unchanged across an authorization rejection.
                 let after_command_state = gas_command_state(&state);
-                assert_eq!(after_command_state, before_command_state);
+                assert_eq!(
+                    after_command_state, before_command_state,
+                    "{command}/{actor}"
+                );
                 assert_audit(
                     &state,
                     before_audit,

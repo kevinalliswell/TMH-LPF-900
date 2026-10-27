@@ -289,3 +289,5 @@ PR [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124) 以 PR #123 �
 清点当前62个注册命令后，唯一没有命令名字面量测试的是公开元数据 `get_app_info`；其余受保护入口均有测试引用。此清点只证明覆盖入口，不替代真实设备故障注入、厂家协议确认或现场审计复核。
 
 PR [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125) 以 PR #124 分支为 base，保持 open。本机 macOS arm64 验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：前端29个文件/103项、Node脚本28项；Rust普通/candidate工作区均通过，应用库各183项、core各110项，其他协议/集成测试通过且保留1项既有忽略。`fmt`、普通/candidate `clippy`、serial编译、typecheck、lint、build、Tauri安全、IPC契约/类型、版本一致性、生产依赖审计均通过。dirty replay为2条有效解析、2条解析错误和1次超时；逻辑 soak 为300模拟秒/300行，约20.8 ms墙钟时间，非实机耐久试验。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 检查通过，保留1项已评审且限期的 glib 0.18.5 unsound 例外和10项未维护警告，见 docs/27。Vite主JS chunk为1488.15 kB，仍有超过500 kB的既存构建提示。远端CI及candidate安装包状态以该PR最新 checks 为准。
+
+2026-10-28 Windows CI 进一步发现准备 mock 流量时只等待命令 ACK、未等待 watch 快照发布，导致拒绝请求前的基线仍是初始 `SV=0/ON=false`，随后快照更新被误判为越权副作用。`prepare_mock_flows` 现等待四路 `SV=1/ON=true` 全部发布，并为差异断言补充命令/主体上下文；这是测试同步修正，不涉及生产控制或授权逻辑。目标矩阵在 macOS 连续3次通过，普通/candidate Rust全工作区及前端、脚本、构建、安全、IPC、clippy、fmt、serial、replay、soak和依赖门禁复验通过；PR #125 的跨平台 CI/candidate 按最新提交重跑。
