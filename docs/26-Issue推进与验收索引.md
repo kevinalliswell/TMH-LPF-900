@@ -34,7 +34,7 @@
 | 26 | [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125) → #124 | #41/#45 剩余受保护命令真实 IPC 六主体矩阵与读取审计 |
 | 27 | [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) → #125 | #48 里程碑勾选证据检查与软件 PR 清单同步 |
 | 28 | [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) → #126 | #45/#82 公开 `get_app_info` 匿名真实 IPC 与包名/版本 DTO 回归 |
-| 29 | #128 → #127 | #88 将 CI mock soak 扩展为 24 小时逻辑时间，并核对 86,400 条样本 |
+| 29 | [#128](https://github.com/kevinalliswell/TMH-LPF-900/pull/128) → [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) | #88 将 CI mock soak 扩展为 24 小时逻辑时间，并核对 86,400 条样本 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及mock soak；第29批按#88将CI模拟soak扩至24小时逻辑时间。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -310,4 +310,4 @@ PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) 以 PR #126 �
 
 将普通 CI 的逻辑 mock soak 从5分钟扩展为24小时（86,400个模拟秒），每秒应生成一条样本并经过批量 SQLite 写入；完整行数必须与模拟时长精确相等。此门禁使用逻辑时间快速回放，不等于24小时实机耐久试验，也不替代现场故障恢复验收。
 
-PR #128 以 PR #127 分支为 base，保持 open。macOS arm64 全面验证通过：前端29个文件/103项、Node脚本31项；普通/candidate Rust工作区应用库各184项、core各110项及协议/集成测试；typecheck、lint、build、IPC/安全/版本、生产依赖审计、RustSec、普通/candidate clippy、fmt、serial、dirty replay、actionlint及24小时逻辑 soak均通过。24小时模拟写入86,400/86,400行，约3.9秒墙钟时间；不是实机耐久试验。RustSec保留到期日为2026-11-20的glib 0.18.5临时例外和10项未维护警告，Vite主JS chunk仍有1488.15 kB既存体积提示。远端 CI/candidate 以 PR 最新head检查为准。
+PR [#128](https://github.com/kevinalliswell/TMH-LPF-900/pull/128) 以 PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) 分支为 base，保持 open。macOS arm64 全面验证通过：前端29个文件/103项、Node脚本31项；普通/candidate Rust工作区应用库各184项、core各110项及协议/集成测试；typecheck、lint、build、IPC/安全/版本、生产依赖审计、RustSec、普通/candidate clippy、fmt、serial、dirty replay、actionlint及24小时逻辑 soak均通过。24小时模拟写入86,400/86,400行，约3.9秒墙钟时间；不是实机耐久试验。RustSec保留到期日为2026-11-20的glib 0.18.5临时例外和10项未维护警告，Vite主JS chunk仍有1488.15 kB既存体积提示。远端 CI/candidate 以 PR 最新head检查为准。

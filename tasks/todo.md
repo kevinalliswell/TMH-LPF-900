@@ -19,7 +19,7 @@
 - [ ] 本地浏览器 mock 的首管理员/普通用户工作流：服务已运行；首次设置凭据和创建测试用户由维护者在本地页面完成，不共享密码。
 - [x] PR [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126)：为 `docs/10` 勾选项加非空验收证据 CI 门禁，并同步批次跟踪；本机全面门禁通过，跨平台 CI/candidate 检查运行中，保持 open。
 - [x] PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127)：为公开 `get_app_info` 增加匿名真实 IPC 回归，精确核对包名和 Cargo 版本；本机全面验证通过，远端检查随最新 head 跟踪，保持 open。
-- [x] PR #128：按 #88 将 CI mock soak 扩展至24小时逻辑时间（86,400条样本）；本机全面门禁通过，远端 CI/candidate 检查待运行，保持 open。
+- [x] PR [#128](https://github.com/kevinalliswell/TMH-LPF-900/pull/128)：按 #88 将 CI mock soak 扩展至24小时逻辑时间（86,400条样本）；本机全面门禁通过，远端 CI/candidate 检查运行中，保持 open。
 
 ## 现场输入与验收
 
