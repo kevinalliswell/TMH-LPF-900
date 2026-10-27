@@ -24,6 +24,7 @@
 | 16 | [#113](https://github.com/kevinalliswell/TMH-LPF-900/pull/113) → #112分支 | Rust/TypeScript IPC DTO 单一映射 |
 | 17 | [#114](https://github.com/kevinalliswell/TMH-LPF-900/pull/114) → #113分支 | 普通用户界面授权可见性回归 |
 | 18 | [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) → #114分支 | #48 认证/权限、版本与现场验收文档校正 |
+| 19 | [#116](https://github.com/kevinalliswell/TMH-LPF-900/pull/116) → #115分支 | #45/#83 账户管理、首启与认证生命周期真实 IPC 回归 |
 
 每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
@@ -227,3 +228,5 @@ PR [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) 已开放并�
 为 #45/#83 补齐实际 Tauri invoke 边界回归：管理员用户列表及创建、更新、重置临时密码命令覆盖匿名、普通 owner、其他普通用户、管理员、锁定和待改密六种状态；账户变更拒绝返回稳定错误 DTO、审计一次且数据不变。另通过真实 IPC 覆盖首次管理员创建、重复初始化拒绝、登录成功/失败、登出、密码修改及认证状态 DTO；确认公开用户 DTO 和审计不泄露密码或哈希。`get_auth_state` 仅将 AppHandle 泛型化以支持 MockRuntime 测试，不改变生产运行时逻辑。
 
 本机最终验证运行于 macOS arm64、Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`，PR #115 head `040ce88793ff1a498534b5580748217d8799e198` 为基线：前端102项、脚本27项；Rust普通/candidate各462项通过、各1项既有忽略。类型/lint/build、IPC契约与生成类型、Tauri安全、版本同步、生产依赖审计、RustSec、fmt、两种clippy、serial编译、dirty replay及300模拟秒/300行mock soak全部通过。该批仅增加测试与测试可注入性，不改变设备动作、权限策略或实验/分析结果。
+
+PR [#116](https://github.com/kevinalliswell/TMH-LPF-900/pull/116) 已开放，以 PR #115 分支为 base；本机全量验证通过，跨平台 CI/candidate 以该 PR 最新 head checks 为准。
