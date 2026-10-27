@@ -2060,7 +2060,10 @@ async fn tare_balance<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<Tar
 }
 
 #[tauri::command]
-fn subscribe_telemetry(app: AppHandle, channel: Channel<TelemetrySnapshot>) -> CommandResult<()> {
+fn subscribe_telemetry<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    channel: Channel<TelemetrySnapshot>,
+) -> CommandResult<()> {
     let st = app.state::<AppState>();
     current_user(&st)?;
     let temp_rx = st.hub.temp_rx();
@@ -2333,8 +2336,8 @@ fn generate_sample_id(
     program_id: String,
     experiment_time: String,
 ) -> CommandResult<String> {
-    let program = program_by_id(&state, &program_id)?;
     let user = current_user(&state)?;
+    let program = program_by_id(&state, &program_id)?;
     let rows = visible_rows(&lock(&state.storage), &user)?;
     Ok(next_sample_id(&program, &experiment_time, &rows))
 }
@@ -2344,9 +2347,9 @@ fn get_experiment_start_defaults(
     state: State<AppState>,
     program_id: String,
 ) -> CommandResult<ExperimentStartDefaults> {
+    let user = current_user(&state)?;
     let program = program_by_id(&state, &program_id)?;
     let now = iso_now();
-    let user = current_user(&state)?;
     let rows = visible_rows(&lock(&state.storage), &user)?;
     let latest = rows.first().cloned();
     let balance = state.hub.balance_rx().borrow().clone();
@@ -3189,7 +3192,7 @@ impl UpdateCheck {
 }
 
 #[tauri::command]
-fn get_updater_status(app: AppHandle) -> CommandResult<UpdateCheck> {
+fn get_updater_status<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<UpdateCheck> {
     current_user(&app.state::<AppState>())?;
     let enabled = app.state::<AppState>().updater_enabled;
     Ok(UpdateCheck::base(
@@ -3732,6 +3735,7 @@ mod tests {
     mod export_audit_tests;
     mod gas_authorization_tests;
     mod group_tests;
+    mod read_only_authorization_tests;
     mod recovery_lifecycle_tests;
     mod startup_tests;
     mod storage_fault_tests;
