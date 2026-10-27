@@ -35,7 +35,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | Issue | 当前实现/证据 | 尚需完成 |
 |---|---|---|
 | #19 | 配置不回退已在main；#99严格拒绝模式、启动错误可见、requested/effective | 真实三串口组合根与握手；显式三总线replay会话；厂家协议/现场记录 |
-| #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归 | 命令逐项拒绝审计和全面授权矩阵需继续复核；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
+| #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归；#116补剩余受保护读取/遥测命令六状态IPC矩阵，并验证方案参数查询先认证 | 真实设备故障注入和同批样品科学结果比对；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
 | #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
 | #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
