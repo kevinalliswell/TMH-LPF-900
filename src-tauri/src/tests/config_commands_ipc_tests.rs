@@ -11,7 +11,11 @@ fn config_fixture() -> tauri::App<MockRuntime> {
     seed_users_and_experiments(&state);
     mock_builder()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![get_comm_config, save_comm_config])
+        .invoke_handler(tauri::generate_handler![
+            get_comm_config,
+            save_comm_config,
+            restart_for_config
+        ])
         .build(mock_context(noop_assets()))
         .unwrap()
 }
@@ -172,4 +176,42 @@ fn save_comm_config_enforces_authorization_validation_lifecycle_and_audit_over_i
         "管理员",
         Some("EXPERIMENT_RUNNING"),
     );
+}
+
+#[test]
+fn restart_for_config_enforces_all_six_session_states_through_real_ipc() {
+    let app = config_fixture();
+    let state = app.state::<AppState>();
+    let view = webview(&app);
+
+    for (actor, operator, code) in ACTORS {
+        select_actor(&state, actor);
+        let before = command_audit(&state, "restart_for_config").len();
+        let expected_code = match actor {
+            "owner" | "other" => "FORBIDDEN",
+            "admin" => "CONFIG_CONFLICT",
+            _ => code.expect("denied actor has an authentication error"),
+        };
+        assert_error(
+            invoke(
+                &view,
+                "restart_for_config",
+                json!({ "expected_revision": "stale-revision" }),
+            ),
+            expected_code,
+        );
+        assert_audit(
+            &state,
+            before,
+            "CONFIG",
+            "restart_for_config",
+            "REJECTED",
+            operator,
+            Some(expected_code),
+        );
+        assert!(
+            !state.exp.updating.load(Ordering::SeqCst),
+            "a refused restart must release its lifecycle lease"
+        );
+    }
 }

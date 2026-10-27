@@ -1567,7 +1567,10 @@ fn save_comm_config(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn restart_for_config(app: AppHandle, expected_revision: String) -> CommandResult<()> {
+async fn restart_for_config<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    expected_revision: String,
+) -> CommandResult<()> {
     let state = app.state::<AppState>();
     let lease = config_commands::prepare_restart(&state, &expected_revision).await?;
     emit_experiment_status(&app, &state.exp.snapshot());
