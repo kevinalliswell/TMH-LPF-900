@@ -79,14 +79,29 @@ pub(super) fn save(state: &AppState, mut program: Program, reason: &str) -> Comm
     )
 }
 
-pub(super) fn history(state: &AppState, id: &str) -> Result<Vec<Program>, String> {
-    current_user(state)?;
-    lock(&state.storage)
-        .custom_program_revisions(id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
-        .collect()
+pub(super) fn history(state: &AppState, id: &str) -> CommandResult<Vec<Program>> {
+    let (operator, authorization) = command_audit::authorize(state, UserRole::User);
+    let outcome = (|| {
+        authorization?;
+        let revisions = lock(&state.storage)
+            .custom_program_revisions(id)
+            .map_err(|_| CommandError::from("STORAGE_ERROR"))?;
+        revisions
+            .into_iter()
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|_| CommandError::new("PROGRAM_DATA_INVALID", "已保存模式版本损坏"))
+            })
+            .collect()
+    })();
+    command_audit::finish(
+        state,
+        Category::Config,
+        "list_custom_program_revisions",
+        operator,
+        serde_json::json!({"id":id}),
+        outcome,
+    )
 }
 
 pub(super) fn delete(state: &AppState, id: &str) -> CommandResult<()> {
