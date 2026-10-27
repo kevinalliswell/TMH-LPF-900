@@ -35,7 +35,7 @@ macOS universal使用`macos-universal`。源码有未提交修改时可以生成
 
 随后复制源码SBOM、CHANGELOG、部署说明、版本治理、issue证据索引、依赖安全基线和本校验说明；生成全资产manifest和SHA256SUMS，再上传至同一草稿。上传前再次检查草稿状态。重复执行不会调用发布操作；source SBOM artifact允许同run重建以支持重跑，最终inventory按run/attempt另存失败或成功证据。临时artifact保留30天，真正发版时需保留草稿资产和对应CI的长期归档。
 
-此步骤核对签名文件与清单的一致性，**不宣称已完成密码学验证、Authenticode、Apple公证或实际更新**。私有草稿的URL也不证明匿名生产分发可用；公开更新托管、密钥保管、离线安装、升级/回滚和真机验收仍按docs/09、12、26完成。清单内明确保存这些限制。
+此步骤核对签名文件与清单的一致性，**不宣称已完成密码学验证、Authenticode、Apple公证或实际更新**。GitHub Draft Release 对匿名客户端不可见；只有已发布资产才可作为公开 updater 端点。公开更新托管、密钥保管、离线安装、升级/回滚和真机验收仍按docs/09、12、26完成。清单内明确保存这些限制。
 
 下载后可在交付目录使用`sha256sum --check SHA256SUMS.txt`或macOS的`shasum -a 256 --check SHA256SUMS.txt`核对所有字节。摘要用于完整性核对，不替代发布者签名和可信分发来源。
 

@@ -28,7 +28,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/kevinalliswell/TMH-LPF-900-releases/releases/latest/download/latest.json"
+        "https://github.com/kevinalliswell/TMH-LPF-900/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxOUM0Njg3RTU4RDkzNDMKUldSRGs0M2xoMGFjVVVMMmNDMStzaGxlaEs2QTFzU3lhb052MkpoSXFhOVVEdmloaG5YbFlxNUMK",
       "windows": {
