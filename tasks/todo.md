@@ -15,7 +15,7 @@
 - [x] PR [#122](https://github.com/kevinalliswell/TMH-LPF-900/pull/122)：登录失败与账户锁定审计回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
 - [x] PR [#123](https://github.com/kevinalliswell/TMH-LPF-900/pull/123)：通讯配置 IPC 六主体矩阵与审计回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
 - [x] PR [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124)：配置保护重启入口 IPC 六状态回归；本机全量门禁及远端 CI/candidate 检查通过，保持 open。
-- [x] PR [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125)：剩余受保护 IPC 六主体矩阵；远端首轮发现 mock MFC 快照发布竞态，已由提交 `5dc56c2`/`5d7ed41` 修正；普通/candidate 全工作区本机复测通过，最新 CI/candidate 检查运行中，保持 open。
+- [x] PR [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125)：剩余受保护 IPC 六主体矩阵；跨平台检查发现三处测试快照时序问题，已由 `5dc56c2`/`5d7ed41`/`4b3436d` 修正；普通/candidate 全工作区本机复测通过，最新 CI/candidate 检查运行中，保持 open。
 - [ ] 本地浏览器 mock 的首管理员/普通用户工作流：服务已运行；首次设置凭据和创建测试用户由维护者在本地页面完成，不共享密码。
 
 ## 现场输入与验收
