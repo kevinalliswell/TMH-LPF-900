@@ -87,7 +87,7 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
 
         for (actor, operator, actor_code) in ACTORS {
             select_actor(&state, actor);
-            let before_gas = state.hub.mfc_rx().borrow().gas;
+            let before_command_state = state.hub.mfc_rx().borrow().gas.map(|gas| (gas.sv, gas.on));
             let before_audit = command_audit(&state, audit_action).len();
             let result = invoke_with_body(&view, command, gas_body(command));
             let code = if matches!(actor, "owner" | "admin") {
@@ -104,8 +104,12 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
                     Ok(value) => panic!("{command}/{actor} unexpectedly succeeded: {value}"),
                 };
                 assert_eq!(error["code"], code, "{command}/{actor}");
-                wait_until(|| state.hub.mfc_rx().borrow().gas == before_gas);
-                assert_eq!(state.hub.mfc_rx().borrow().gas, before_gas);
+                // Mock PV is live telemetry and can keep moving toward SV while the
+                // denied request is handled. Only command-controlled state must stay
+                // unchanged across an authorization rejection.
+                let after_command_state =
+                    state.hub.mfc_rx().borrow().gas.map(|gas| (gas.sv, gas.on));
+                assert_eq!(after_command_state, before_command_state);
                 assert_audit(
                     &state,
                     before_audit,
