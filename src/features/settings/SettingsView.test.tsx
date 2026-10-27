@@ -31,10 +31,24 @@ it("saves the sampling alias with a revision and reason and shows pending rather
   fireEvent.change(await screen.findByLabelText("实验采样间隔 (s)"), {target: {value: "2"}});
   fireEvent.change(screen.getByLabelText("修改原因"), {target: {value: "模拟验收调整采样"}});
   fireEvent.click(screen.getByRole("button", {name: "保存配置"}));
+  expect(await screen.findByRole("group", {name: "确认通讯配置变更"})).toBeTruthy();
+  expect(ipc.saveCommConfig).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name: "确认保存配置"}));
   await waitFor(() => expect(ipc.saveCommConfig).toHaveBeenCalledWith("r1", expect.objectContaining({SAMPLING: {interval_s: 2}, PERFORMANCE_CONFIG: expect.objectContaining({experiment_data_interval: 2})}), "模拟验收调整采样"));
   expect(await screen.findByText(/已保存，重启后生效/)).toBeTruthy();
   expect(screen.getByText(/当前实验采样：1 s/)).toBeTruthy();
   expect(ipc.restartForConfig).not.toHaveBeenCalled();
+});
+
+it("lets an administrator cancel the second save confirmation without writing the config", async () => {
+  render(<SettingsView />);
+  fireEvent.change(await screen.findByLabelText("实验采样间隔 (s)"), {target: {value: "2"}});
+  fireEvent.change(screen.getByLabelText("修改原因"), {target: {value: "现场参数校正"}});
+  fireEvent.click(screen.getByRole("button", {name: "保存配置"}));
+  expect(await screen.findByRole("group", {name: "确认通讯配置变更"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name: "取消保存"}));
+  expect(screen.queryByRole("group", {name: "确认通讯配置变更"})).toBeNull();
+  expect(ipc.saveCommConfig).not.toHaveBeenCalled();
 });
 
 it("refreshes the saved state after an ambiguous write failure and preserves the error", async () => {
@@ -46,6 +60,8 @@ it("refreshes the saved state after an ambiguous write failure and preserves the
   fireEvent.change(await screen.findByLabelText("实验采样间隔 (s)"), {target: {value: "2"}});
   fireEvent.change(screen.getByLabelText("修改原因"), {target: {value: "模拟验收"}});
   fireEvent.click(screen.getByRole("button", {name: "保存配置"}));
+  await screen.findByRole("group", {name: "确认通讯配置变更"});
+  fireEvent.click(screen.getByRole("button", {name: "确认保存配置"}));
   expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("同步未确认"));
   expect(await screen.findByText(/已保存，重启后生效/)).toBeTruthy();
   expect(ipc.restartForConfig).not.toHaveBeenCalled();

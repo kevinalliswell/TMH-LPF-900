@@ -18,6 +18,7 @@ export function SettingsView() {
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirmSave, setConfirmSave] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
   const mounted = useRef(true);
   const admin = useAuth((state) => state.snapshot?.user?.role === "ADMIN");
@@ -38,10 +39,15 @@ export function SettingsView() {
     return () => useNav.getState().setLeaveBlockReason(null);
   }, [busy, dirty]);
 
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!snapshot || !draft || !admin || blocked || busy || !dirty) return;
+    setConfirmSave(true);
+  };
+  const save = async () => {
+    if (!snapshot || !draft || !admin || blocked || busy || !dirty || !confirmSave) return;
     setBusy(true); setError(""); setConfirmRestart(false);
+    setConfirmSave(false);
     try {
       const result = await saveCommConfig(snapshot.revision, draft, reason.trim());
       if (mounted.current) { adopt(result); setReason(""); }
@@ -79,7 +85,7 @@ export function SettingsView() {
         {blocked && <p className="mt-2">实验、数据保存或应用更新进行中，暂不能修改配置或重启。</p>}
       </div>
       <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-4">
-        <fieldset disabled={!admin || Boolean(blocked) || busy} className="flex flex-col gap-4 disabled:opacity-70">
+        <fieldset disabled={!admin || Boolean(blocked) || busy || confirmSave} className="flex flex-col gap-4 disabled:opacity-70">
           <legend className="text-sm mb-3">已保存配置（修改后请保存）</legend>
           {buses.map(([key, title]) => <div className="panel p-4" key={key}>
             <SectionTitle>{title}</SectionTitle>
@@ -123,6 +129,15 @@ export function SettingsView() {
         </fieldset>
         <button type="button" className={`${buttonClass} self-start`} disabled={!dirty || busy} onClick={() => { setDraft(structuredClone(snapshot.saved)); setReason(""); setError(""); }}>撤销未保存修改</button>
       </form>
+      {confirmSave && <div role="group" aria-labelledby="config-save-confirm-title" className="panel p-4 text-sm">
+        <SectionTitle><span id="config-save-confirm-title">确认通讯配置变更</span></SectionTitle>
+        <p>将按所填原因保存当前串口、地址、换算、安全上限和采集节奏。新配置需重启应用后生效，重启前不能开始新实验。</p>
+        <p className="mt-2">修改原因：{reason.trim()}</p>
+        <div className="flex gap-3 mt-3">
+          <button type="button" disabled={busy || Boolean(blocked)} className={buttonClass} onClick={() => void save()}>确认保存配置</button>
+          <button type="button" disabled={busy} className={buttonClass} onClick={() => setConfirmSave(false)}>取消保存</button>
+        </div>
+      </div>}
       {snapshot.restart_required && admin && <div className="panel p-4 text-sm">
         <p>重启前将请求保护气氛并等待设备确认，同时核对配置文件和待保存数据。重启后需要重新登录。</p>
         {confirmRestart ? <div className="flex gap-3 mt-3">
