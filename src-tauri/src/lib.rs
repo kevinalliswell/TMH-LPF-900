@@ -1400,7 +1400,7 @@ struct PublicSafetyStatus {
 // ---- Commands ---------------------------------------------------------------
 
 #[tauri::command]
-fn get_auth_state(app: AppHandle) -> CommandResult<AuthSnapshot> {
+fn get_auth_state<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<AuthSnapshot> {
     let state = app.try_state::<AppState>().ok_or_else(|| {
         app.try_state::<StartupFailure>().map_or_else(
             || CommandError::new("STARTUP_NOT_READY", "应用尚未初始化"),
@@ -3727,6 +3727,7 @@ mod tests {
     mod tare_pending_tests;
     mod template_group_audit_tests;
     mod updater_audit_tests;
+    mod user_management_ipc_tests;
 
     /// A real database and mock hub for domain permission tests. Separate headless
     /// IPC matrices exercise the registered command wrappers, audit and device effects.
