@@ -3727,6 +3727,7 @@ mod tests {
     use tmh_core::auth::UserRole;
     mod analysis_sample_tests;
     mod command_error_tests;
+    mod config_commands_ipc_tests;
     mod device_control_authorization_tests;
     mod device_lifecycle_tests;
     mod exit_audit_tests;
