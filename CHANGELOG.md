@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+> 计划目标版本：`v0.2.1`（未发布）。包含当前安全控制面和认证/RBAC 修复；真实设备集成仍属于 `v0.3.x`。按[版本治理路线](docs/12-版本治理路线.md)，仅在独立发版 PR 中更新包版本和生成正式资产。
+
 - 单次报告、CSV/TXT/XLSX及检验组报告的写入与拒绝/失败均记录操作者和终局结果；拒绝跨用户读取，数据库/报告证据/导出目录错误使用稳定错误码。检验组报告仍读取指定冻结版本，打开器失败不再把已保存报告报成命令失败（#21/#41/#45/#82/#83/#85/#86）。
 
 - 浏览器 mock 与原生命令统一登录、临时密码、运行中 owner/admin 控制和历史隔离要求；运行中拒绝去皮以保护称量基准，普通可燃气切断要求登录而紧急保护停机仍允许匿名触发。补充浏览器权限与数据归属回归（#45/#83）。
@@ -69,13 +71,19 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - 未实现的 real/replay 模式和无效现场配置明确拒绝启动，不再静默生成模拟数据。
 
 ### Known limitations
-- 此批修复面向模拟软件与安装资产测试，尚无真实设备、实际国标实验或完整现场验收。
-- 温控仪参数写入、MFC/天平实际协议与测点映射需以型号手册核对；真实设备/回放的桌面装配尚未完成。通讯配置采用保护确认后的整应用重启，不做总线热替换。
+- 当前修复通过 mock、原生 IPC、自动化及候选包验证，尚无真实设备、实际国标实验或完整现场验收。
+- `#19/#79/#80/#81`：启动边界已 fail closed，但真实温控/MFC/天平传输、回放会话和型号协议映射仍未完成；不得宣称 real-ready。
+- `#28` 的软件恢复设定值语义已有回归；厂家独立 ON/OFF 寄存器结论及真机写入验证仍待型号手册和设备。
+- `#40` 的原生 IPC 参数契约已由 #72 修复并验证；真实样品结果比对仍待 #42/#86 的现场数据。
+- `#43` 的单调时钟和 deadline 软件修复已有测试；实际长周期实验与墙钟误差记录仍待现场验证。
+- `#44` 的配置保存、冲突和保护重启软件边界已有测试；真实端口参数和目标仪器重启后的应用值尚未核验。
 - RDI 和天然铁矿石 RI 的重复性限值需要人工录入并给出依据；自动判断实验室全部外部操作与采购性能不在当前范围。
 - 候选安装包仍显示源码版本 0.2.0，须用提交与哈希区分已发布旧包。没有 Windows 发布者证书或 Apple 公证；不发布到正式更新通道。
 - 浏览器预览不具备原生检验组数据库。桌面模拟、核心测试及构建冒烟均不能代替完整人工操作和实机安全验收。
 
 ## [0.2.0] - 2026-08-31
+
+> 本节记录该 tag 当时的软件范围。后续补充已发现未列出的 v0.2.0 限制；tag 和对应发布资产不变，见下方历史限制及当前 `[Unreleased]` 状态。
 
 ### Security
 - MFC 写命令现在等待并校验设备事务回执；超时、断线、空响应或错误回显不再被审计或提示为成功。
@@ -95,6 +103,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - 本版本仅作为 mock/安全控制面基线；real/replay 仍未完成真实传输与配置 fail-closed 验收（#19），不得宣称真实硬件可用。
 - MFC “ON/全开”在没有可恢复非零设定值时可能确认写入 0（#28）；修复前不得用于真实设备操作。
 - 完整命令边界校验、管理员删除授权和稳定错误 DTO 仍按 #21 的后续路线推进。
+- 原生 Tauri 多词参数 snake_case 契约错误会阻断 bootstrap、用户管理和 GB 分析（#40）；由后续 #72 修复。该缺陷属于此 tag 的历史限制，不能据此认为当前 IPC 仍损坏。
+- tick 计时存在墙钟漂移风险（#43）；单调时钟修复和真实长周期误差验收尚未包含在此 tag。
+- 通讯设置仍只读，配置保存与保护重启未实现（#44）；后续代码实现和目标设备参数验证分别记录在当前 `[Unreleased]` 与验收索引。
 - Windows 安装包尚无 Authenticode；SmartScreen 可能显示“未知发布者”。更新端点仍需部署到匿名可达的公开托管位置。
 
 ### Added
@@ -117,7 +128,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
   sampler (balance-offline rows written with weight=0 + annotation, never dropped);
   `examples/soak` headless fast-forward of the full pipeline (actors → aggregate →
   sample → rusqlite) plus dirty-session replay, wired into CI. M2 core complete.
-- **M3 应用壳 + 综合控制页**: `DeviceHub` runs the bus actors on OS threads and bridges
+- **M3 应用壳 + 综合控制页（实现范围，不代表全部里程碑验收完成）**: `DeviceHub` runs the bus actors on OS threads and bridges
   to tokio (watch snapshots + oneshot-reply commands). src-tauri exposes typed commands
   (set_gas_flow w/ clamp+audit+event, on/off, open/close all, shutoff_flammable, tare,
   start/stop_experiment, device health) + a 0.2 Hz telemetry Channel; single-instance
@@ -127,7 +138,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
   temperature curve (ring buffer, monotonic axis), device-dot status bar. Start/stop
   experiment dialog (M3 manual atmosphere; safety atmosphere N₂=5/flammables=0 on stop),
   error-code→Chinese toast, disconnect greying. Browser mock via `isTauri()` for dev.
-- **M4 实验引擎 + 国标分析 + 报告导出**: `tmh-core::gb` national-standard formulas
+- **M4 实验引擎 + 国标分析 + 报告导出（软件实现范围；方法与现场验收另计）**: `tmh-core::gb` national-standard formulas
   (GB/T 13241 reducibility Rt + reduction-rate index, 13242 RDI, 13240 free-swelling),
   golden-tested (Rt 100/85/30 → 50.0). `tmh-core::engine` phase state machine, the three
   GB program tables, and stage-advancement rules (holds need temp+duration; cooling at
@@ -145,7 +156,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
   实验模式 (program tables), 历史查询 (list + replay chart + GB analysis forms + report/
   export + delete), 通讯设置, 帮助, 关于. Browser mock runs the full stage engine with a
   seeded in-memory history so `pnpm dev:web` is a faithful end-to-end demo.
-- **M5 打包发布 + 软件更新**: NSIS offline installer (embedded WebView2, perMachine).
+- **M5 候选打包与软件更新流水线（不代表离线安装、签名和更新演练已验收）**: NSIS offline installer (embedded WebView2, perMachine).
   `tauri-plugin-updater` + `tauri-plugin-process` with a minisign-signed update channel
   (public key baked into `tauri.conf.json`, `createUpdaterArtifacts` on). Update checking
   is OFF by default (docs/09 §9.3), enabled via `TMH_UPDATER`; gated commands
