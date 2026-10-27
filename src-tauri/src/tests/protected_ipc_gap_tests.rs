@@ -60,6 +60,10 @@ fn prepare_mock_flows(state: &AppState) {
     }
 }
 
+fn gas_command_state(state: &AppState) -> [(f64, bool); GAS_COUNT] {
+    state.hub.mfc_rx().borrow().gas.map(|gas| (gas.sv, gas.on))
+}
+
 fn gas_body(command: &str) -> Value {
     match command {
         "set_gas_on_off" => json!({"gas": 0, "on": true}),
@@ -87,7 +91,7 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
 
         for (actor, operator, actor_code) in ACTORS {
             select_actor(&state, actor);
-            let before_command_state = state.hub.mfc_rx().borrow().gas.map(|gas| (gas.sv, gas.on));
+            let before_command_state = gas_command_state(&state);
             let before_audit = command_audit(&state, audit_action).len();
             let result = invoke_with_body(&view, command, gas_body(command));
             let code = if matches!(actor, "owner" | "admin") {
@@ -107,8 +111,7 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
                 // Mock PV is live telemetry and can keep moving toward SV while the
                 // denied request is handled. Only command-controlled state must stay
                 // unchanged across an authorization rejection.
-                let after_command_state =
-                    state.hub.mfc_rx().borrow().gas.map(|gas| (gas.sv, gas.on));
+                let after_command_state = gas_command_state(&state);
                 assert_eq!(after_command_state, before_command_state);
                 assert_audit(
                     &state,
@@ -121,6 +124,15 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
                 );
             } else {
                 result.unwrap_or_else(|error| panic!("{command}/{actor}: {error}"));
+                wait_until(|| {
+                    let gas = state.hub.mfc_rx().borrow().gas;
+                    match command {
+                        "set_gas_on_off" => gas[0].on,
+                        "open_all_valves" => gas.iter().all(|gas| gas.on),
+                        "close_all_valves" => gas.iter().all(|gas| !gas.on),
+                        _ => unreachable!(),
+                    }
+                });
                 let after_gas = state.hub.mfc_rx().borrow().gas;
                 match command {
                     "set_gas_on_off" => assert!(after_gas[0].on),
@@ -145,6 +157,7 @@ fn gas_valve_ipc_actor_matrix_audits_denials_without_changing_mock_bus_state() {
                         .unwrap()
                         .unwrap();
                 }
+                wait_until(|| state.hub.mfc_rx().borrow().gas.iter().all(|gas| !gas.on));
             }
         }
     }
