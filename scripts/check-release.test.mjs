@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -46,4 +46,11 @@ test("release provenance requires an annotated tag at checkout and main tip", as
 test("build-metadata hyphens do not turn a release into a prerelease", () => {
   assert.equal(isPrerelease("v1.2.3+release-build.1"), false);
   assert.equal(isPrerelease("v1.2.3-rc.1+release-build.1"), true);
+});
+
+test("updater metadata uses the public source repository releases endpoint", async () => {
+  const config = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  assert.deepEqual(config.plugins.updater.endpoints, [
+    "https://github.com/kevinalliswell/TMH-LPF-900/releases/latest/download/latest.json",
+  ]);
 });

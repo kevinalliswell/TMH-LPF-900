@@ -36,7 +36,7 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 |---|---|---|
 | #19 | 配置不回退已在main；#99严格拒绝模式、启动错误可见、requested/effective | 真实三串口组合根与握手；显式三总线replay会话；厂家协议/现场记录 |
 | #21 | main的启动预检、国标输入与类型/管理员删除；#98补错误DTO及真实IPC回归；#116补剩余受保护读取/遥测命令六状态IPC矩阵，并验证方案参数查询先认证 | 真实设备故障注入和同批样品科学结果比对；历史PBKDF2要求已由Argon2id/RBAC规格替代 |
-| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag、main保护与同SHA成功CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
+| #23 | PR#26版本来源/Node24/tag来源；第三批补严格SemVer、annotated tag与同SHA CI门禁；第五批RustSec和依赖修复；第六批SBOM/正式checksum代码；#117按公开仓库实况修正updater地址 | main保护实际启用、glib临时风险到期复查、签名与密钥负责人、正式发布/现场证据 |
 | #28 | main的最后确认非零SV恢复、冷启动拒绝ON、批次部分失败审计；MFC actor与native gas tests | 厂家独立ON/OFF寄存器结论、真实设定/关/开和部分失败验证 |
 | #41 | main的认证/账户拒绝审计、CONFIG/EXPORT类别、操作者快照；auth_audit_tests与config_commands_tests；#111补配置保存拒绝/数据库故障四元组；#112补用户/匿名退出归属 | 继续核查每个命令拒绝/成功四元组；现场审计链复核 |
 | #42 | main的有效还原采样、冻结排除统计与报告；analysis_sample_tests、group_evidence、docs/22 | 实样连续终点数据与允许差异复核。按docs/13/16核对后的RI/RVI规则执行，不恢复旧最小二乘方案；有来源人工补录单独标识 |
@@ -55,12 +55,12 @@ CI默认测试PR合成提交，candidate测试head提交；`verification/context
 | #86 | 冻结检验组、报告与过程证据已实现 | 同批样品数量、允许差异阈值、旧系统原始数据、新旧并行实验及负责人签字 |
 | #87 | 已有Windows NSIS离线候选构建/安装冒烟及macOS universal候选验证 | 目标工控机/驱动/离线部署、备份恢复、证书、升级/回滚演练、现场支持负责人 |
 | #88 | main认证锁定/枚举防护/临时密码表单、存储上限及异常回归；文档已校正 | 长时间现场soak与后续文档状态维护 |
-| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建；第六批SBOM与全资产清单；#110补更新检查/安装命令权限与终局审计 | glib到期复查、签名/公证、密钥轮换与灾备、正式资产/发布/回滚实际演练 |
+| #89 | tag-only release与candidate分离；第三批来源/测试门禁；第五批同源码RustSec审计及锁定构建；第六批SBOM与全资产清单；#110补更新检查/安装命令权限与终局审计；#117去除不存在的独立更新仓库地址，改用公开源仓库 Releases | glib到期复查、签名/公证、密钥轮换与灾备、已安装桌面端更新/回滚实际演练 |
 | #90 | 明确为后续方向池 | v1.0现场通过后，按场景、网络边界和负责人立项，不自动开发 |
 
 ## 仓库策略实况与发布阻断
 
-2026-10-24读取GitHub branches/main API：`protected=false`，main SHA为`d54b75a`。这只是只读核验，未修改仓库策略。正式release要求main已保护且该提交的push CI成功；条件未满足即失败，不能用YAML存在替代实际保护。需按docs/12启用PR、至少一名审批、Ubuntu/Windows required checks、禁止force-push及删除。当前任务不合并或发布任何版本。
+2026-10-24读取GitHub branches/main API：`protected=false`，main SHA为`d54b75a`。2026-10-27确认源码仓库为public，匿名访问本仓库latest.json返回`v0.2.0`；原updater端点指向的`TMH-LPF-900-releases`仓库不存在。PR #117调整端点并修正文档，应用仍默认关闭更新检查，不创建或发布新Release。正式release要求main已保护且该提交的push CI成功；条件未满足即失败，不能用YAML存在替代实际保护。至少一名审批的保护规则目前未启用；已核验只有一位维护者，因此暂不加会阻止单人合并的审批门槛。当前任务不合并或发布任何版本。
 
 ## 外部输入清单
 
@@ -230,3 +230,9 @@ PR [#115](https://github.com/kevinalliswell/TMH-LPF-900/pull/115) 已开放并�
 本机最终验证运行于 macOS arm64、Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`，PR #115 head `040ce88793ff1a498534b5580748217d8799e198` 为基线：前端102项、脚本27项；Rust普通/candidate各467项通过、各1项既有忽略。类型/lint/build、IPC契约与生成类型、Tauri安全、版本同步、生产依赖审计、RustSec、fmt、两种clippy、serial编译、dirty replay及300模拟秒/300行mock soak全部通过。该批除身份校验顺序外不改变权限策略或实验/分析结果；匿名紧急停机仍由设备回执决定，MockRuntime 测试不代表真机联锁验收。
 
 PR [#116](https://github.com/kevinalliswell/TMH-LPF-900/pull/116) 已开放，以 PR #115 分支为 base；本机全量验证通过，跨平台 CI/candidate 以该 PR 最新 head checks 为准。
+
+## 第二十批公开仓库 updater 端点与发布文档校正（#23/#89，2026-10-27）
+
+仓库 owner 已将源码仓库设为 public。匿名请求读取 `https://github.com/kevinalliswell/TMH-LPF-900/releases/latest/download/latest.json` 成功，返回已发布 `v0.2.0` 清单；旧配置中的 `TMH-LPF-900-releases` 仓库由 GitHub API 返回404。修改 updater 端点指向可达的公开 Releases，并同步 CHANGELOG、docs/01、09、11、28 与本索引。已发布 `v0.2.0` 包仍保存旧地址，必须手动安装包含修复的后续版本才能恢复应用内更新；既有tag/资产不覆盖。更新检查仍默认关闭；本批不创建版本、不发布资产、不声称已通过安装端到端更新/回滚。
+
+PR [#117](https://github.com/kevinalliswell/TMH-LPF-900/pull/117) 以 PR #116 为 base，保持 open；测试和远端构建状态以该 PR 最新 head 为准。
