@@ -34,8 +34,9 @@
 | 26 | [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125) → #124 | #41/#45 剩余受保护命令真实 IPC 六主体矩阵与读取审计 |
 | 27 | [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) → #125 | #48 里程碑勾选证据检查与软件 PR 清单同步 |
 | 28 | [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) → #126 | #45/#82 公开 `get_app_info` 匿名真实 IPC 与包名/版本 DTO 回归 |
+| 29 | [#128](https://github.com/kevinalliswell/TMH-LPF-900/pull/128) → [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) | #88 将 CI mock soak 扩展为 24 小时逻辑时间，并核对 86,400 条样本 |
 
-每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及5分钟mock soak。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
+每批均执行fmt/clippy、Rust普通/candidate工作区、前端typecheck/lint/test/build、IPC/安全/版本门禁、生产依赖审计、serial编译、dirty replay及mock soak；第29批按#88将CI模拟soak扩至24小时逻辑时间。第三批另执行脚本回归与actionlint。自动日志按GitHub run保留30天，需长期归档的正式/现场证据应移入发布资产或实验室档案。
 
 CI默认测试PR合成提交，candidate测试head提交；`verification/context.json`保留实际源码SHA、父提交、版本、工具链和平台，不能把两者混为同一提交。candidate验证产物manifest仍独立记录安装包SHA。程序不会在普通CI触碰真实串口。
 
@@ -292,15 +293,21 @@ PR [#124](https://github.com/kevinalliswell/TMH-LPF-900/pull/124) 以 PR #123 �
 
 PR [#125](https://github.com/kevinalliswell/TMH-LPF-900/pull/125) 以 PR #124 分支为 base，保持 open。本机 macOS arm64 验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：前端29个文件/103项、Node脚本28项；Rust普通/candidate工作区均通过，应用库各183项、core各110项，其他协议/集成测试通过且保留1项既有忽略。`fmt`、普通/candidate `clippy`、serial编译、typecheck、lint、build、Tauri安全、IPC契约/类型、版本一致性、生产依赖审计均通过。dirty replay为2条有效解析、2条解析错误和1次超时；逻辑 soak 为300模拟秒/300行，约20.8 ms墙钟时间，非实机耐久试验。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 检查通过，保留1项已评审且限期的 glib 0.18.5 unsound 例外和10项未维护警告，见 docs/27。Vite主JS chunk为1488.15 kB，仍有超过500 kB的既存构建提示。远端CI及candidate安装包状态以该PR最新 checks 为准。
 
-2026-10-28 跨平台 CI 先后暴露三处测试快照时序假设：mock PV 会随设定值变化；控制命令 ACK 可能先于 watch 快照；准备流量时的 ACK 也可能早于四路快照发布。提交 `5dc56c2` 只比较命令态 SV/ON，`5d7ed41` 在授权控制和复位后等待命令态快照，`4b3436d` 在矩阵开始前等待四路 `SV=1/ON=true` 全部发布，并为差异断言增加命令/主体上下文。这些均为测试同步修正，没有改生产控制或授权逻辑。目标 IPC 用例在 macOS 连续3次通过；普通/candidate Rust全工作区及前端、脚本、构建、安全、IPC、clippy、fmt、serial、replay、soak和依赖门禁复验通过；PR #125 的跨平台 CI/candidate 正按最新提交重跑。
+2026-10-28 跨平台 CI 先后暴露三处测试快照时序假设：mock PV 会随设定值变化；控制命令 ACK 可能先于 watch 快照；准备流量时的 ACK 也可能早于四路快照发布。提交 `5dc56c2` 只比较命令态 SV/ON，`5d7ed41` 在授权控制和复位后等待命令态快照，`4b3436d` 在矩阵开始前等待四路 `SV=1/ON=true` 全部发布，并为差异断言增加命令/主体上下文。这些均为测试同步修正，没有改生产控制或授权逻辑。目标 IPC 用例在 macOS 连续3次通过；普通/candidate Rust全工作区及前端、脚本、构建、安全、IPC、clippy、fmt、serial、replay、soak和依赖门禁复验通过；PR #125 最新跨平台 CI/candidate 检查全部通过。
 ## 第二十七批里程碑证据引用 CI 门禁（#48，2026-10-27）
 
 在 `docs/10` 中约定已勾选验收项必须在同一行写入非空 `（验收证据：...）` 引用，并由评审人核对引用是否支持结论。新增的轻量检查进入已有 `pnpm test:scripts`，因此 CI 与 candidate workflow 无需增加重复步骤；回归覆盖当前清单、缺失/空引用拒绝、有效引用及未勾选条目。当前没有勾选任何 M0–M5 或硬件验收项，不以代码测试冒充阶段/现场完成。`tasks/todo.md` 已加入 PR #121–#125，并注明各 PR 保持开放及最新验证状态。
 
-PR [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) 以 PR #125 为 base，保持 open。macOS arm64 本机完整验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：Node脚本31项、前端29个文件/103项；普通与candidate Rust全工作区测试均通过（应用库183、core 110及协议/集成测试），普通/candidate clippy、fmt、serial feature编译、typecheck、lint、production build、Tauri安全、IPC参数契约/生成DTO、版本一致性、crate依赖方向、生产依赖审计均通过。dirty replay为2条有效解析、2条解析错误和1次超时；300模拟秒生成300行。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 策略通过，仍保留1项到期日为2026-11-20的glib 0.18.5临时例外及10项未维护警告，见 docs/27。Vite主JS chunk仍为1488.15 kB并显示既有体积提示。上述验证不涉及真实串口、样品或现场试验；2026-10-28 #125 又发现并修复准备流量 ACK 与快照发布之间的第三处测试竞态，PR #126 已重基到 `4b3436d`，跨平台 CI/candidate 正按最新 head 运行。
+PR [#126](https://github.com/kevinalliswell/TMH-LPF-900/pull/126) 以 PR #125 为 base，保持 open。macOS arm64 本机完整验证（Node `v26.5.0`、pnpm `11.10.0`、Rust `1.95.0`）：Node脚本31项、前端29个文件/103项；普通与candidate Rust全工作区测试均通过（应用库183、core 110及协议/集成测试），普通/candidate clippy、fmt、serial feature编译、typecheck、lint、production build、Tauri安全、IPC参数契约/生成DTO、版本一致性、crate依赖方向、生产依赖审计均通过。dirty replay为2条有效解析、2条解析错误和1次超时；300模拟秒生成300行。RustSec官方数据库 `3279c99911354c400e1d41e47c7d60e39258b147` 策略通过，仍保留1项到期日为2026-11-20的glib 0.18.5临时例外及10项未维护警告，见 docs/27。Vite主JS chunk仍为1488.15 kB并显示既有体积提示。上述验证不涉及真实串口、样品或现场试验；2026-10-28 #125 又发现并修复准备流量 ACK 与快照发布之间的第三处测试竞态，PR #126 已重基到 `4b3436d`，其最新跨平台 CI/candidate 检查全部通过。
 
 ## 第二十八批公开应用元数据 IPC 回归（#45/#82，2026-10-28）
 
 为 `get_app_info` 注册真实 Tauri MockRuntime invoke 用例，在匿名会话下确认公开元数据命令可用，并精确核对包名和由 `CARGO_PKG_VERSION` 提供的版本。命令本身没有权限或业务行为变化；本批补齐命令清点中最后一项尚未进入 IPC 测试的入口。
 
 PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) 以 PR #126 分支为 base，保持 open。macOS arm64 全面验证：Rust普通/candidate工作区应用库各184项、core各110项及协议/集成测试通过；新增匿名 IPC 用例通过；前端29个文件/103项、脚本31项、typecheck、lint、production build、Tauri安全、IPC参数契约/生成DTO、版本一致性、生产依赖审计、普通/candidate clippy、fmt、serial编译、dirty replay及300模拟秒/300行mock soak均通过。dirty replay为2条有效解析、2条解析错误、1次超时。RustSec官方数据库策略通过，保留1项到期日为2026-11-20的glib 0.18.5临时例外及10项未维护警告，见docs/27。Vite主JS chunk仍为1488.15 kB并显示既有体积提示。远端跨平台 CI/candidate 以各PR最新head checks为准。
+
+## 第二十九批 #88 模拟长时样本持久化门禁（2026-10-28）
+
+将普通 CI 的逻辑 mock soak 从5分钟扩展为24小时（86,400个模拟秒），每秒应生成一条样本并经过批量 SQLite 写入；完整行数必须与模拟时长精确相等。此门禁使用逻辑时间快速回放，不等于24小时实机耐久试验，也不替代现场故障恢复验收。
+
+PR [#128](https://github.com/kevinalliswell/TMH-LPF-900/pull/128) 以 PR [#127](https://github.com/kevinalliswell/TMH-LPF-900/pull/127) 分支为 base，保持 open。macOS arm64 全面验证通过：前端29个文件/103项、Node脚本31项；普通/candidate Rust工作区应用库各184项、core各110项及协议/集成测试；typecheck、lint、build、IPC/安全/版本、生产依赖审计、RustSec、普通/candidate clippy、fmt、serial、dirty replay、actionlint及24小时逻辑 soak均通过。24小时模拟写入86,400/86,400行，约3.9秒墙钟时间；不是实机耐久试验。RustSec保留到期日为2026-11-20的glib 0.18.5临时例外和10项未维护警告，Vite主JS chunk仍有1488.15 kB既存体积提示。远端 CI/candidate 以 PR 最新head检查为准。
